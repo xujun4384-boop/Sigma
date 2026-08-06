@@ -1,0 +1,45 @@
+# Sigma runtime data
+.sigma/
+.sigma2.0/
+logs/
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+
+# Python
+*.egg-info/
+.venv/
+venv/
+
+# IDE
+.idea/
+.vscode/
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Electron user data (contains localStorage with API keys)
+.electron-user-data/
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+page_*.ppage
+_dump_*.py
+_inspect_*.txt
+_panel_*.txt

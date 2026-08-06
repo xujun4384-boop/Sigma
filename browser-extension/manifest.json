@@ -1,0 +1,47 @@
+{
+  "manifest_version": 3,
+  "name": "Sigma Browser Controller",
+  "version": "1.0.0",
+  "description": "让 Sigma 通过 WebSocket 控制浏览器：获取页面内容、点击元素、填写输入框等",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "tabs",
+    "storage",
+    "alarms",
+    "debugger",
+    "sidePanel",
+    "bookmarks"
+  ],
+  "host_permissions": [
+    "<all_urls>",
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "ws://127.0.0.1/*",
+    "ws://localhost/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src 'self' http://127.0.0.1:8765 http://localhost:8765 ws://127.0.0.1:8765 ws://localhost:8765"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "side_panel": {
+    "default_path": "panel.html"
+  },
+  "action": {
+    "default_title": "Sigma Browser Controller"
+  }
+}

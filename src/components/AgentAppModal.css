@@ -1,0 +1,98 @@
+.agent-app-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(2px);
+  z-index: 1000;
+  animation: agentAppFadeIn 0.15s ease-out;
+}
+
+@keyframes agentAppFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.agent-app-modal {
+  position: absolute;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: agentAppSlideUp 0.18s ease-out;
+}
+
+@keyframes agentAppSlideUp {
+  from { transform: translateY(12px); opacity: 0; }
+  to { transform: translateY(0); opacity: 1; }
+}
+
+.agent-app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+  cursor: move;
+  user-select: none;
+}
+
+.agent-app-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.agent-app-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-app-btn {
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+}
+
+.agent-app-btn:hover {
+  background: var(--overlay-active);
+  color: var(--text-primary);
+}
+
+.agent-app-frame {
+  flex: 1;
+  width: 100%;
+  border: none;
+  background: #fff;
+}
+
+/* 右下角缩放手柄 */
+.agent-app-resize-handle {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 20px;
+  height: 20px;
+  cursor: nwse-resize;
+  background:
+    linear-gradient(135deg, transparent 50%, var(--border-color) 50%);
+  border-bottom-right-radius: 12px;
+  opacity: 0.7;
+  transition: opacity 0.15s;
+}
+
+.agent-app-resize-handle:hover {
+  opacity: 1;
+}

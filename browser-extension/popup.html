@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <h1>Sigma 浏览器控制器</h1>
+  <div class="status" id="status">
+    <div class="dot" id="dot"></div>
+    <span id="statusText">未连接</span>
+  </div>
+  <div>WebSocket: ws://localhost:8765/ws/browser</div>
+  <button id="btnReconnect">重新连接</button>
+  <button id="btnTest">发送测试命令（获取标题）</button>
+  <div class="log" id="log"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

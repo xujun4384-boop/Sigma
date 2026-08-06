@@ -1,0 +1,63 @@
+.thinking-animation {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  background: rgba(255, 107, 107, 0.06);
+  border: 1px solid rgba(255, 107, 107, 0.12);
+  border-radius: 8px;
+  overflow: hidden;
+  position: relative;
+}
+
+.thinking-animation::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(255, 107, 107, 0.4), transparent);
+  animation: scanLine 2s ease-in-out infinite;
+}
+
+@keyframes scanLine {
+  0%, 100% { transform: translateX(-100%); }
+  50% { transform: translateX(100%); }
+}
+
+.thinking-cursor {
+  flex-shrink: 0;
+  font-size: 20px;
+  color: #ff6b6b;
+  animation: breathe 2s ease-in-out infinite;
+}
+
+@keyframes breathe {
+  0%, 100% { opacity: 0.4; transform: scale(0.9); }
+  50% { opacity: 1; transform: scale(1.15); }
+}
+
+.thinking-state {
+  font-size: 13px;
+  color: #d1d5db;
+  white-space: nowrap;
+}
+
+.thinking-state.in {
+  animation: slideIn 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.thinking-state.out {
+  animation: slideOut 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes slideIn {
+  from { opacity: 0; transform: translateX(12px); filter: blur(2px); }
+  to { opacity: 1; transform: translateX(0); filter: blur(0); }
+}
+
+@keyframes slideOut {
+  from { opacity: 1; transform: translateX(0); filter: blur(0); }
+  to { opacity: 0; transform: translateX(-12px); filter: blur(2px); }
+}

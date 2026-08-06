@@ -1,0 +1,147 @@
+.sigma-loading {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border-radius: 8px;
+}
+
+/* 淡灰色背景基底 */
+.sigma-loading-bg {
+  position: absolute;
+  inset: 0;
+  background: var(--bg-primary);
+  opacity: 0.85;
+}
+
+/* 赛博朋克网格 */
+.sigma-loading-grid {
+  position: absolute;
+  inset: -50%;
+  background-image:
+    linear-gradient(rgba(154, 160, 166, 0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(154, 160, 166, 0.05) 1px, transparent 1px);
+  background-size: 48px 48px;
+  transform: perspective(300px) rotateX(60deg) translateY(-10%);
+  transform-origin: center top;
+  animation: sigmaGridDrift 6s linear infinite;
+}
+
+@keyframes sigmaGridDrift {
+  from { background-position: 0 0, 0 0; }
+  to { background-position: 48px 48px, 48px 48px; }
+}
+
+/* 顶部扫描线 */
+.sigma-loading-scanline {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(154, 160, 166, 0.25), transparent);
+  animation: sigmaScan 3s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes sigmaScan {
+  0%, 100% { transform: translateY(0); opacity: 0; }
+  50% { transform: translateY(200px); opacity: 1; }
+}
+
+/* 中央内容 */
+.sigma-loading-content {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+}
+
+/* SIGMA 文字 */
+.sigma-loading-title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-family: 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  font-size: 48px;
+  font-weight: 300;
+  letter-spacing: 12px;
+  color: var(--text-muted);
+  user-select: none;
+}
+
+.sigma-letter {
+  position: relative;
+  display: inline-block;
+  transition: color 0.2s ease;
+  animation: sigmaLetterGlow 2.2s ease-in-out infinite;
+  animation-delay: calc(var(--i) * 0.15s);
+}
+
+/* 活动字母高亮（淡灰色辉光） */
+.sigma-letter.active {
+  color: var(--text-primary);
+  text-shadow:
+    0 0 12px rgba(232, 234, 237, 0.35),
+    0 0 32px rgba(232, 234, 237, 0.12);
+}
+
+@keyframes sigmaLetterGlow {
+  0%, 100% {
+    opacity: 0.55;
+    transform: translateY(0);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+/* 底部状态行 */
+.sigma-loading-subtitle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  letter-spacing: 3px;
+  color: var(--text-muted);
+  opacity: 0.7;
+}
+
+.sigma-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  animation: sigmaDotPulse 1.4s ease-in-out infinite;
+}
+
+.sigma-dot:nth-child(2) { animation-delay: 0.2s; }
+.sigma-dot:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes sigmaDotPulse {
+  0%, 100% { opacity: 0.2; transform: scale(0.8); }
+  50% { opacity: 0.9; transform: scale(1.2); }
+}
+
+.sigma-status {
+  margin-left: 8px;
+  font-weight: 500;
+  animation: sigmaBlink 2s step-start infinite;
+}
+
+@keyframes sigmaBlink {
+  0%, 100% { opacity: 0.5; }
+  50% { opacity: 0.9; }
+}
+
+/* 空状态容器适配 */
+.preview-empty .sigma-loading {
+  min-height: 320px;
+  width: min(560px, 90%);
+}

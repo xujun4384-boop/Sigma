@@ -1,0 +1,222 @@
+.explorer-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background: var(--bg-secondary);
+  border-left: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.explorer-header {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.explorer-header-actions {
+  display: flex;
+  gap: 4px;
+}
+
+.explorer-refresh {
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+}
+
+.explorer-refresh:hover {
+  background: var(--overlay-active);
+  color: var(--text-primary);
+}
+
+.explorer-tree {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.explorer-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background 0.1s;
+  user-select: none;
+}
+
+.explorer-item:hover {
+  background: var(--overlay-hover);
+}
+
+.explorer-item.selected {
+  background: var(--accent-dim);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+.explorer-item.selected .explorer-name {
+  color: var(--accent);
+}
+
+.explorer-arrow {
+  width: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.explorer-icon {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.explorer-icon.folder { color: #dcb67a; }
+.explorer-icon.docx, .explorer-icon.xlsx, .explorer-icon.pptx, .explorer-icon.pdf { color: var(--accent); }
+.explorer-icon.image { color: #a5d6a7; }
+.explorer-icon.python { color: #4fc3f7; }
+.explorer-icon.javascript, .explorer-icon.typescript { color: #ffd54f; }
+.explorer-icon.html, .explorer-icon.css { color: #ef9a9a; }
+
+/* Workspace root folder */
+.explorer-item.workspace-root {
+  font-weight: 600;
+  border-bottom: 1px solid var(--border-color);
+  margin-bottom: 2px;
+}
+
+.explorer-icon.workspace-folder { color: #ffab40; }
+
+.explorer-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* === Delete Confirm Modal === */
+
+.explorer-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--backdrop);
+  z-index: 20000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.explorer-modal {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  padding: 24px;
+  min-width: 320px;
+  max-width: 400px;
+  box-shadow: 0 12px 40px var(--backdrop);
+  text-align: center;
+}
+
+.explorer-modal-icon {
+  color: #ef5350;
+  margin-bottom: 12px;
+}
+
+.explorer-modal-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin: 0 0 4px;
+}
+
+.explorer-modal-name {
+  font-size: 14px;
+  color: var(--accent);
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  margin: 0 0 8px;
+  word-break: break-all;
+}
+
+.explorer-modal-warning {
+  font-size: 12px;
+  color: var(--text-muted);
+  margin: 0 0 16px;
+}
+
+.explorer-modal-actions {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+
+.modal-btn {
+  padding: 8px 24px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.modal-btn-cancel {
+  background: var(--overlay-hover);
+  color: var(--text-secondary);
+}
+
+.modal-btn-cancel:hover {
+  background: var(--overlay-active);
+}
+
+.modal-btn-delete {
+  background: var(--danger);
+  border-color: var(--danger);
+  color: #fff;
+}
+
+.modal-btn-delete:hover {
+  background: #d32f2f;
+}
+
+.modal-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.rename-input {
+  width: 100%;
+  padding: 8px 12px;
+  margin: 12px 0 0;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 13px;
+  outline: none;
+}
+
+.rename-input:focus {
+  border-color: var(--accent);
+}

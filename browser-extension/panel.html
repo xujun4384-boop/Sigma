@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Sigma NetworkBridge</title>
+  <link rel="stylesheet" href="panel.css" />
+</head>
+<body>
+  <noscript class="noscript-banner">Side Panel 需要启用 JavaScript。</noscript>
+
+  <div class="panel">
+    <!-- Header -->
+    <header class="panel-header">
+      <div class="header-left">
+        <h2 class="header-title">Sigma <span class="header-sub">NetworkBridge</span></h2>
+      </div>
+      <div class="header-right">
+        <div class="connection-badge" id="connection-badge" title="WebSocket 连接状态">
+          <span class="status-dot" id="status-dot"></span>
+          <span class="status-label" id="status-label">检测中...</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- LLM Selector -->
+    <section class="config-bar" id="config-bar">
+      <span class="config-label">LLM</span>
+      <select id="llm-select" disabled>
+        <option value="">等待主程序同步...</option>
+      </select>
+    </section>
+
+    <!-- Status Bar -->
+    <section class="status-section">
+      <div class="status-row">
+        <span class="status-key">后端</span>
+        <span class="status-value" id="backend-status">检测中...</span>
+      </div>
+      <div class="status-row">
+        <span class="status-key">WebSocket</span>
+        <span class="status-value" id="ws-status">检测中...</span>
+      </div>
+      <div class="status-row">
+        <span class="status-key">标签页</span>
+        <span class="status-value" id="tab-info">-</span>
+      </div>
+    </section>
+
+    <!-- Messages -->
+    <main class="messages" id="messages">
+      <div class="empty-state">
+        <h3>Sigma NetworkBridge</h3>
+        <p>输入任务，Sigma 将通过浏览器扩展操控当前标签页。</p>
+      </div>
+    </main>
+
+    <!-- Toolbar -->
+    <div class="toolbar">
+      <button id="btn-test-bridge" class="action-btn" title="测试桥接链路">桥接测试</button>
+      <button id="inspect-btn" class="action-btn" title="显示可交互元素选框">显示元素</button>
+      <button id="clear-inspect-btn" class="action-btn" style="display:none">清除选框</button>
+    </div>
+
+    <!-- Input -->
+    <div class="input-area">
+      <textarea
+        id="message-input"
+        placeholder="输入任务，例如：打开百度搜索 Python 教程..."
+        rows="1"
+        disabled
+      ></textarea>
+      <button id="send-btn" disabled aria-label="发送">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+      </button>
+    </div>
+  </div>
+
+  <script src="panel.js"></script>
+</body>
+</html>

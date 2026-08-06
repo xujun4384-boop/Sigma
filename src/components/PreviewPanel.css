@@ -1,0 +1,468 @@
+.preview-panel {
+  flex: 1;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-primary);
+}
+
+/* === Tab Bar === */
+
+.preview-tab-bar {
+  display: flex;
+  align-items: center;
+  background: var(--bg-tertiary);
+  border-bottom: 1px solid var(--border-color);
+  overflow-x: auto;
+  flex-shrink: 0;
+  min-height: 34px;
+}
+
+.preview-tab-bar::-webkit-scrollbar {
+  height: 2px;
+}
+
+.preview-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px 5px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-right: 1px solid var(--border-color);
+  white-space: nowrap;
+  max-width: 180px;
+  transition: background 0.15s, color 0.15s;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.preview-tab:hover {
+  background: var(--overlay-hover);
+  color: var(--text-secondary);
+}
+
+.preview-tab.active {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  border-bottom: 2px solid var(--accent);
+  padding-bottom: 3px;
+}
+
+.preview-tab-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.preview-tab-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.15s;
+}
+
+.preview-tab-close:hover {
+  background: rgba(239, 83, 80, 0.2);
+  color: #ef5350;
+}
+
+/* === Content === */
+
+.preview-content {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.preview-panel.preview-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.preview-welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.preview-icon {
+  opacity: 0.4;
+}
+
+.preview-header {
+  padding: 10px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  flex-shrink: 0;
+}
+
+.preview-code {
+  padding: 16px;
+  margin: 0;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.preview-markdown {
+  padding: 20px 24px;
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--text-primary);
+}
+
+.preview-markdown code { background: var(--overlay-active); padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+.preview-markdown pre { background: var(--overlay-hover); padding: 12px; border-radius: 8px; overflow-x: auto; }
+.preview-markdown pre code { background: none; padding: 0; }
+.preview-markdown table { width: 100%; border-collapse: collapse; margin: 8px 0; }
+.preview-markdown th, .preview-markdown td { border: 1px solid var(--border-color); padding: 6px 10px; text-align: left; }
+.preview-markdown th { background: var(--overlay-hover); }
+.preview-markdown blockquote { border-left: 3px solid var(--accent); padding-left: 12px; color: var(--text-secondary); }
+
+.preview-image {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  height: 100%;
+}
+
+.preview-image img {
+  max-width: 100%;
+  max-height: 80vh;
+  border-radius: 4px;
+  box-shadow: 0 4px 20px var(--backdrop);
+  object-fit: contain;
+}
+
+.preview-video {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+}
+
+.preview-video video {
+  max-width: 100%;
+  max-height: calc(100vh - 120px);
+  border-radius: 4px;
+  outline: none;
+}
+
+.preview-loading, .preview-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.preview-error { color: var(--danger); }
+
+/* === PDF Viewer === */
+
+.preview-pdf-container {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.pdf-iframe {
+  width: 100%;
+  height: 100%;
+  flex: 1;
+  border: none;
+}
+
+/* === PDF/PPTX Controls === */
+
+.preview-pdf-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.pdf-nav-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-primary);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.pdf-nav-btn:hover:not(:disabled) {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.pdf-nav-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.pdf-page-info {
+  font-size: 12px;
+  color: var(--text-muted);
+  min-width: 80px;
+  text-align: center;
+}
+
+/* === DOCX Viewer === */
+
+.preview-docx {
+  padding: 40px 48px;
+  max-width: 800px;
+  margin: 0 auto;
+  width: 100%;
+  background: #fff;
+  color: #1a1a1a;
+  font-size: 14px;
+  line-height: 1.8;
+}
+
+.preview-docx h1, .preview-docx h2, .preview-docx h3 { color: #1a1a1a; font-weight: 600; margin: 16px 0 8px }
+.preview-docx p { margin: 8px 0 }
+.preview-docx ul, .preview-docx ol { padding-left: 24px; margin: 8px 0 }
+.preview-docx table { border-collapse: collapse; width: 100% }
+.preview-docx th, .preview-docx td { border: 1px solid #ddd; padding: 6px 10px; text-align: left }
+.preview-docx th { background: #f5f5f5; font-weight: 600 }
+
+/* === Excel Viewer === */
+
+.preview-excel-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px;
+  background: #f5f5f5;
+  border-bottom: 1px solid #ddd;
+  flex-shrink: 0;
+  overflow-x: auto;
+}
+
+.excel-sheet-btn {
+  padding: 6px 14px;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  background: #fff;
+  color: #333;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.excel-sheet-btn.active {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+}
+
+.preview-excel {
+  flex: 1;
+  overflow: auto;
+  padding: 16px;
+  background: #fff;
+}
+
+.preview-excel table {
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.preview-excel th, .preview-excel td {
+  border: 1px solid #ddd;
+  padding: 6px 10px;
+  text-align: left;
+  min-width: 80px;
+  color: #1a1a1a;
+}
+
+.preview-excel th {
+  background: #f5f5f5;
+  font-weight: 600;
+  position: sticky;
+  top: 0;
+}
+
+/* === PPTX Viewer === */
+
+.preview-pptx-container {
+  flex: 1;
+  overflow: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: #2a2a2a;
+  height: 100%;
+}
+
+.pptx-slide-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  border-radius: 4px;
+  background: #fff;
+}
+
+/* === Code Viewer (VS Code style) === */
+
+.preview-code-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 14px;
+  background: #1e1e1e;
+  border-bottom: 1px solid #333;
+  font-size: 11px;
+}
+
+.preview-code-lang {
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.preview-code-lines {
+  color: #555;
+}
+
+.preview-code-viewer {
+  flex: 1;
+  display: flex;
+  overflow: auto;
+  background: #1e1e1e;
+}
+
+.code-gutter {
+  display: flex;
+  flex-direction: column;
+  padding: 12px 0;
+  background: #1e1e1e;
+  border-right: 1px solid #333;
+  user-select: none;
+  min-width: 48px;
+  text-align: right;
+}
+
+.code-gutter-line {
+  padding: 0 14px 0 10px;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 13px;
+  line-height: 22px;
+  color: #555;
+  white-space: pre;
+}
+
+.code-body {
+  flex: 1;
+  overflow: auto;
+}
+
+.code-highlighted {
+  margin: 0;
+  padding: 12px 16px;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 13px;
+  line-height: 22px;
+  background: #1e1e1e;
+  white-space: pre;
+  tab-size: 4;
+}
+
+.code-highlighted code {
+  font-family: inherit;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+/* === Tab Bar - 终端标签 === */
+
+.preview-tab.terminal {
+  border-left: 2px solid var(--accent, #4fc3f7);
+}
+
+.preview-tab-terminal-icon {
+  color: var(--accent, #4fc3f7);
+  flex-shrink: 0;
+}
+
+/* === 终端展示区 === */
+
+.terminal-container {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  background: #1a1a2e;
+}
+
+.terminal-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  background: #0f0f1a;
+  border-bottom: 1px solid rgba(127, 140, 152, 0.2);
+  color: var(--accent, #4fc3f7);
+  flex-shrink: 0;
+}
+
+.terminal-command {
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 12px;
+  color: var(--text-secondary, #7f8c98);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.terminal-output {
+  flex: 1;
+  overflow: auto;
+  margin: 0;
+  padding: 12px 14px;
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  color: #c9d1d9;
+  background: #1a1a2e;
+  white-space: pre-wrap;
+  word-break: break-all;
+  tab-size: 4;
+}

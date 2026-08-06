@@ -1,0 +1,323 @@
+/* Excel Diff Viewer 样式 */
+
+/* 队列操作区（复用 CodeDiffViewer 样式） */
+.diff-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.diff-queue-indicator {
+  font-size: 13px;
+  color: #858585;
+  background: #e9ecef;
+  padding: 4px 10px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
+.diff-acknowledge-all-button {
+  padding: 6px 14px;
+  background: transparent;
+  color: #0d6efd;
+  border: 1px solid #0d6efd;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+  white-space: nowrap;
+}
+
+.diff-acknowledge-all-button:hover {
+  background: rgba(13, 110, 253, 0.08);
+}
+
+.excel-diff-viewer {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: #ffffff;
+  color: #333;
+  overflow: hidden;
+}
+
+.diff-header {
+  padding: 16px 20px;
+  background: #f8f9fa;
+  border-bottom: 2px solid #e9ecef;
+}
+
+.diff-title {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.diff-title h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: #212529;
+}
+
+.modifying-indicator {
+  padding: 4px 10px;
+  background: #fff3cd;
+  color: #856404;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+.completed-indicator {
+  padding: 4px 10px;
+  background: #d4edda;
+  color: #155724;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.diff-status.no-changes {
+  padding: 8px 12px;
+  background: #e7f3ff;
+  color: #0056b3;
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+.diff-stats {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  font-size: 13px;
+}
+
+.stat-total { font-weight: 600; color: #495057; }
+.stat-added { color: #28a745; font-weight: 500; }
+.stat-removed { color: #dc3545; font-weight: 500; }
+.stat-modified { color: #ffc107; font-weight: 500; }
+
+.diff-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.diff-acknowledge-button {
+  padding: 6px 14px;
+  background: #0d6efd;
+  color: #ffffff;
+  border: 1px solid #0d6efd;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.diff-acknowledge-button:hover {
+  background: #0b5ed7;
+  border-color: #0a58ca;
+}
+
+.diff-acknowledge-button:active {
+  background: #0a58ca;
+  border-color: #0a53be;
+}
+
+/* Sheet 标签 */
+.sheet-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px 16px;
+  background: #f8f9fa;
+  border-bottom: 1px solid #dee2e6;
+  overflow-x: auto;
+}
+
+.sheet-tab {
+  padding: 6px 12px;
+  background: #ffffff;
+  border: 1px solid #dee2e6;
+  border-radius: 6px 6px 0 0;
+  font-size: 13px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.2s;
+}
+
+.sheet-tab:hover { background: #e9ecef; }
+
+.sheet-tab.active {
+  background: #0d6efd;
+  color: white;
+  border-color: #0d6efd;
+}
+
+.change-badge {
+  background: rgba(255, 193, 7, 0.3);
+  padding: 2px 6px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.sheet-tab.active .change-badge {
+  background: rgba(255, 255, 255, 0.3);
+  color: white;
+}
+
+/* 变更图例 */
+.diff-legend {
+  display: flex;
+  gap: 16px;
+  padding: 12px 20px;
+  background: #f8f9fa;
+  border-bottom: 1px solid #dee2e6;
+  font-size: 12px;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.legend-color {
+  width: 16px;
+  height: 16px;
+  border-radius: 3px;
+  border: 1px solid #dee2e6;
+}
+
+.legend-item.added .legend-color { background: rgba(40, 167, 69, 0.2); border-color: #28a745; }
+.legend-item.removed .legend-color { background: rgba(220, 53, 69, 0.2); border-color: #dc3545; }
+.legend-item.modified .legend-color { background: rgba(255, 193, 7, 0.2); border-color: #ffc107; }
+
+/* Excel 表格 */
+.excel-table-container {
+  flex: 1;
+  overflow: auto;
+  padding: 20px;
+}
+
+.excel-diff-table {
+  border-collapse: collapse;
+  font-size: 13px;
+  background: white;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.excel-diff-table th, .excel-diff-table td {
+  border: 1px solid #dee2e6;
+  padding: 8px 12px;
+  min-width: 80px;
+  text-align: left;
+}
+
+.row-header, .col-header {
+  background: #f8f9fa;
+  font-weight: 600;
+  color: #495057;
+  text-align: center !important;
+  min-width: 40px !important;
+  position: sticky;
+}
+
+.row-header { left: 0; z-index: 2; }
+.col-header { top: 0; z-index: 1; }
+
+.excel-diff-table th.row-header { top: 0; left: 0; z-index: 3; }
+
+.cell.unchanged { background: #ffffff; color: #adb5bd; }
+.cell.added { background: rgba(40, 167, 69, 0.1); border: 2px solid #28a745 !important; }
+.cell.removed { background: rgba(220, 53, 69, 0.1); border: 2px solid #dc3545 !important; }
+.cell.modified { background: rgba(255, 193, 7, 0.1); border: 2px solid #ffc107 !important; }
+
+.cell-diff { display: flex; flex-direction: column; gap: 4px; }
+
+.old-value { color: #dc3545; text-decoration: line-through; font-size: 11px; opacity: 0.8; }
+
+.arrow { color: #6c757d; font-size: 10px; margin: 2px 0; }
+
+.new-value { color: #28a745; font-weight: 500; }
+
+.cell-value.added-value { color: #28a745; font-weight: 500; }
+.cell-value.removed-value { color: #dc3545; text-decoration: line-through; opacity: 0.7; }
+
+/* 变更详情 */
+.changes-detail {
+  border-top: 2px solid #e9ecef;
+  background: #f8f9fa;
+  padding: 16px 20px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.changes-detail h4 {
+  margin: 0 0 12px 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: #495057;
+}
+
+.changes-list { display: flex; flex-direction: column; gap: 8px; }
+
+.change-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  background: white;
+  border-radius: 6px;
+  font-size: 12px;
+  border-left: 3px solid transparent;
+}
+
+.change-item.added { border-left-color: #28a745; background: rgba(40, 167, 69, 0.05); }
+.change-item.removed { border-left-color: #dc3545; background: rgba(220, 53, 69, 0.05); }
+.change-item.modified { border-left-color: #ffc107; background: rgba(255, 193, 7, 0.05); }
+
+.change-type { font-weight: 600; min-width: 50px; }
+.change-item.added .change-type { color: #28a745; }
+.change-item.removed .change-type { color: #dc3545; }
+.change-item.modified .change-type { color: #ffc107; }
+
+.change-cell {
+  font-family: 'Courier New', monospace;
+  font-weight: 600;
+  color: #495057;
+  min-width: 50px;
+}
+
+.change-value { flex: 1; display: flex; align-items: center; gap: 8px; }
+.change-value .old { color: #dc3545; text-decoration: line-through; }
+.change-value .new { color: #28a745; font-weight: 500; }
+.change-value .arrow { color: #6c757d; }
+
+.strikethrough { text-decoration: line-through; opacity: 0.7; }
+
+.excel-table-container::-webkit-scrollbar, .changes-detail::-webkit-scrollbar {
+  width: 8px; height: 8px;
+}
+.excel-table-container::-webkit-scrollbar-track, .changes-detail::-webkit-scrollbar-track {
+  background: #f1f1f1;
+}
+.excel-table-container::-webkit-scrollbar-thumb, .changes-detail::-webkit-scrollbar-thumb {
+  background: #888; border-radius: 4px;
+}
+.excel-table-container::-webkit-scrollbar-thumb:hover, .changes-detail::-webkit-scrollbar-thumb:hover {
+  background: #555;
+}
