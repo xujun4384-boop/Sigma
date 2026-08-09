@@ -281,6 +281,16 @@
   margin-top: 6px;
   max-height: 800px;
   overflow-y: auto;
+  min-height: 0;
+}
+
+.thinking-body > * {
+  flex: 0 0 auto;
+}
+
+.thinking-text,
+.response-text {
+  flex-shrink: 0;
 }
 
 .thinking-text {
@@ -301,6 +311,8 @@
 /* Response Text（LLM 中间推理文本，穿插在工具调用之间） */
 
 .response-text {
+  max-height: 200px;
+  overflow-y: auto;
   padding: 8px 10px;
   margin-bottom: 6px;
   background: var(--overlay-subtle);

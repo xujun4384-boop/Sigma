@@ -1202,18 +1202,12 @@ function SigmaMessage({ msg, toolTimeout, onToolTimeoutChoice, questionnaire, on
                 block.type === 'thinking' ? (
                   <ThinkingText key={i} text={block.content} />
                 ) : block.type === 'response_text' ? (
-                  <div key={i} className="response-text">
-                    {msg.isStreaming && i === msg.blocks.length - 1 && msg.blocks.filter(b => b.type === 'response_text').pop() === block ? (
-                      <StreamingText text={block.content} />
-                    ) : (
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                        {block.content}
-                      </ReactMarkdown>
-                    )}
-                    {msg.isStreaming && i === msg.blocks.length - 1 && (
-                      <span className="response-text-cursor" />
-                    )}
-                  </div>
+                  <ResponseText
+                    key={i}
+                    text={block.content}
+                    isStreaming={msg.isStreaming && i === msg.blocks.length - 1 && msg.blocks.filter(b => b.type === 'response_text').pop() === block}
+                    showCursor={msg.isStreaming && i === msg.blocks.length - 1}
+                  />
                 ) : block.type === 'subagent_batch' ? (
                   <SubAgentDisplay key={i} tasks={block.tasks} />
                 ) : block.type === 'agent_execution' ? (
@@ -1283,6 +1277,29 @@ function StreamingText({ text }: { text: string }) {
         {text}
       </ReactMarkdown>
     </span>
+  )
+}
+
+function ResponseText({ text, isStreaming, showCursor }: { text: string; isStreaming: boolean; showCursor: boolean }) {
+  const ref = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (ref.current) {
+      ref.current.scrollTop = ref.current.scrollHeight
+    }
+  }, [text])
+
+  return (
+    <div ref={ref} className="response-text">
+      {isStreaming ? (
+        <StreamingText text={text} />
+      ) : (
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+          {text}
+        </ReactMarkdown>
+      )}
+      {showCursor && <span className="response-text-cursor" />}
+    </div>
   )
 }
 
