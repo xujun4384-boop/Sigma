@@ -12,9 +12,9 @@ interface Props {
 }
 
 const FILE_ICONS: Record<string, React.ReactNode> = {
-  docx: <FileText size={14} />,
-  xlsx: <FileSpreadsheet size={14} />,
-  pptx: <Presentation size={14} />,
+  docx: <FileText size={14} color="#4a90d9" />,
+  xlsx: <FileSpreadsheet size={14} color="#4caf50" />,
+  pptx: <Presentation size={14} color="#ff6d3a" />,
   pdf: <FileText size={14} color="#e74c3c" />,
   image: <Image size={14} />,
   video: <Film size={14} color="#9b59b6" />,

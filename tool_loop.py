@@ -244,7 +244,7 @@ class ToolLoop:
             self._check_background_tasks(messages, queue)
 
             # ── 上下文压缩 ──
-            compact_res = await compact_if_needed(messages, self.model, self.base_url, self.api_key, self.system_prompt)
+            compact_res = await compact_if_needed(messages, self.model, self.base_url, self.api_key, self.system_prompt, self.protocol)
             if compact_res:
                 self._apply_compaction(compact_res, messages, queue)
                 log.info(f"[Compact] Round {iteration}: compressed to {len(messages)} messages")

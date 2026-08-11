@@ -121,6 +121,7 @@ class RelayHandler(BaseHTTPRequestHandler):
 
 
 def main():
+    import time as _time
     parser = argparse.ArgumentParser(description="微信 API 中转服务")
     parser.add_argument("--port", type=int, default=8888, help="监听端口 (默认 8888)")
     parser.add_argument("--key", type=str, required=True, help="预共享密钥 (必填)")
@@ -133,18 +134,30 @@ def main():
 
     RelayHandler.shared_key = args.key
 
-    server = HTTPServer((args.host, args.port), RelayHandler)
-    print(f"[Relay] 微信 API 中转服务已启动")
-    print(f"[Relay] 监听: {args.host}:{args.port}")
-    print(f"[Relay] 出站 IP: 将作为微信 IP 白名单地址")
-    print(f"[Relay] 健康检查: http://{args.host}:{args.port}/health")
-    print()
+    # ── 自动重启保护：崩溃后 3 秒自动拉起 ──
+    restart_count = 0
+    while True:
+        server = HTTPServer((args.host, args.port), RelayHandler)
+        print(f"[Relay] 微信 API 中转服务已启动 (重启次数: {restart_count})")
+        print(f"[Relay] 监听: {args.host}:{args.port}")
+        print(f"[Relay] 出站 IP: 将作为微信 IP 白名单地址")
+        print(f"[Relay] 健康检查: http://{args.host}:{args.port}/health")
+        print()
 
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        print("\n[Relay] 服务已停止")
-        server.server_close()
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            print("\n[Relay] 服务已停止")
+            server.server_close()
+            break
+        except Exception as e:
+            restart_count += 1
+            print(f"[Relay] 崩溃 ({type(e).__name__}: {e})，3 秒后自动重启...", flush=True)
+            try:
+                server.server_close()
+            except Exception:
+                pass
+            _time.sleep(3)
 
 
 if __name__ == "__main__":

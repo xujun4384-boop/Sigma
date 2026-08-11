@@ -184,7 +184,7 @@ async def agent_ai_generate(request: Request):
                 }
                 apply_model_specific_params(payload, model, "openai")
                 resp = await client.post(
-                    f"{base_url}/v1/chat/completions",
+                    f"{base_url}/v1/chat/completions" if "/v1" not in base_url else f"{base_url}/chat/completions",
                     headers={
                         "Authorization": f"Bearer {api_key}",
                         "content-type": "application/json",
@@ -331,7 +331,7 @@ async def test_llm(request: Request):
                 }
                 apply_model_specific_params(payload, model, protocol)
                 resp = await client.post(
-                    f"{base_url}/v1/chat/completions",
+                    f"{base_url}/v1/chat/completions" if "/v1" not in base_url else f"{base_url}/chat/completions",
                     headers={
                         "Authorization": f"Bearer {api_key}",
                         "content-type": "application/json",
@@ -355,11 +355,22 @@ async def test_llm(request: Request):
                 )
             else:
                 choices = data.get("choices", [])
-                text = choices[0].get("message", {}).get("content", "") if choices else ""
+                msg = choices[0].get("message", {}) if choices else {}
+                text = msg.get("content", "") or ""
+                # DeepSeek 等推理模型可能把最终内容放在 reasoning_content
+                if not text.strip():
+                    text = msg.get("reasoning_content", "") or ""
 
             if text.strip():
-                return {"success": True}
-            log.warning(f"[TestLLM] 空响应: model={model}, keys={list(data.keys())[:5]}, content_sample={str(data.get('content',''))[:200]}")
+                return {"success": True, "text": text.strip()}
+            # 诊断日志：打印完整 message 结构帮助排查
+            log.warning(
+                f"[TestLLM] 空响应: model={model}, protocol={protocol}, "
+                f"base_url={base_url}, "
+                f"msg_keys={list(msg.keys()) if choices else 'no choices'}, "
+                f"content_sample={repr(msg.get('content'))}, "
+                f"reasoning_sample={repr(msg.get('reasoning_content', 'N/A'))[:100]}"
+            )
             return {"success": False, "error": "LLM returned empty response"}
 
     except Exception as e:
@@ -490,6 +501,7 @@ async def _record_task_memory(
     model: str,
     user_message: str,
     messages: list,
+    protocol: str = "anthropic",
 ) -> None:
     """
     对话结束后，调用 LLM 判断是否有实质性任务进展，
@@ -533,27 +545,52 @@ async def _record_task_memory(
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                f"{base_url.rstrip('/')}/v1/messages",
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "max_tokens": 200,
-                    "temperature": 0.3,
-                    "system": "你是一个简洁的任务摘要助手。",
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-            )
-            if resp.status_code != 200:
-                return
-            data = resp.json()
-            content = data.get("content", [])
-            text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
-            text = text.strip()
+            if protocol == "openai":
+                opened_url = f"{base_url.rstrip('/')}/v1/chat/completions" if "/v1" not in base_url else f"{base_url.rstrip('/')}/chat/completions"
+                resp = await client.post(
+                    opened_url,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "max_tokens": 200,
+                        "temperature": 0.3,
+                        "messages": [
+                            {"role": "system", "content": "你是一个简洁的任务摘要助手。"},
+                            {"role": "user", "content": prompt},
+                        ],
+                    },
+                )
+                if resp.status_code != 200:
+                    return
+                data = resp.json()
+                choices = data.get("choices", [])
+                text = choices[0].get("message", {}).get("content", "") if choices else ""
+                text = text.strip()
+            else:
+                resp = await client.post(
+                    f"{base_url.rstrip('/')}/v1/messages",
+                    headers={
+                        "x-api-key": api_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "max_tokens": 200,
+                        "temperature": 0.3,
+                        "system": "你是一个简洁的任务摘要助手。",
+                        "messages": [{"role": "user", "content": prompt}],
+                    },
+                )
+                if resp.status_code != 200:
+                    return
+                data = resp.json()
+                content = data.get("content", [])
+                text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
+                text = text.strip()
 
             if not text or text == "NO_TASK":
                 log.info("[Project Memory] 无实质性任务，跳过记录")
@@ -589,6 +626,7 @@ async def _record_network_bridge_memory(
     model: str,
     user_message: str,
     messages: list,
+    protocol: str = "anthropic",
 ) -> None:
     """Network bridge 任务完成后，记录到 Sigma 本体记忆 (.sigma/memory/)。"""
     import httpx
@@ -627,27 +665,52 @@ async def _record_network_bridge_memory(
 
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                f"{base_url.rstrip('/')}/v1/messages",
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": model,
-                    "max_tokens": 200,
-                    "temperature": 0.3,
-                    "system": "你是一个简洁的任务摘要助手。",
-                    "messages": [{"role": "user", "content": prompt}],
-                },
-            )
-            if resp.status_code != 200:
-                return
-            data = resp.json()
-            content = data.get("content", [])
-            text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
-            text = text.strip()
+            if protocol == "openai":
+                opened_url = f"{base_url.rstrip('/')}/v1/chat/completions" if "/v1" not in base_url else f"{base_url.rstrip('/')}/chat/completions"
+                resp = await client.post(
+                    opened_url,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "max_tokens": 200,
+                        "temperature": 0.3,
+                        "messages": [
+                            {"role": "system", "content": "你是一个简洁的任务摘要助手。"},
+                            {"role": "user", "content": prompt},
+                        ],
+                    },
+                )
+                if resp.status_code != 200:
+                    return
+                data = resp.json()
+                choices = data.get("choices", [])
+                text = choices[0].get("message", {}).get("content", "") if choices else ""
+                text = text.strip()
+            else:
+                resp = await client.post(
+                    f"{base_url.rstrip('/')}/v1/messages",
+                    headers={
+                        "x-api-key": api_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "max_tokens": 200,
+                        "temperature": 0.3,
+                        "system": "你是一个简洁的任务摘要助手。",
+                        "messages": [{"role": "user", "content": prompt}],
+                    },
+                )
+                if resp.status_code != 200:
+                    return
+                data = resp.json()
+                content = data.get("content", [])
+                text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
+                text = text.strip()
 
             if not text or text == "NO_TASK":
                 log.info("[NB Memory] 无实质性任务，跳过记录")
@@ -1357,6 +1420,7 @@ async def _execute_chat(
                     model=model,
                     user_message=user_message,
                     messages=tool_loop.messages,
+                    protocol=protocol,
                 )
             elif working_dir and os.path.isdir(working_dir):
                 await _record_task_memory(
@@ -1366,6 +1430,7 @@ async def _execute_chat(
                     model=model,
                     user_message=user_message,
                     messages=tool_loop.messages,
+                    protocol=protocol,
                 )
         except Exception as e:
             log.error(f"[Chat Error] {e}")

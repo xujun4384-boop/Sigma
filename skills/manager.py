@@ -49,6 +49,7 @@ from skills.project_memory import (
 from skills.batch_read import BatchReadTool
 from skills.video_generate import VideoSceneTool, VideoTTSTool, VideoComposeTool
 from skills.video_auto import VideoAutoTool
+from skills.video_custom import VideoCustomTool
 from skills.fengniao import (
     FengniaoFuzzySearch, FengniaoBasicInfo, FengniaoShareholders,
     FengniaoExecutives, FengniaoInvestments, FengniaoChanges,
@@ -61,7 +62,7 @@ from skills.flyai import (
 )
 
 # 内部工具：仅供子 Agent 使用，不对外暴露给 LLM（只读工具由 batch_read 统一入口）
-_INTERNAL_TOOLS = {"read", "read_docx", "read_pdf", "read_xlsx", "read_pptx"}
+_INTERNAL_TOOLS = {"read", "read_docx", "read_pdf", "read_pptx"}
 
 # 所有工具类的注册表
 ALL_TOOL_CLASSES: dict[str, type] = {
@@ -96,6 +97,7 @@ ALL_TOOL_CLASSES: dict[str, type] = {
     "video_tts": VideoTTSTool,
     "video_compose": VideoComposeTool,
     "video_auto": VideoAutoTool,
+    "video_custom": VideoCustomTool,
     "wechat_publish": WeChatPublisherTool,
     "fengniao_search": FengniaoFuzzySearch,
     "fengniao_basic_info": FengniaoBasicInfo,
@@ -175,6 +177,14 @@ ALL_SKILLS: dict[str, dict] = {
         "label": "自定义智能体",
         "tool_names": ["custom_agent"],
     },
+    "read_xlsx": {
+        "label": "Excel 读取",
+        "tool_names": ["read_xlsx"],
+    },
+    "write_xlsx": {
+        "label": "Excel 创建",
+        "tool_names": ["write_xlsx"],
+    },
     "edit_xlsx": {
         "label": "Excel 编辑",
         "tool_names": ["edit_xlsx"],
@@ -226,6 +236,10 @@ ALL_SKILLS: dict[str, dict] = {
     "video_auto": {
         "label": "视频自动生成",
         "tool_names": ["video_auto"],
+    },
+    "video_custom": {
+        "label": "视频自定义生成",
+        "tool_names": ["video_custom"],
     },
     "wechat_publisher": {
         "label": "公众号发布",

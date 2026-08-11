@@ -96,7 +96,10 @@
 }
 
 .explorer-icon.folder { color: #dcb67a; }
-.explorer-icon.docx, .explorer-icon.xlsx, .explorer-icon.pptx, .explorer-icon.pdf { color: var(--accent); }
+.explorer-icon.docx { color: #4a90d9; }
+.explorer-icon.xlsx { color: #4caf50; }
+.explorer-icon.pptx { color: #ff6d3a; }
+.explorer-icon.pdf { color: #e74c3c; }
 .explorer-icon.image { color: #a5d6a7; }
 .explorer-icon.python { color: #4fc3f7; }
 .explorer-icon.javascript, .explorer-icon.typescript { color: #ffd54f; }

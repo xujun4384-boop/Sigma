@@ -184,11 +184,13 @@ async def compact_if_needed(
     base_url: str,
     api_key: str,
     system_prompt: str = "",
+    protocol: str = "anthropic",
 ) -> CompactResult | None:
     """
     若上下文 token 超限，则用 LLM 对早期轮次生成摘要。
     返回 CompactResult 或 None（未触发压缩）。
     system_prompt 计入 token 判断，防止实际用量超出阈值。
+    protocol: "anthropic" 或 "openai"，决定 API 调用方式。
     """
     threshold = get_compact_threshold(model)
     sys_tokens = int(len(system_prompt) / CHARS_PER_TOKEN) if system_prompt else 0
@@ -202,7 +204,7 @@ async def compact_if_needed(
     head = messages[:boundary]
     tail = messages[boundary:]
 
-    summary = await _generate_summary(head, model, base_url, api_key)
+    summary = await _generate_summary(head, model, base_url, api_key, protocol)
     if summary is None:
         return None
 
@@ -220,39 +222,71 @@ async def _generate_summary(
     model: str,
     base_url: str,
     api_key: str,
+    protocol: str = "anthropic",
 ) -> str | None:
-    """调用 LLM 对历史消息生成摘要"""
+    """调用 LLM 对历史消息生成摘要。支持 Anthropic 和 OpenAI 协议。"""
     formatted = _format_messages_for_summary(messages)
-
-    payload = {
-        "model": model,
-        "max_tokens": 1500,
-        "temperature": 0.3,
-        "system": "你是一个对话摘要助手。请用中文总结以下用户和 AI 的对话，保留关键事实、文件路径、操作内容和结论。尽可能详细，确保后续对话能接续。字数控制在 800 字以内。",
-        "messages": [
-            {"role": "user", "content": f"请总结以下对话：\n\n{formatted}"}
-        ],
-    }
-    apply_model_specific_params(payload, model, "anthropic")
+    summary_system = "你是一个对话摘要助手。请用中文总结以下用户和 AI 的对话，保留关键事实、文件路径、操作内容和结论。尽可能详细，确保后续对话能接续。字数控制在 800 字以内。"
 
     try:
         import httpx
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            resp = await client.post(
-                f"{base_url.rstrip('/')}/v1/messages",
-                headers={
-                    "x-api-key": api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json=payload,
-            )
-            if resp.status_code != 200:
-                return None
-            data = resp.json()
-            content = data.get("content", [])
-            text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
-            return text.strip() or None
+
+        if protocol == "openai":
+            payload = {
+                "model": model,
+                "max_tokens": 1500,
+                "temperature": 0.3,
+                "messages": [
+                    {"role": "system", "content": summary_system},
+                    {"role": "user", "content": f"请总结以下对话：\n\n{formatted}"},
+                ],
+            }
+            apply_model_specific_params(payload, model, protocol)
+
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    f"{base_url.rstrip('/')}/v1/chat/completions" if "/v1" not in base_url else f"{base_url.rstrip('/')}/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                )
+                if resp.status_code != 200:
+                    return None
+                data = resp.json()
+                choices = data.get("choices", [])
+                text = choices[0].get("message", {}).get("content", "") if choices else ""
+                return text.strip() or None
+        else:
+            # Anthropic 协议（默认）
+            payload = {
+                "model": model,
+                "max_tokens": 1500,
+                "temperature": 0.3,
+                "system": summary_system,
+                "messages": [
+                    {"role": "user", "content": f"请总结以下对话：\n\n{formatted}"}
+                ],
+            }
+            apply_model_specific_params(payload, model, "anthropic")
+
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    f"{base_url.rstrip('/')}/v1/messages",
+                    headers={
+                        "x-api-key": api_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json=payload,
+                )
+                if resp.status_code != 200:
+                    return None
+                data = resp.json()
+                content = data.get("content", [])
+                text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
+                return text.strip() or None
     except Exception:
         return None
 

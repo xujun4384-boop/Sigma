@@ -756,7 +756,7 @@ class WeChatPublisherTool(BaseTool):
         # 步骤0: 如果提供了 markdown，用 wenyan-cli 渲染为 HTML
         if markdown:
             if content:
-                return ToolResult.fail("markdown 和 content 只能二选一")
+                steps.append("[INFO] 同时收到了 markdown 和 content，优先使用 markdown")
             print(f"[push_draft] 步骤0: 用 wenyan-cli 将 Markdown 转换为 HTML（主题: {theme}，代码高亮: {highlight}）...")
             html, err = self._render_markdown_via_wenyan(
                 markdown, theme=theme, highlight=highlight,
