@@ -11,6 +11,7 @@ import type { Lang } from './i18n/translations'
 import type { KimiConfig, LLMEntry, FolderTreeItem } from './types/electron'
 import { getBackendUrl } from './utils/config'
 import { loadAgents, syncAgentsToBackend } from './utils/agentStore'
+import { PanelRightOpen } from 'lucide-react'
 import './App.css'
 
 export type ThemeMode = 'dark' | 'light' | 'auto'
@@ -48,6 +49,12 @@ const DEFAULT_KIMI_CONFIG: KimiConfig = {
       wechatRelayKey: '',
       fengniaoApiKey: '',
       flyaiApiKey: '',
+      mail163Address: '',
+      mail163AuthCode: '',
+      mail163SmtpHost: 'smtp.163.com',
+      mail163SmtpPort: '465',
+      mail163ImapHost: 'imap.163.com',
+      mail163ImapPort: '993',
     },
 }
 
@@ -84,10 +91,13 @@ export default function App() {
   const [language, setLanguage] = useState<Lang>(getSavedLanguage)
   const [leftWidth, setLeftWidth] = useState(480)
   const [rightWidth, setRightWidth] = useState(300)
+  const [explorerCollapsed, setExplorerCollapsed] = useState(false)
+  const savedRightWidth = useRef(300)
   const [selectedFile, setSelectedFile] = useState<FolderTreeItem | null>(null)
   const [previewKey, setPreviewKey] = useState(0)
   const [chatResetKey, setChatResetKey] = useState(0)
   const [fileDiffQueue, setFileDiffQueue] = useState<FileDiffState[]>([])
+  const [canvasPatch, setCanvasPatch] = useState<{ canvasName: string; operation: 'add' | 'replace'; elements: any[] } | null>(null)
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([])
 
   // 项目扫描状态
@@ -334,6 +344,14 @@ export default function App() {
     )
   }, [])
 
+  const handleCanvasPatch = useCallback((patch: { canvasName: string; operation: 'add' | 'replace'; elements: any[] }) => {
+    setCanvasPatch({ ...patch, elements: [...patch.elements] })
+  }, [])
+
+  const handleCanvasPatchApplied = useCallback(() => {
+    setCanvasPatch(null)
+  }, [])
+
   const handleSaveSystem = useCallback((s: { maxIterations: number; subAgentMaxTurns: number; backupEnabled: boolean; notifySound: string }) => {
     setSystemSettings(s)
     localStorage.setItem('sigma_system_settings', JSON.stringify(s))
@@ -343,6 +361,17 @@ export default function App() {
     setThemeMode(mode)
     localStorage.setItem('sigma_theme', mode)
   }, [])
+
+  const handleToggleExplorer = useCallback(() => {
+    setExplorerCollapsed(prev => {
+      if (!prev) {
+        savedRightWidth.current = rightWidth
+      } else {
+        setRightWidth(savedRightWidth.current)
+      }
+      return !prev
+    })
+  }, [rightWidth])
 
   const handleOnboardingComplete = useCallback((entry: LLMEntry | null) => {
     if (entry) {
@@ -422,22 +451,37 @@ export default function App() {
           />
           <div className="app-main" ref={containerRef}>
             <ErrorBoundary>
-              <div className="panel-left" style={{ width: leftWidth, flexShrink: 0 }}>
-                <ChatPanel config={config} systemSettings={systemSettings} onSelectLLM={handleSelectLLM} resetKey={chatResetKey} onFileDiffUpdate={handleFileDiffUpdate} onFileModificationStart={handleFileModificationStart} onFileModificationComplete={handleFileModificationComplete} onOpenTerminal={handleOpenTerminal} />
+              <div className="panel-left" style={explorerCollapsed ? { flex: 1 } : { width: leftWidth, flexShrink: 0 }}>
+                <ChatPanel config={config} systemSettings={systemSettings} onSelectLLM={handleSelectLLM} resetKey={chatResetKey} onFileDiffUpdate={handleFileDiffUpdate} onFileModificationStart={handleFileModificationStart} onFileModificationComplete={handleFileModificationComplete} onCanvasPatch={handleCanvasPatch} onOpenTerminal={handleOpenTerminal} />
               </div>
             </ErrorBoundary>
 
             <div className="resizer" onMouseDown={() => { isDraggingLeft.current = true }} />
 
             <div className="panel-center">
-              <PreviewPanel file={selectedFile} key={previewKey} fileDiffState={fileDiffQueue.length > 0 ? fileDiffQueue[0] : null} fileDiffQueueLength={fileDiffQueue.length} onAcknowledgeDiff={handleAcknowledgeDiff} onAcknowledgeAllDiffs={handleAcknowledgeAllDiffs} terminalTabs={terminalTabs} onCloseTerminal={handleCloseTerminal} />
+              <PreviewPanel file={selectedFile} key={previewKey} fileDiffState={fileDiffQueue.length > 0 ? fileDiffQueue[0] : null} fileDiffQueueLength={fileDiffQueue.length} onAcknowledgeDiff={handleAcknowledgeDiff} onAcknowledgeAllDiffs={handleAcknowledgeAllDiffs} terminalTabs={terminalTabs} onCloseTerminal={handleCloseTerminal} canvasPatch={canvasPatch} onCanvasPatchApplied={handleCanvasPatchApplied} />
             </div>
 
-            <div className="resizer" onMouseDown={() => { isDraggingRight.current = true }} />
+            {!explorerCollapsed && (
+              <div className="resizer" onMouseDown={() => { isDraggingRight.current = true }} />
+            )}
 
-            <div className="panel-right" style={{ width: rightWidth, flexShrink: 0 }}>
-              <ExplorerPanel width={rightWidth} onSelectFile={setSelectedFile} highlightPath={selectedFile?.path ?? undefined} />
-            </div>
+            {!explorerCollapsed && (
+              <div className="panel-right" style={{ width: rightWidth, flexShrink: 0 }}>
+                <ExplorerPanel
+                  width={rightWidth}
+                  onSelectFile={setSelectedFile}
+                  highlightPath={selectedFile?.path ?? undefined}
+                  onToggleCollapse={handleToggleExplorer}
+                />
+              </div>
+            )}
+
+            {explorerCollapsed && (
+              <div className="explorer-expand-btn" onClick={handleToggleExplorer} title="展开资源管理器">
+                <PanelRightOpen size={18} />
+              </div>
+            )}
           </div>
 
           {scanningPhase && (

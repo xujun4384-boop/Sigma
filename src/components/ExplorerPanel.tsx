@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Folder, File, FileText, FileSpreadsheet, Presentation, Image, ChevronRight, ChevronDown, RefreshCw, Trash2, X, FolderOpen, FolderPlus, Edit3, Film } from 'lucide-react'
+import { Folder, File, FileText, FileSpreadsheet, Presentation, Image, ChevronRight, ChevronDown, RefreshCw, Trash2, X, FolderOpen, FolderPlus, Edit3, Film, PanelRightClose } from 'lucide-react'
 import ContextMenu from './ContextMenu'
 import type { FolderTreeItem } from '../types/electron'
 import { useTranslation } from '../i18n/I18nContext'
@@ -9,6 +9,7 @@ interface Props {
   width: number
   onSelectFile: (item: FolderTreeItem) => void
   highlightPath?: string
+  onToggleCollapse?: () => void
 }
 
 const FILE_ICONS: Record<string, React.ReactNode> = {
@@ -21,7 +22,7 @@ const FILE_ICONS: Record<string, React.ReactNode> = {
   file: <File size={14} />,
 }
 
-export default function ExplorerPanel({ width, onSelectFile, highlightPath }: Props) {
+export default function ExplorerPanel({ width, onSelectFile, highlightPath, onToggleCollapse }: Props) {
   const [tree, setTree] = useState<FolderTreeItem[]>([])
   const [rootPath, setRootPath] = useState('')
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; item: any } | null>(null)
@@ -166,6 +167,9 @@ export default function ExplorerPanel({ width, onSelectFile, highlightPath }: Pr
       <div className="explorer-header">
         <span className="explorer-title">{t("explorer.title")}</span>
         <div className="explorer-header-actions">
+          <button className="explorer-collapse-btn" onClick={onToggleCollapse} title="折叠资源管理器">
+            <PanelRightClose size={14} />
+          </button>
           <button className="explorer-refresh" onClick={handleOpenFolder} title={t("explorer.open_folder")}>
             <FolderOpen size={14} />
           </button>

@@ -213,7 +213,7 @@ def call_llm_parse_news(
 
     headers = {
         "Content-Type": "application/json",
-        "x-api-key": api_key,
+        "Authorization": f"Bearer {api_key}",
     }
 
     payload = {

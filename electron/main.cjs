@@ -207,6 +207,41 @@ function getFileType(ext) {
   return 'file'
 }
 
+// ── sigma-file:// 协议辅助 ──
+
+const VIDEO_MIME_TYPES = {
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.mov': 'video/quicktime',
+  '.avi': 'video/x-msvideo',
+  '.mkv': 'video/x-matroska',
+  '.m4v': 'video/x-m4v',
+  '.ogv': 'video/ogg',
+  '.flv': 'video/x-flv',
+  '.wmv': 'video/x-ms-wmv',
+}
+
+function resolveSigmaFilePath(requestUrl) {
+  const raw = requestUrl.replace(/^sigma-file:\/\//, '')
+  let filePath = decodeURIComponent(raw)
+  // Windows 盘符路径（/C:/... 或 /C:\...）去掉前导斜杠
+  if (/^\/[a-zA-Z]:/.test(filePath)) filePath = filePath.slice(1)
+  return filePath
+}
+
+// 启动时清空画布数据，让每次启动都从空白画布开始
+function clearAllCanvases() {
+  try {
+    const canvasDir = path.join(currentWorkingDir, '.sigma2.0', 'canvases')
+    if (fs.existsSync(canvasDir)) {
+      fs.rmSync(canvasDir, { recursive: true, force: true })
+      console.log('[Canvas] 启动时已清空画布:', canvasDir)
+    }
+  } catch (err) {
+    console.error('[Canvas] 清空画布失败:', err.message)
+  }
+}
+
 // ── File Tree Scanner ──
 
 function scanDirectory(dirPath) {
@@ -502,6 +537,38 @@ ipcMain.handle('get-folder-tree', async () => {
   } catch (err) { return { success: false, error: err.message } }
 })
 
+ipcMain.handle('canvas-list', async () => {
+  try {
+    const canvasDir = path.join(currentWorkingDir, '.sigma2.0', 'canvases')
+    if (!fs.existsSync(canvasDir)) return { success: true, data: ['default'] }
+    const canvases = fs.readdirSync(canvasDir)
+      .filter(file => file.endsWith('.excalidraw'))
+      .map(file => path.basename(file, '.excalidraw'))
+    return { success: true, data: [...new Set(['default', ...canvases])] }
+  } catch (err) { return { success: false, error: err.message } }
+})
+
+ipcMain.handle('canvas-load', async (event, name) => {
+  try {
+    const safeName = path.basename(String(name || 'default'))
+    const canvasDir = path.join(currentWorkingDir, '.sigma2.0', 'canvases')
+    const canvasPath = path.join(canvasDir, `${safeName}.excalidraw`)
+    if (!fs.existsSync(canvasPath)) return { success: true, data: null }
+    return { success: true, data: JSON.parse(fs.readFileSync(canvasPath, 'utf8')) }
+  } catch (err) { return { success: false, error: err.message } }
+})
+
+ipcMain.handle('canvas-save', async (event, name, data) => {
+  try {
+    const safeName = path.basename(String(name || 'default'))
+    const canvasDir = path.join(currentWorkingDir, '.sigma2.0', 'canvases')
+    fs.mkdirSync(canvasDir, { recursive: true })
+    const canvasPath = path.join(canvasDir, `${safeName}.excalidraw`)
+    fs.writeFileSync(canvasPath, JSON.stringify(data), 'utf8')
+    return { success: true }
+  } catch (err) { return { success: false, error: err.message } }
+})
+
 ipcMain.handle('read-file', async (event, filePath) => {
   try {
     const fp = path.isAbsolute(filePath) ? filePath : path.join(currentWorkingDir, filePath)
@@ -739,18 +806,61 @@ ipcMain.handle('convert-pptx', async (event, filePath) => {
 
 app.whenReady().then(async () => {
   // 注册 sigma-file:// 自定义协议，用于视频等大型二进制文件流式加载
+  // 手动处理 MIME 类型 + Range 请求，保证 <video> 能正常播放/拖动进度
   protocol.handle('sigma-file', (request) => {
-    const filePath = request.url.replace('sigma-file:///', '')
-    // 处理 Windows 路径 (sigma-file:///C:/path/to/file.mp4)
-    const decoded = decodeURIComponent(filePath)
     try {
-      return net.fetch('file:///' + decoded)
-    } catch {
-      return new Response('File not found', { status: 404 })
+      const filePath = resolveSigmaFilePath(request.url)
+      if (!fs.existsSync(filePath)) {
+        return new Response('File not found', { status: 404 })
+      }
+      const stat = fs.statSync(filePath)
+      const mime = VIDEO_MIME_TYPES[path.extname(filePath).toLowerCase()] || 'application/octet-stream'
+      const rangeHeader = request.headers.get('range')
+
+      if (rangeHeader) {
+        const m = rangeHeader.match(/bytes=(\d*)-(\d*)/)
+        if (m) {
+          let start = m[1] ? parseInt(m[1], 10) : 0
+          let end = m[2] ? parseInt(m[2], 10) : stat.size - 1
+          if (Number.isNaN(start)) start = 0
+          if (Number.isNaN(end) || end >= stat.size) end = stat.size - 1
+          if (start > end || start >= stat.size) {
+            return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${stat.size}` } })
+          }
+          const chunkSize = end - start + 1
+          const fd = fs.openSync(filePath, 'r')
+          const buf = Buffer.alloc(chunkSize)
+          fs.readSync(fd, buf, 0, chunkSize, start)
+          fs.closeSync(fd)
+          return new Response(new Uint8Array(buf), {
+            status: 206,
+            headers: {
+              'Content-Type': mime,
+              'Content-Length': String(chunkSize),
+              'Content-Range': `bytes ${start}-${end}/${stat.size}`,
+              'Accept-Ranges': 'bytes',
+            },
+          })
+        }
+      }
+
+      const data = fs.readFileSync(filePath)
+      return new Response(new Uint8Array(data), {
+        headers: {
+          'Content-Type': mime,
+          'Content-Length': String(stat.size),
+          'Accept-Ranges': 'bytes',
+        },
+      })
+    } catch (err) {
+      return new Response('Error: ' + err.message, { status: 500 })
     }
   })
 
   Menu.setApplicationMenu(null)
+
+  // 启动时清空画布，让每次启动都从空白画布开始
+  clearAllCanvases()
 
   // Show splash screen
   createSplashWindow()

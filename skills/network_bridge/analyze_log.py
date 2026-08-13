@@ -1,5 +1,21 @@
 import re
-log_path = r'C:\Users\Landis\Desktop\sigma - 副本\skills\network_bridge\logs\network_bridge_2026-07-19.log'
+import sys
+from pathlib import Path
+
+
+def _resolve_log_path() -> Path:
+    """解析日志文件路径：优先命令行参数，否则取 logs/ 目录下最新的日志文件。"""
+    if len(sys.argv) > 1:
+        return Path(sys.argv[1])
+    log_dir = Path(__file__).parent / "logs"
+    candidates = sorted(log_dir.glob("network_bridge_*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not candidates:
+        raise SystemExit("未找到日志文件，也未提供路径参数。用法: python analyze_log.py <log_path>")
+    return candidates[0]
+
+
+log_path = _resolve_log_path()
+print(f'=== 分析日志: {log_path} ===')
 with open(log_path, 'r', encoding='utf-8') as f:
     lines = f.readlines()
 

@@ -13,6 +13,7 @@ Anthropic Tool Use 循环
 """
 import json
 import os
+import re
 import asyncio
 import time
 import uuid
@@ -66,6 +67,21 @@ def resolve_questionnaire(session_id: str, answers: list[dict]) -> bool:
     return False
 
 
+# 语言指令映射：根据前端语言设置注入，统一 LLM 的思考、工具调用与回复语言
+_LANGUAGE_INSTRUCTIONS: dict[str, str] = {
+    "zh": (
+        "## 语言要求（必须遵守）\n"
+        "全程使用简体中文进行思考、调用工具（包括工具参数中的文本内容）以及向用户回复。"
+        "除非用户明确要求其他语言，否则不要输出英文。\n"
+    ),
+    "en": (
+        "## Language Requirement (Mandatory)\n"
+        "Always think, call tools (including text in tool arguments), and respond to the user in English. "
+        "Do not output Chinese unless the user explicitly requests another language.\n"
+    ),
+}
+
+
 class ToolLoop:
     """Anthropic tool use 循环引擎，支持并行工具执行、TodoList 追踪、上下文压缩"""
 
@@ -82,14 +98,22 @@ class ToolLoop:
         session_id: str = "default",
         tool_timeout: int = 300,
         protocol: str = "anthropic",
+        language: str = "zh",
     ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.protocol = protocol
+        self.language = language
         self.skill_manager = skill_manager
         self.max_iterations = max_iterations
         self.todo_manager = todo_manager
+        self.sigma_root = Path(__file__).resolve().parent
+        self.project_root = (
+            Path(skill_manager.cwd).resolve()
+            if skill_manager and str(skill_manager.cwd) not in ("", ".")
+            else None
+        )
         if protocol == "openai":
             self.messages_url = f"{self.base_url}/chat/completions"
         else:
@@ -158,6 +182,19 @@ class ToolLoop:
             prompt += "─── 以下为通用工具和策略 ───\n\n"
 
         prompt += "你是 Sigma，一个拥有文件系统操作和联网搜索能力的 AI 助手。\n\n"
+
+        lang_instruction = _LANGUAGE_INSTRUCTIONS.get(self.language)
+        if lang_instruction:
+            prompt += lang_instruction + "\n"
+
+        prompt += (
+            "## 目录边界（必须遵守）\n\n"
+            f"- Sigma 本体目录：`{self.sigma_root}`。这里存放 Sigma 自身的后端代码、前端代码、`skills/`、`sigma.config.json` 等运行与配置文件。\n"
+            f"- 当前项目目录：`{self.project_root}`。这是用户当前打开的项目，文件工具传入相对路径时默认以此目录为基准。\n"
+            "- 用户询问 Sigma 本身的实现、内置 Skill、应用配置、后端或前端代码时，必须在 Sigma 本体目录中查找，并传入上述绝对路径；不要在当前项目目录中猜测或搜索。\n"
+            "- 用户询问当前项目的代码、资源或配置时，才在当前项目目录中查找；相对路径仅用于当前项目文件。\n"
+            "- 无法判断目标属于哪一类时，先向用户澄清，或分别检查两个明确目录后说明结果。\n\n"
+        )
 
         if headers:
             prompt += "可用技能：\n\n"
@@ -679,7 +716,13 @@ class ToolLoop:
             try:
                 file_name = os.path.basename(file_path)
                 suffix = Path(file_path).suffix.lower()
-                file_type = {".xlsx": "xlsx", ".docx": "docx", ".md": "markdown"}.get(suffix, "file")
+                file_type = {
+                    ".xlsx": "xlsx", ".docx": "docx", ".pptx": "pptx", ".pdf": "pdf",
+                    ".md": "markdown", ".py": "python", ".js": "javascript",
+                    ".ts": "typescript", ".tsx": "typescript", ".jsx": "javascript",
+                    ".html": "html", ".css": "css", ".json": "json",
+                    ".yaml": "yaml", ".yml": "yaml", ".xml": "xml",
+                }.get(suffix, "file")
 
                 # 推送修改开始
                 await queue.put({
@@ -724,6 +767,82 @@ class ToolLoop:
 
     # ─── LLM 调用 ───
 
+    @staticmethod
+    def _extract_canvas_elements(partial_json: str, already_pushed: int) -> int:
+        """从部分 JSON 中提取 elements 数组中完整对象的数量。"""
+        # 找到 "elements" 数组的起始位置
+        match = re.search(r'"elements"\s*:\s*\[', partial_json)
+        if not match:
+            return 0
+        start = match.end()
+        depth = 1
+        i = start
+        count = 0
+        in_string = False
+        escape = False
+        while i < len(partial_json) and depth > 0:
+            c = partial_json[i]
+            if escape:
+                escape = False
+            elif c == '\\':
+                escape = True
+            elif c == '"' and not escape:
+                in_string = not in_string
+            elif not in_string:
+                if c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 1:  # 回到数组层级，说明一个完整元素结束
+                        count += 1
+                elif c == '[':
+                    depth += 1
+                elif c == ']':
+                    depth -= 1
+            i += 1
+        return count
+
+    @staticmethod
+    def _parse_canvas_elements_json(partial_json: str, count: int) -> list[dict]:
+        """从部分 JSON 中解析 elements 数组的前 count 个完整对象。"""
+        match = re.search(r'"elements"\s*:\s*\[', partial_json)
+        if not match:
+            return []
+        start = match.end()
+        depth = 1
+        i = start
+        elements = []
+        in_string = False
+        escape = False
+        current_start = -1
+        while i < len(partial_json) and depth > 0 and len(elements) < count:
+            c = partial_json[i]
+            if escape:
+                escape = False
+            elif c == '\\':
+                escape = True
+            elif c == '"' and not escape:
+                in_string = not in_string
+            elif not in_string:
+                if c == '{':
+                    if depth == 1:
+                        current_start = i
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 1 and current_start >= 0:
+                        try:
+                            elements.append(json.loads(partial_json[current_start:i + 1]))
+                        except json.JSONDecodeError:
+                            pass
+                        current_start = -1
+                elif c == '[':
+                    depth += 1
+                elif c == ']':
+                    depth -= 1
+            i += 1
+        return elements
+
     async def _call_llm(
         self, messages: list, tools: list, queue: asyncio.Queue
     ) -> dict | None:
@@ -739,7 +858,7 @@ class ToolLoop:
         self, messages: list, tools: list, queue: asyncio.Queue
     ) -> dict | None:
         headers = {
-            "x-api-key": self.api_key,
+            "Authorization": f"Bearer {self.api_key}",
             "anthropic-version": "2023-06-01",
             "content-type": "application/json",
         }
@@ -768,6 +887,8 @@ class ToolLoop:
                     text_buf: list[str] = []      # 收集文本内容用于日志
                     thinking_buf: list[str] = []  # 收集思考内容用于日志
                     stop_reason: str = ""         # Anthropic stop_reason
+                    # 流式 canvas 元素追踪：tool_use block index -> 已推送的元素数量
+                    canvas_stream_state: dict[int, int] = {}
 
                     async for line in resp.aiter_lines():
                         # 流式读取中检查取消信号，及时中断
@@ -795,6 +916,9 @@ class ToolLoop:
                                 "text": "",
                                 "input_json": "",
                             }
+                            # 初始化 canvas 流式追踪
+                            if block_type == "tool_use" and block.get("name") == "canvas_update":
+                                canvas_stream_state[index] = 0
 
                         elif event_type == "content_block_delta":
                             if index not in blocks:
@@ -818,6 +942,23 @@ class ToolLoop:
                                 await queue.put({"type": "text", "content": text, "contentType": "text"})
                             elif delta_type == "input_json_delta":
                                 block["input_json"] += delta.get("partial_json", "")
+                                # canvas_update 流式解析：实时提取 elements 数组中的完整对象
+                                if index in canvas_stream_state and block["name"] == "canvas_update":
+                                    new_count = self._extract_canvas_elements(block["input_json"], canvas_stream_state[index])
+                                    if new_count > canvas_stream_state[index]:
+                                        canvas_stream_state[index] = new_count
+                                        # 提取 operation 和 canvas_name（可能还未完整，用默认值）
+                                        op_match = re.search(r'"operation"\s*:\s*"(\w+)"', block["input_json"])
+                                        name_match = re.search(r'"canvas_name"\s*:\s*"([^"]*)"', block["input_json"])
+                                        await queue.put({
+                                            "type": "canvas_patch",
+                                            "canvas_name": name_match.group(1) if name_match else "default",
+                                            "operation": op_match.group(1) if op_match else "add",
+                                            "elements": self._parse_canvas_elements_json(block["input_json"], new_count),
+                                            "batch_index": new_count - 1,
+                                            "batch_total": None,
+                                            "is_final": False,
+                                        })
 
                         elif event_type == "content_block_stop":
                             if index not in blocks:
@@ -833,6 +974,18 @@ class ToolLoop:
                                     "name": block["name"],
                                     "input": tool_input,
                                 })
+                                # canvas_update 流式结束，发送最终标记
+                                if index in canvas_stream_state:
+                                    del canvas_stream_state[index]
+                                    await queue.put({
+                                        "type": "canvas_patch",
+                                        "canvas_name": tool_input.get("canvas_name", "default"),
+                                        "operation": tool_input.get("operation", "add"),
+                                        "elements": [],
+                                        "batch_index": -1,
+                                        "batch_total": None,
+                                        "is_final": True,
+                                    })
 
                         elif event_type == "message_stop":
                             break
@@ -1058,8 +1211,8 @@ class ToolLoop:
         log.debug(f"[Tool Start] {tool_name} input={json.dumps(tool_input, ensure_ascii=False)[:200]}")
 
         try:
-            # sub_agent / batch_read 特殊处理：注入 progress callback 实现实时 SSE 推送
-            if tool_name in ("sub_agent", "batch_read"):
+            # 支持画布工具的增量 SSE 推送
+            if tool_name in ("sub_agent", "batch_read", "canvas_update"):
                 inst = self.skill_manager._get_instance(tool_name)
 
                 def _on_progress(event):
@@ -1128,8 +1281,8 @@ class ToolLoop:
                         "truncated": getattr(result, "truncated", False),
                     })()
 
-            # sub_agent / batch_read 执行完清空 callback
-            if tool_name in ("sub_agent", "batch_read"):
+            # 执行完清空进度回调
+            if tool_name in ("sub_agent", "batch_read", "canvas_update"):
                 inst = self.skill_manager._instances.get(tool_name)
                 if inst:
                     inst.set_progress_callback(None)

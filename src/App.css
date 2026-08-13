@@ -57,3 +57,32 @@
   left: -3px;
   right: -3px;
 }
+
+/* ── 资源管理器折叠 / 展开按钮 ── */
+
+.explorer-expand-btn {
+  position: absolute;
+  right: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 20;
+  width: 30px;
+  height: 52px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-right: none;
+  border-radius: 8px 0 0 8px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  transition: background 0.15s, color 0.15s;
+  flex-shrink: 0;
+}
+
+.explorer-expand-btn:hover {
+  background: var(--overlay-active);
+  color: var(--text-primary);
+  border-color: var(--accent);
+}

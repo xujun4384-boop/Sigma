@@ -275,7 +275,7 @@ async def _generate_summary(
                 resp = await client.post(
                     f"{base_url.rstrip('/')}/v1/messages",
                     headers={
-                        "x-api-key": api_key,
+                        "Authorization": f"Bearer {api_key}",
                         "anthropic-version": "2023-06-01",
                         "content-type": "application/json",
                     },

@@ -14,7 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from typing import Any
 
@@ -26,6 +26,11 @@ class RelayHandler(BaseHTTPRequestHandler):
 
     # 由外部设置的共享密钥
     shared_key: str = ""
+    request_timeout = 15
+
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(self.request_timeout)
 
     def _auth_fail(self):
         self.send_response(401)
@@ -137,7 +142,8 @@ def main():
     # ── 自动重启保护：崩溃后 3 秒自动拉起 ──
     restart_count = 0
     while True:
-        server = HTTPServer((args.host, args.port), RelayHandler)
+        server = ThreadingHTTPServer((args.host, args.port), RelayHandler)
+        server.daemon_threads = True
         print(f"[Relay] 微信 API 中转服务已启动 (重启次数: {restart_count})")
         print(f"[Relay] 监听: {args.host}:{args.port}")
         print(f"[Relay] 出站 IP: 将作为微信 IP 白名单地址")

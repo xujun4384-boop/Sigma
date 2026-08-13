@@ -99,6 +99,7 @@ interface ChatPanelProps {
   onFileDiffUpdate?: (data: { filePath: string; fileName: string; fileType: string; diffData: any }) => void
   onFileModificationStart?: (data: { filePath: string; fileName: string; fileType: string }) => void
   onFileModificationComplete?: (data: { filePath: string }) => void
+  onCanvasPatch?: (data: { canvasName: string; operation: 'add' | 'replace'; elements: any[]; batchIndex?: number; batchTotal?: number; isFinal?: boolean }) => void
   onOpenTerminal?: (tab: TerminalTab) => void
 }
 
@@ -177,8 +178,8 @@ function resolveActiveLLM(config: KimiConfig): { name: string; baseUrl: string; 
 
 // ── ChatPanel ──
 
-export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKey, onFileDiffUpdate, onFileModificationStart, onFileModificationComplete, onOpenTerminal }: ChatPanelProps) {
-  const { t } = useTranslation()
+export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKey, onFileDiffUpdate, onFileModificationStart, onFileModificationComplete, onCanvasPatch, onOpenTerminal }: ChatPanelProps) {
+  const { t, lang } = useTranslation()
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [attachedFiles, setAttachedFiles] = useState<{ name: string; path: string }[]>([])
@@ -305,6 +306,15 @@ export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKe
                 })
               } else if (type === 'file_modification_complete') {
                 onFileModificationComplete?.({ filePath: data.file_path as string })
+              } else if (type === 'canvas_patch') {
+                onCanvasPatch?.({
+                  canvasName: (data.canvas_name || 'default') as string,
+                  operation: (data.operation || 'add') as 'add' | 'replace',
+                  elements: (data.elements || []) as any[],
+                  batchIndex: data.batch_index as number | undefined,
+                  batchTotal: data.batch_total as number | undefined,
+                  isFinal: data.is_final as boolean | undefined,
+                })
               }
             } catch { /* skip */ }
           }
@@ -369,6 +379,7 @@ export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKe
         subAgentMaxTurns: systemSettings.subAgentMaxTurns || 8,
         backupEnabled: systemSettings.backupEnabled ?? true,
         working_dir: workingDir,
+        language: lang,
         config: { ...resolveActiveLLM(config), skillKeys: config.skillKeys, llms: config.llms, customAgents: loadAgents().map(a => {
           const llm = config.llms.find(entry => entry.id === a.llmConfigId)
           return { name: a.name, description: a.description, systemPrompt: a.systemPrompt, tools: a.tools, model: llm?.model || a.model, capabilities: a.capabilities, llmConfigId: a.llmConfigId || '' }
@@ -448,12 +459,12 @@ export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKe
               continue
             }
             if (data.type === 'chat_complete') {
-              handleSSEEvent(data, assistantId, setMessages, setContextUsage, onFileDiffUpdate, onFileModificationStart, onFileModificationComplete)
+              handleSSEEvent(data, assistantId, setMessages, setContextUsage, onFileDiffUpdate, onFileModificationStart, onFileModificationComplete, onCanvasPatch)
               // 通知：任务完成
               notifyIfUnfocused('Sigma', t("chat.task_complete"), systemSettings.notifySound)
               continue
             }
-            handleSSEEvent(data, assistantId, setMessages, setContextUsage, onFileDiffUpdate, onFileModificationStart, onFileModificationComplete)
+            handleSSEEvent(data, assistantId, setMessages, setContextUsage, onFileDiffUpdate, onFileModificationStart, onFileModificationComplete, onCanvasPatch)
           } catch { /* skip malformed */ }
         }
       }
@@ -834,6 +845,7 @@ function handleSSEEvent(
   onFileDiffUpdate?: (data: { filePath: string; fileName: string; fileType: string; diffData: any }) => void,
   onFileModificationStart?: (data: { filePath: string; fileName: string; fileType: string }) => void,
   onFileModificationComplete?: (data: { filePath: string }) => void,
+  onCanvasPatch?: (data: { canvasName: string; operation: 'add' | 'replace'; elements: any[]; batchIndex?: number; batchTotal?: number; isFinal?: boolean }) => void,
 ) {
   const type = data.type as string
 
@@ -1146,6 +1158,18 @@ function handleSSEEvent(
 
   if (type === 'file_modification_complete') {
     onFileModificationComplete?.({ filePath: data.file_path as string })
+    return
+  }
+
+  if (type === 'canvas_patch') {
+    onCanvasPatch?.({
+      canvasName: (data.canvas_name || 'default') as string,
+      operation: (data.operation || 'add') as 'add' | 'replace',
+      elements: (data.elements || []) as any[],
+      batchIndex: data.batch_index as number | undefined,
+      batchTotal: data.batch_total as number | undefined,
+      isFinal: data.is_final as boolean | undefined,
+    })
     return
   }
 }

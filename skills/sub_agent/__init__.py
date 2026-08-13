@@ -12,6 +12,7 @@ sub_agent skill - 并行子 Agent 创建与编排
 import json
 import os
 import time
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any
@@ -186,9 +187,18 @@ class SubAgentTool(BaseTool):
             "coder": "实现者，负责编写代码、修改文件。",
             "explore": "探索者，负责调研、搜索、分析。只读模式。",
         }
+        sigma_root = (
+            self._skill_manager.skills_root.parent.resolve()
+            if self._skill_manager and hasattr(self._skill_manager, "skills_root")
+            else Path(__file__).resolve().parents[2]
+        )
+        project_root = Path(cwd).resolve() if str(cwd) not in ("", ".") else None
         system_prompt = (
             f"你是 Sigma 的子 Agent（{type_desc.get(subagent_type, '')}）。\n"
+            f"Sigma 本体目录: {sigma_root}\n"
+            f"当前项目目录: {project_root}\n"
             f"工作目录: {cwd}\n"
+            "目录规则：Sigma 自身代码、skills 和配置只在 Sigma 本体目录查找；当前项目文件才在当前项目目录查找。\n"
             f"可用工具: {', '.join(sorted(allowed_tools)) if allowed_tools else '无'}\n\n"
             "规则:\n"
             "- 只做分配给你的任务，不越界\n"
@@ -406,7 +416,7 @@ class SubAgentTool(BaseTool):
             resp = client.post(
                 url,
                 headers={
-                    "x-api-key": api_key,
+                    "Authorization": f"Bearer {api_key}",
                     "anthropic-version": "2023-06-01",
                     "Content-Type": "application/json",
                 },

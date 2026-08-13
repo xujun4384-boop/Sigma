@@ -24,6 +24,12 @@ export interface SkillKeysConfig {
   wechatRelayKey: string
   fengniaoApiKey: string
   flyaiApiKey: string
+  mail163Address: string
+  mail163AuthCode: string
+  mail163SmtpHost: string
+  mail163SmtpPort: string
+  mail163ImapHost: string
+  mail163ImapPort: string
 }
 
 export interface KimiConfig {
@@ -80,8 +86,11 @@ export interface ElectronAPI {
   getSigmaConfig: () => Promise<{ success: boolean; data?: SigmaConfig; error?: string }>
   saveSigmaConfig: (config: SigmaConfig) => Promise<{ success: boolean; error?: string }>
   getFolderTree: (folderPath?: string) => Promise<{ success: boolean; data?: FolderTreeItem[]; rootPath?: string; error?: string }>
-  readFile: (filePath: string) => Promise<{ success: boolean; data?: string; isBinary?: boolean; isVideo?: boolean; error?: string }>
-  getFileUrl: (filePath: string) => Promise<{ success: boolean; data?: string; error?: string }>
+  readFile: (filePath: string) => Promise<{ success: boolean; data?: string | ArrayBuffer; isVideo?: boolean; error?: string }>
+  listCanvases: () => Promise<{ success: boolean; data?: string[]; error?: string }>
+  loadCanvas: (name: string) => Promise<{ success: boolean; data?: unknown; error?: string }>
+  saveCanvas: (name: string, data: unknown) => Promise<{ success: boolean; error?: string }>
+  getFileUrl: (filePath: string) => Promise<{ success: boolean; url?: string; error?: string }>
   getWorkingDirectory: () => Promise<{ success: boolean; data?: string; error?: string }>
   getWorkspaceDirectories: () => Promise<{ success: boolean; data?: string[]; error?: string }>
   selectFolder: () => Promise<{ success: boolean; data?: string; error?: string }>

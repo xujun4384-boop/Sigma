@@ -11,6 +11,7 @@
     "electron:win": "npm run build && electron ."
   },
   "dependencies": {
+    "@excalidraw/excalidraw": "^0.18.1",
     "chokidar": "^3.6.0",
     "highlight.js": "^11.11.1",
     "lucide-react": "^0.400.0",

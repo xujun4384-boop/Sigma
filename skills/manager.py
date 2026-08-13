@@ -13,6 +13,7 @@ from typing import Any
 import inspect
 
 from skills.base import BaseTool, ToolResult
+from skills.canvas import CanvasUpdateTool
 from skills.file_operations import ReadTool, WriteTool, EditTool, BashTool
 from skills.web_search import WebSearchTool
 from skills.task_management import TodoWriteTool
@@ -42,6 +43,7 @@ from skills.writing_polish import WritingPolishTool
 from skills.ask_user import AskUserTool
 from skills.network_bridge import NetworkBridgeTool
 from skills.wechat_publisher import WeChatPublisherTool
+from skills.mail_163 import Mail163Tool
 from skills.project_memory import (
     ProjectScanTool, MemoryReadTool, MemoryRecordTool, MemoryUpdateTool,
 )
@@ -66,6 +68,7 @@ _INTERNAL_TOOLS = {"read", "read_docx", "read_pdf", "read_pptx"}
 
 # 所有工具类的注册表
 ALL_TOOL_CLASSES: dict[str, type] = {
+    "canvas_update": CanvasUpdateTool,
     "edit": EditTool,
     "bash": BashTool,
     "web_search": WebSearchTool,
@@ -99,6 +102,7 @@ ALL_TOOL_CLASSES: dict[str, type] = {
     "video_auto": VideoAutoTool,
     "video_custom": VideoCustomTool,
     "wechat_publish": WeChatPublisherTool,
+    "mail_163": Mail163Tool,
     "fengniao_search": FengniaoFuzzySearch,
     "fengniao_basic_info": FengniaoBasicInfo,
     "fengniao_shareholders": FengniaoShareholders,
@@ -133,6 +137,10 @@ ALL_TOOL_CLASSES: dict[str, type] = {
 
 # Skill → 包含的工具名映射
 ALL_SKILLS: dict[str, dict] = {
+    "canvas": {
+        "label": "画布编辑",
+        "tool_names": ["canvas_update"],
+    },
     "file_operations": {
         "label": "文件操作",
         "tool_names": ["edit", "bash"],
@@ -245,6 +253,10 @@ ALL_SKILLS: dict[str, dict] = {
         "label": "公众号发布",
         "tool_names": ["wechat_publish"],
     },
+    "mail_163": {
+        "label": "163邮箱收发",
+        "tool_names": ["mail_163"],
+    },
     "fengniao": {
         "label": "风鸟企业查询",
         "tool_names": [
@@ -275,6 +287,9 @@ class SkillManager:
                  wechat_appid: str = "", wechat_appsecret: str = "",
                  wechat_relay_url: str = "", wechat_relay_key: str = "",
                  fengniao_api_key: str = "", flyai_api_key: str = "",
+                 mail163_address: str = "", mail163_auth_code: str = "",
+                 mail163_smtp_host: str = "", mail163_smtp_port: str = "",
+                 mail163_imap_host: str = "", mail163_imap_port: str = "",
                  llm_config: dict | None = None,
                  todo_manager: TodoManager | None = None,
                  backup_enabled: bool = True,
@@ -298,6 +313,12 @@ class SkillManager:
         self.wechat_relay_key = wechat_relay_key
         self.fengniao_api_key = fengniao_api_key
         self.flyai_api_key = flyai_api_key
+        self.mail163_address = mail163_address
+        self.mail163_auth_code = mail163_auth_code
+        self.mail163_smtp_host = mail163_smtp_host
+        self.mail163_smtp_port = mail163_smtp_port
+        self.mail163_imap_host = mail163_imap_host
+        self.mail163_imap_port = mail163_imap_port
         self.llm_config = llm_config or {}
         self.todo_manager = todo_manager
         self.sub_agent_max_turns = 8  # 可被 server.py 动态设置
@@ -520,6 +541,16 @@ class SkillManager:
                     appsecret=self.wechat_appsecret,
                     relay_url=self.wechat_relay_url,
                     relay_key=self.wechat_relay_key,
+                )
+            elif tool_name == "mail_163":
+                self._instances[tool_name] = cls(
+                    cwd=str(self.cwd),
+                    address=self.mail163_address,
+                    auth_code=self.mail163_auth_code,
+                    smtp_host=self.mail163_smtp_host,
+                    smtp_port=self.mail163_smtp_port,
+                    imap_host=self.mail163_imap_host,
+                    imap_port=self.mail163_imap_port,
                 )
             elif tool_name in (
                 "fengniao_search", "fengniao_basic_info", "fengniao_shareholders",

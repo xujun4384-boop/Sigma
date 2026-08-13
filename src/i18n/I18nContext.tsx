@@ -11,7 +11,7 @@ interface I18nContextValue {
 }
 
 const I18nContext = createContext<I18nContextValue>({
-  lang: "en",
+  lang: "zh",
   t: (key: string) => key,
   setLang: () => {},
 });
@@ -44,7 +44,7 @@ export function getSavedLanguage(): Lang {
     const saved = localStorage.getItem(STORAGE_KEY);
     if (saved === "en" || saved === "zh") return saved;
   } catch {}
-  return "en";
+  return "zh";
 }
 
 export function saveLanguage(lang: Lang) {

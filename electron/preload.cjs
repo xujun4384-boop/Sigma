@@ -15,6 +15,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // File Tree
   getFolderTree: (folderPath) => ipcRenderer.invoke('get-folder-tree', folderPath),
   readFile: (filePath) => ipcRenderer.invoke('read-file', filePath),
+  listCanvases: () => ipcRenderer.invoke('canvas-list'),
+  loadCanvas: (name) => ipcRenderer.invoke('canvas-load', name),
+  saveCanvas: (name, data) => ipcRenderer.invoke('canvas-save', name, data),
   getFileUrl: (filePath) => ipcRenderer.invoke('get-file-url', filePath),
   getWorkingDirectory: () => ipcRenderer.invoke('get-working-directory'),
   getWorkspaceDirectories: () => ipcRenderer.invoke('get-workspace-directories'),

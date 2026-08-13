@@ -32,7 +32,7 @@ interface SidebarProps {
   onLanguageChange: (lang: string) => void
 }
 
-const DEFAULT_SYSTEM: SystemSettings = { maxIterations: 30, subAgentMaxTurns: 15, backupEnabled: true, notifySound: '', language: 'en' }
+const DEFAULT_SYSTEM: SystemSettings = { maxIterations: 30, subAgentMaxTurns: 15, backupEnabled: true, notifySound: '', language: 'zh' }
 
 export function loadSystemSettings(): SystemSettings {
   try {
@@ -586,6 +586,9 @@ function SkillKeysTab({ config, onSave }: { config: KimiConfig; onSave: (c: Kimi
   const [showRelayKey, setShowRelayKey] = useState(false)
   const [showFengniaoKey, setShowFengniaoKey] = useState(false)
   const [showFlyaiKey, setShowFlyaiKey] = useState(false)
+  const [showMail163Auth, setShowMail163Auth] = useState(false)
+  const [testingMail163, setTestingMail163] = useState(false)
+  const [mail163TestResult, setMail163TestResult] = useState<{ success: boolean; error?: string; detail?: string } | null>(null)
 
   const updateSkillKeys = (patch: Partial<SkillKeysConfig>) => {
     setForm(prev => ({ ...prev, skillKeys: { ...prev.skillKeys, ...patch } }))
@@ -619,6 +622,33 @@ function SkillKeysTab({ config, onSave }: { config: KimiConfig; onSave: (c: Kimi
       setTestResult({ success: false, error: e.message || 'Network error' })
     } finally {
       setTesting(false)
+    }
+  }
+
+  const handleTestMail163 = async () => {
+    setTestingMail163(true)
+    setMail163TestResult(null)
+    try {
+      const sk = form.skillKeys || {}
+      const baseUrl = await getBackendUrl()
+      const resp = await fetch(`${baseUrl}/api/test-mail163`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          address: sk.mail163Address || '',
+          authCode: sk.mail163AuthCode || '',
+          smtpHost: sk.mail163SmtpHost || 'smtp.163.com',
+          smtpPort: sk.mail163SmtpPort || '465',
+          imapHost: sk.mail163ImapHost || 'imap.163.com',
+          imapPort: sk.mail163ImapPort || '993',
+        }),
+      })
+      const data = await resp.json()
+      setMail163TestResult(data)
+    } catch (e: any) {
+      setMail163TestResult({ success: false, error: e.message || 'Network error' })
+    } finally {
+      setTestingMail163(false)
     }
   }
 
@@ -877,6 +907,87 @@ function SkillKeysTab({ config, onSave }: { config: KimiConfig; onSave: (c: Kimi
           />
           <button onClick={() => setShowFlyaiKey(v => !v)}>{showFlyaiKey ? <EyeOff size={14} /> : <Eye size={14} />}</button>
         </div>
+      </div>
+
+      <div className="config-section">
+        <h3>{t("skill_keys.mail163")}</h3>
+        <p className="section-desc">{t("skill_keys.mail163_desc")}</p>
+      </div>
+
+      <div className="config-field">
+        <label>{t("skill_keys.mail163_address")}</label>
+        <input
+          type="text"
+          value={form.skillKeys?.mail163Address || ''}
+          onChange={e => updateSkillKeys({ mail163Address: e.target.value })}
+          placeholder={t("skill_keys.mail163_address_placeholder")}
+        />
+      </div>
+
+      <div className="config-field">
+        <label>{t("skill_keys.mail163_auth_code")}</label>
+        <div className="key-row">
+          <input
+            type={showMail163Auth ? 'text' : 'password'}
+            value={form.skillKeys?.mail163AuthCode || ''}
+            onChange={e => updateSkillKeys({ mail163AuthCode: e.target.value })}
+            placeholder={t("skill_keys.mail163_auth_code_placeholder")}
+          />
+          <button onClick={() => setShowMail163Auth(v => !v)}>{showMail163Auth ? <EyeOff size={14} /> : <Eye size={14} />}</button>
+        </div>
+      </div>
+
+      <div className="config-field">
+        <label>{t("skill_keys.mail163_smtp_host")}</label>
+        <input
+          type="text"
+          value={form.skillKeys?.mail163SmtpHost || ''}
+          onChange={e => updateSkillKeys({ mail163SmtpHost: e.target.value })}
+          placeholder="smtp.163.com"
+        />
+      </div>
+
+      <div className="config-field">
+        <label>{t("skill_keys.mail163_smtp_port")}</label>
+        <input
+          type="text"
+          value={form.skillKeys?.mail163SmtpPort || ''}
+          onChange={e => updateSkillKeys({ mail163SmtpPort: e.target.value })}
+          placeholder="465"
+        />
+      </div>
+
+      <div className="config-field">
+        <label>{t("skill_keys.mail163_imap_host")}</label>
+        <input
+          type="text"
+          value={form.skillKeys?.mail163ImapHost || ''}
+          onChange={e => updateSkillKeys({ mail163ImapHost: e.target.value })}
+          placeholder="imap.163.com"
+        />
+      </div>
+
+      <div className="config-field">
+        <label>{t("skill_keys.mail163_imap_port")}</label>
+        <input
+          type="text"
+          value={form.skillKeys?.mail163ImapPort || ''}
+          onChange={e => updateSkillKeys({ mail163ImapPort: e.target.value })}
+          placeholder="993"
+        />
+      </div>
+
+      <div className="config-field">
+        <button className="test-btn" onClick={handleTestMail163} disabled={testingMail163}>
+          {testingMail163 ? t("api.testing") : t("skill_keys.test_mail163")}
+        </button>
+        {mail163TestResult && (
+          <span className={`test-result ${mail163TestResult.success ? 'success' : 'fail'}`}>
+            {mail163TestResult.success
+              ? (mail163TestResult.detail || 'OK')
+              : `Failed: ${mail163TestResult.error || '未知错误'}`}
+          </span>
+        )}
       </div>
 
       <button className="save-btn" onClick={handleSave}>

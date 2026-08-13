@@ -56,6 +56,14 @@ class FileWatcher:
     def _scan_and_snapshot(self):
         if not self.watch_dir.exists():
             return
+
+        # 缓存标记文件：存在则说明已完成过初始扫描，跳过全量扫描
+        sentinel = self.watch_dir / ".sigma2.0" / ".watcher_snapshot_ready"
+        if sentinel.exists():
+            log.info(f"[FileWatcher] 跳过全量扫描（已有缓存）: {self.watch_dir}")
+            return
+
+        count = 0
         for fpath in self.watch_dir.rglob("*"):
             if not fpath.is_file():
                 continue
@@ -65,8 +73,14 @@ class FileWatcher:
                 continue
             try:
                 file_diff_tracker.snapshot_file(str(fpath.resolve()))
+                count += 1
             except Exception:
                 continue
+
+        # 扫描完成后写入缓存标记
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.touch()
+        log.info(f"[FileWatcher] 初始全量扫描完成: {count} 个文件, {self.watch_dir}")
 
     # ─── 订阅者管理 ───
 

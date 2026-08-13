@@ -170,7 +170,7 @@ async def agent_ai_generate(request: Request):
                 resp = await client.post(
                     f"{base_url}/v1/messages",
                     headers={
-                        "x-api-key": api_key,
+                        "Authorization": f"Bearer {api_key}",
                         "anthropic-version": "2023-06-01",
                         "content-type": "application/json",
                     },
@@ -313,10 +313,17 @@ async def test_llm(request: Request):
                     "messages": [{"role": "user", "content": "Hi"}],
                 }
                 apply_model_specific_params(payload, model, protocol)
+                request_url = f"{base_url}/v1/messages" if "/v1" not in base_url else f"{base_url}/messages"
+                log.info(
+                    f"[TestLLM Debug] protocol={protocol} | request_url={request_url} | "
+                    f"payload={json.dumps(payload, ensure_ascii=False)} | "
+                    f"headers={{'Authorization': 'Bearer {api_key[:4]}...{api_key[-4:]} (len={len(api_key)})', "
+                    f"'anthropic-version': '2023-06-01', 'content-type': 'application/json'}}"
+                )
                 resp = await client.post(
-                    f"{base_url}/v1/messages" if "/v1" not in base_url else f"{base_url}/messages",
+                    request_url,
                     headers={
-                        "x-api-key": api_key,
+                        "Authorization": f"Bearer {api_key}",
                         "anthropic-version": "2023-06-01",
                         "content-type": "application/json",
                     },
@@ -330,8 +337,15 @@ async def test_llm(request: Request):
                     "messages": [{"role": "user", "content": "Hi"}],
                 }
                 apply_model_specific_params(payload, model, protocol)
+                request_url = f"{base_url}/v1/chat/completions" if "/v1" not in base_url else f"{base_url}/chat/completions"
+                log.info(
+                    f"[TestLLM Debug] protocol={protocol} | request_url={request_url} | "
+                    f"payload={json.dumps(payload, ensure_ascii=False)} | "
+                    f"headers={{'Authorization': 'Bearer {api_key[:4]}...{api_key[-4:]} (len={len(api_key)})', "
+                    f"'content-type': 'application/json'}}"
+                )
                 resp = await client.post(
-                    f"{base_url}/v1/chat/completions" if "/v1" not in base_url else f"{base_url}/chat/completions",
+                    request_url,
                     headers={
                         "Authorization": f"Bearer {api_key}",
                         "content-type": "application/json",
@@ -459,7 +473,7 @@ async def test_vision(request: Request):
             resp = await client.post(
                 full_url,
                 headers={
-                    "x-api-key": api_key,
+                    "Authorization": f"Bearer {api_key}",
                     "anthropic-version": "2023-06-01",
                     "content-type": "application/json",
                 },
@@ -478,6 +492,94 @@ async def test_vision(request: Request):
     except Exception as e:
         print(f"[test-vision] Exception: {e}")
         return {"success": False, "error": str(e)}
+
+
+def _check_mail163_smtp(address: str, auth_code: str, host: str, port: int):
+    """同步测试 SMTP 登录，返回 (ok, error)。"""
+    import smtplib
+    try:
+        server = smtplib.SMTP_SSL(host, port, timeout=30)
+        server.login(address, auth_code)
+        server.quit()
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def _check_mail163_imap(address: str, auth_code: str, host: str, port: int):
+    """同步测试 IMAP 登录并读取收件箱，返回 (ok, error)。"""
+    import imaplib
+    import traceback
+    try:
+        print(f"[test-mail163] IMAP connecting to {host}:{port}...")
+        imap = imaplib.IMAP4_SSL(host, port)
+        print(f"[test-mail163] IMAP login as {address}...")
+        imap.login(address, auth_code)
+        print(f"[test-mail163] IMAP login OK, sending ID command...")
+        # 163 要求登录后发送 IMAP ID 命令 (RFC 2971)，否则 select 会被拦截为 "Unsafe Login"
+        # 直接通过底层 socket 发送原始命令，绕过 imaplib 的参数引号转义
+        tag = imap._new_tag()
+        if isinstance(tag, bytes):
+            tag = tag.decode()
+        imap.send(f'{tag} ID ("name" "Sigma" "version" "1.0.0")\r\n'.encode("ascii"))
+        tag_bytes = tag.encode("ascii")
+        while True:
+            line = imap.readline()
+            if line.startswith(tag_bytes):
+                break
+        print(f"[test-mail163] IMAP ID OK, selecting INBOX...")
+        typ, data = imap.select("INBOX", readonly=True)
+        if typ != "OK":
+            imap.logout()
+            err_text = data[0].decode(errors="replace") if data and data[0] else str(data)
+            if "Unsafe Login" in err_text:
+                return False, (
+                    "163 安全拦截：请先在网页端授权。"
+                    "登录 163 网页邮箱 → 设置 → POP3/SMTP/IMAP → 检查「客户端授权」或「第三方客户端登录」开关，"
+                    "或重新生成授权码后重试。原始错误: " + err_text
+                )
+            return False, f"登录成功但打开收件箱失败: {err_text}"
+        imap.logout()
+        return True, None
+    except Exception as e:
+        traceback.print_exc()
+        return False, str(e)
+
+
+@app.post("/api/test-mail163")
+async def test_mail163(request: Request):
+    """测试 163 邮箱连接，验证授权码及 SMTP/IMAP 服务是否可用"""
+    body = await request.json()
+    address = body.get("address") or ""
+    auth_code = body.get("authCode") or ""
+    smtp_host = body.get("smtpHost") or "smtp.163.com"
+    imap_host = body.get("imapHost") or "imap.163.com"
+
+    def _to_port(value, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    smtp_port = _to_port(body.get("smtpPort"), 465)
+    imap_port = _to_port(body.get("imapPort"), 993)
+
+    if not address or not auth_code:
+        return {"success": False, "error": "缺少邮箱地址或授权码"}
+
+    smtp_ok, smtp_err = await asyncio.to_thread(_check_mail163_smtp, address, auth_code, smtp_host, smtp_port)
+    imap_ok, imap_err = await asyncio.to_thread(_check_mail163_imap, address, auth_code, imap_host, imap_port)
+
+    print(f"[test-mail163] SMTP ok={smtp_ok} err={smtp_err}")
+    print(f"[test-mail163] IMAP ok={imap_ok} err={imap_err}")
+
+    if smtp_ok and imap_ok:
+        return {"success": True, "detail": "SMTP 与 IMAP 均连接成功，授权码有效"}
+    if smtp_ok:
+        return {"success": True, "detail": f"SMTP 连接成功，但 IMAP 失败: {imap_err}"}
+    if imap_ok:
+        return {"success": True, "detail": f"IMAP 连接成功，但 SMTP 失败: {smtp_err}"}
+    return {"success": False, "error": f"SMTP 与 IMAP 均连接失败。SMTP: {smtp_err}。IMAP: {imap_err}"}
 
 
 # ─── 项目记忆 ───
@@ -573,7 +675,7 @@ async def _record_task_memory(
                 resp = await client.post(
                     f"{base_url.rstrip('/')}/v1/messages",
                     headers={
-                        "x-api-key": api_key,
+                        "Authorization": f"Bearer {api_key}",
                         "anthropic-version": "2023-06-01",
                         "content-type": "application/json",
                     },
@@ -693,7 +795,7 @@ async def _record_network_bridge_memory(
                 resp = await client.post(
                     f"{base_url.rstrip('/')}/v1/messages",
                     headers={
-                        "x-api-key": api_key,
+                        "Authorization": f"Bearer {api_key}",
                         "anthropic-version": "2023-06-01",
                         "content-type": "application/json",
                     },
@@ -833,6 +935,12 @@ async def _execute_custom_agent_chat(
         wechat_relay_key=skill_keys.get("wechatRelayKey", ""),
         fengniao_api_key=skill_keys.get("fengniaoApiKey", ""),
         flyai_api_key=skill_keys.get("flyaiApiKey", ""),
+        mail163_address=skill_keys.get("mail163Address", ""),
+        mail163_auth_code=skill_keys.get("mail163AuthCode", ""),
+        mail163_smtp_host=skill_keys.get("mail163SmtpHost", ""),
+        mail163_smtp_port=skill_keys.get("mail163SmtpPort", ""),
+        mail163_imap_host=skill_keys.get("mail163ImapHost", ""),
+        mail163_imap_port=skill_keys.get("mail163ImapPort", ""),
         llm_config={
             "base_url": base_url,
             "api_key": api_key,
@@ -928,7 +1036,7 @@ async def _execute_custom_agent_chat(
                     resp = await client.post(
                         f"{base_url}/v1/messages" if "/v1" not in base_url else f"{base_url}/messages",
                         headers={
-                            "x-api-key": api_key,
+                            "Authorization": f"Bearer {api_key}",
                             "anthropic-version": "2023-06-01",
                             "Content-Type": "application/json",
                         },
@@ -1060,7 +1168,7 @@ async def _execute_custom_agent_chat(
                         summary_resp = await client.post(
                             f"{base_url}/v1/messages" if "/v1" not in base_url else f"{base_url}/messages",
                             headers={
-                                "x-api-key": api_key,
+                                "Authorization": f"Bearer {api_key}",
                                 "anthropic-version": "2023-06-01",
                                 "Content-Type": "application/json",
                             },
@@ -1242,6 +1350,7 @@ async def _execute_chat(
     backup_enabled: bool = True,
     extra_context: list[str] | None = None,
     enabled_skills: list[str] | None = None,
+    language: str = "zh",
     request: Request | None = None,
 ):
     """核心 chat 执行逻辑，供 /api/chat 和 /api/panel-chat 共用。"""
@@ -1353,6 +1462,12 @@ async def _execute_chat(
         wechat_relay_key=skill_keys.get("wechatRelayKey", ""),
         fengniao_api_key=skill_keys.get("fengniaoApiKey", ""),
         flyai_api_key=skill_keys.get("flyaiApiKey", ""),
+        mail163_address=skill_keys.get("mail163Address", ""),
+        mail163_auth_code=skill_keys.get("mail163AuthCode", ""),
+        mail163_smtp_host=skill_keys.get("mail163SmtpHost", ""),
+        mail163_smtp_port=skill_keys.get("mail163SmtpPort", ""),
+        mail163_imap_host=skill_keys.get("mail163ImapHost", ""),
+        mail163_imap_port=skill_keys.get("mail163ImapPort", ""),
         llm_config={
             "base_url": base_url,
             "api_key": api_key,
@@ -1377,6 +1492,7 @@ async def _execute_chat(
         session_id=session_id,
         tool_timeout=int(config.get("toolTimeout", 300)),
         protocol=config.get("protocol", "anthropic"),
+        language=language,
     )
 
     queue = asyncio.Queue()
@@ -1504,6 +1620,7 @@ async def chat(request: Request):
         working_dir=body.get("working_dir", ""),
         workspace_dirs=body.get("workspace_dirs", []),
         backup_enabled=body.get("backupEnabled", True),
+        language=body.get("language", "zh"),
         request=request,
     )
 

@@ -1,0 +1,230 @@
+.canvas-panel {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-primary);
+}
+
+.canvas-panel-toolbar {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  flex-shrink: 0;
+}
+
+.canvas-save-status {
+  margin-right: auto;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.canvas-save-status.saving {
+  color: var(--accent);
+}
+
+.canvas-save-status.error {
+  color: var(--danger);
+}
+
+.canvas-save-button,
+.canvas-export-preview-button,
+.canvas-new-button,
+.canvas-selector {
+  padding: 4px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  background: var(--overlay-hover);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.canvas-selector {
+  max-width: 180px;
+  outline: none;
+}
+
+.canvas-save-button:hover:not(:disabled),
+.canvas-export-preview-button:hover,
+.canvas-new-button:hover,
+.canvas-selector:hover {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
+
+.canvas-save-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.canvas-panel-body {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+  background: var(--bg-primary);
+}
+
+[data-theme="dark"] .canvas-panel-body {
+  --color-canvas-background: #1a1b1e;
+  --color-grid: #3a3d42;
+}
+
+[data-theme="light"] .canvas-panel-body {
+  --color-canvas-background: #f7f7f8;
+  --color-grid: #d7d9de;
+}
+
+.canvas-panel-body .excalidraw {
+  width: 100%;
+  height: 100%;
+}
+
+.canvas-panel-loading {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.canvas-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 110;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--backdrop);
+}
+
+.canvas-modal {
+  width: min(360px, calc(100% - 32px));
+  padding: 20px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
+}
+
+.canvas-modal h3 {
+  margin-bottom: 8px;
+  color: var(--text-primary);
+  font-size: 15px;
+}
+
+.canvas-modal p {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.canvas-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.canvas-modal-actions button {
+  padding: 6px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 5px;
+  background: var(--overlay-hover);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.canvas-modal-actions button.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+.canvas-export-preview {
+  position: absolute;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-primary);
+}
+
+.canvas-export-preview-header {
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+}
+
+.canvas-export-preview-header div {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+
+.canvas-export-preview-header strong {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.canvas-export-preview-header span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.canvas-export-preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.canvas-export-preview-header button {
+  padding: 5px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  background: var(--accent-dim);
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.canvas-export-preview-actions button:not(:last-child) {
+  border-color: var(--border-color);
+  background: var(--overlay-hover);
+  color: var(--text-secondary);
+}
+
+.canvas-export-preview-actions button:hover {
+  color: var(--text-primary);
+}
+
+.canvas-export-preview-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 32px;
+  background: #d7d9de;
+}
+
+.canvas-export-preview-body img {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  width: auto;
+  height: auto;
+  background: #ffffff;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.24);
+}

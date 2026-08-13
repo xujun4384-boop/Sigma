@@ -109,6 +109,17 @@ const translations: Record<Lang, Record<string, string>> = {
     "skill_keys.flyai": "Travel Search (Fliggy/FlyAI)",
     "skill_keys.flyai_desc": "Travel search for flights, hotels, trains, attractions and vacation packages. Requires API Key from flyai.open.fliggy.com and the flyai-cli (npm i -g @fly-ai/flyai-cli).",
     "skill_keys.flyai_api_key": "API Key",
+    "skill_keys.mail163": "163 Mail",
+    "skill_keys.mail163_desc": "163 mailbox send/receive for the mail_163 skill. Uses SMTP to send and IMAP to receive/manage emails. Requires the client authorization code (not the login password).",
+    "skill_keys.mail163_address": "Email Address",
+    "skill_keys.mail163_address_placeholder": "yourname@163.com",
+    "skill_keys.mail163_auth_code": "Authorization Code",
+    "skill_keys.mail163_auth_code_placeholder": "Client authorization code",
+    "skill_keys.mail163_smtp_host": "SMTP Server",
+    "skill_keys.mail163_smtp_port": "SMTP Port",
+    "skill_keys.mail163_imap_host": "IMAP Server",
+    "skill_keys.mail163_imap_port": "IMAP Port",
+    "skill_keys.test_mail163": "Test Connection",
 
     // Sidebar - System
     "system.tool_loop": "Tool Loop",
@@ -186,6 +197,10 @@ const translations: Record<Lang, Record<string, string>> = {
     "preview.slide": "Slide",
     "preview.of": "of",
     "preview.lines": "lines",
+    "preview.category_files": "Files",
+    "preview.category_canvas": "Canvas",
+    "preview.category_html": "HTML",
+    "preview.rendered": "Rendered",
 
     // ScanningOverlay
     "scan.first_use": "First Use",
@@ -403,6 +418,17 @@ const translations: Record<Lang, Record<string, string>> = {
     "skill_keys.flyai": "旅行搜索（飞猪/FlyAI）",
     "skill_keys.flyai_desc": "机票、酒店、火车票、景点门票、度假套餐等旅行搜索。需在 flyai.open.fliggy.com 获取 API Key，并安装 flyai-cli（npm i -g @fly-ai/flyai-cli）。",
     "skill_keys.flyai_api_key": "API Key",
+    "skill_keys.mail163": "163 邮箱",
+    "skill_keys.mail163_desc": "mail_163 技能的 163 邮箱收发配置。SMTP 发送邮件，IMAP 接收/管理邮件。需填写客户端授权码（非登录密码）。",
+    "skill_keys.mail163_address": "邮箱地址",
+    "skill_keys.mail163_address_placeholder": "yourname@163.com",
+    "skill_keys.mail163_auth_code": "授权码",
+    "skill_keys.mail163_auth_code_placeholder": "客户端授权码",
+    "skill_keys.mail163_smtp_host": "SMTP 服务器",
+    "skill_keys.mail163_smtp_port": "SMTP 端口",
+    "skill_keys.mail163_imap_host": "IMAP 服务器",
+    "skill_keys.mail163_imap_port": "IMAP 端口",
+    "skill_keys.test_mail163": "测试连接",
 
     // Sidebar - System
     "system.tool_loop": "工具循环",
@@ -479,6 +505,10 @@ const translations: Record<Lang, Record<string, string>> = {
     "preview.slide": "幻灯片",
     "preview.of": "/",
     "preview.lines": "行",
+    "preview.category_files": "文件",
+    "preview.category_canvas": "画布",
+    "preview.category_html": "HTML",
+    "preview.rendered": "渲染预览",
 
     // ScanningOverlay
     "scan.first_use": "首次使用",

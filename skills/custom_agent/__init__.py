@@ -7,6 +7,7 @@ custom_agent skill - 调用用户自定义的专用 Agent
 """
 import json
 import time
+from pathlib import Path
 import httpx
 from dataclasses import dataclass, field
 
@@ -114,10 +115,20 @@ class CustomAgentTool(BaseTool):
             f"| tools={sorted(allowed_tools)} | protocol={protocol}"
         )
 
-        # 构建消息，注入当前工作目录等上下文
+        # 构建消息，注入 Sigma 本体目录和当前项目目录等上下文
         enhanced_prompt = system_prompt.strip()
-        if self.cwd:
-            enhanced_prompt += f"\n\n当前工作目录: {self.cwd}"
+        sigma_root = (
+            self._skill_manager.skills_root.parent.resolve()
+            if self._skill_manager and hasattr(self._skill_manager, "skills_root")
+            else Path(__file__).resolve().parents[2]
+        )
+        project_root = Path(self.cwd).resolve() if self.cwd and str(self.cwd) not in ("", ".") else None
+        enhanced_prompt += (
+            f"\n\nSigma 本体目录: {sigma_root}"
+            f"\n当前项目目录: {project_root}"
+            f"\n工作目录: {self.cwd}"
+            "\n目录规则：Sigma 自身代码、skills 和配置只在 Sigma 本体目录查找；当前项目文件才在当前项目目录查找。"
+        )
 
         messages = [
             {"role": "system", "content": enhanced_prompt},
@@ -337,7 +348,7 @@ class CustomAgentTool(BaseTool):
             resp = client.post(
                 url,
                 headers={
-                    "x-api-key": api_key,
+                    "Authorization": f"Bearer {api_key}",
                     "anthropic-version": "2023-06-01",
                     "Content-Type": "application/json",
                 },

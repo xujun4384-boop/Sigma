@@ -171,7 +171,7 @@ class ReadPdfTool(BaseTool):
             f"{base_url}/v1/messages",
             data=body,
             headers={
-                "x-api-key": self.vision_api_key,
+                "Authorization": f"Bearer {self.vision_api_key}",
                 "anthropic-version": "2023-06-01",
                 "Content-Type": "application/json",
             },

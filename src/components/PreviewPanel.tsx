@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/vs2015.css'
-import { X, ChevronLeft, ChevronRight, Terminal } from 'lucide-react'
+import { X, ChevronLeft, ChevronRight, Terminal, FileCode, PenTool, Monitor } from 'lucide-react'
 import type { FolderTreeItem } from '../types/electron'
 import type { FileDiffState } from '../App'
 import type { TerminalTab } from './ChatPanel'
@@ -12,6 +12,7 @@ import type { ExcelDiffData } from './ExcelDiffViewer'
 import CodeDiffViewer from './CodeDiffViewer'
 import { useTranslation } from '../i18n/I18nContext'
 import SigmaLoadingAnimation from './SigmaLoadingAnimation'
+import CanvasPanel from './CanvasPanel'
 import './PreviewPanel.css'
 
 interface Tab { path: string; name: string; type: string; isTerminal?: boolean; command?: string; content?: string }
@@ -23,6 +24,8 @@ interface Props {
   onAcknowledgeAllDiffs?: () => void
   terminalTabs?: TerminalTab[]
   onCloseTerminal?: (id: string) => void
+  canvasPatch?: { canvasName: string; operation: 'add' | 'replace'; elements: any[] } | null
+  onCanvasPatchApplied?: () => void
 }
 
 const REPLACE_WINDOW_MS = 5 * 60 * 1000
@@ -33,13 +36,24 @@ const LANG_MAP: Record<string, string> = {
   shell: 'bash', powershell: 'powershell', ini: 'ini', toml: 'ini', text: 'plaintext',
 }
 
-export default function PreviewPanel({ file, fileDiffState, fileDiffQueueLength, onAcknowledgeDiff, onAcknowledgeAllDiffs, terminalTabs, onCloseTerminal }: Props) {
+export default function PreviewPanel({ file, fileDiffState, fileDiffQueueLength, onAcknowledgeDiff, onAcknowledgeAllDiffs, terminalTabs, onCloseTerminal, canvasPatch, onCanvasPatchApplied }: Props) {
   const { t } = useTranslation()
   const [tabs, setTabs] = useState<Tab[]>([])
   const [activePath, setActivePath] = useState<string | null>(null)
+  const [category, setCategory] = useState<'files' | 'canvas' | 'html'>('files')
   const lastClickRef = useRef(0)
   const prevFilePathRef = useRef<string | null>(null)
   const pptxCacheRef = useRef<Map<string, string[]>>(new Map())
+
+  useEffect(() => {
+    if (canvasPatch) setCategory('canvas')
+  }, [canvasPatch])
+
+  // 检测文件变化：HTML 切到 HTML 分类，其他文件切回 Files 分类
+  useEffect(() => {
+    if (!file || file.type === 'folder') return
+    setCategory(file.type === 'html' ? 'html' : 'files')
+  }, [file])
 
   useEffect(() => {
     if (!file || file.type === 'folder') return
@@ -117,11 +131,14 @@ export default function PreviewPanel({ file, fileDiffState, fileDiffQueueLength,
   // ── Diff Mode: 如果 fileDiffState 匹配当前活动标签，显示差异视图 ──
   const queueProps = { queueIndex: 1, queueTotal: fileDiffQueueLength || 1, onAcknowledgeAll: onAcknowledgeAllDiffs }
   const shouldShowDiff = fileDiffState && fileDiffState.diffData !== null
-  if (shouldShowDiff) {
+  if (shouldShowDiff && category === 'files') {
     const activeDiffType = fileDiffState!.fileType || fileDiffState!.diffData?.file_type || activeTab?.type || ''
     if (activeDiffType === 'xlsx' || activeDiffType === 'excel') {
       return (
         <div className="preview-panel">
+          <div className="preview-category-bar">
+            <CategoryButtons category={category} onSelect={setCategory} t={t} />
+          </div>
           <ExcelDiffViewer diffData={fileDiffState!.diffData as ExcelDiffData} isModifying={fileDiffState!.isModifying} onAcknowledge={onAcknowledgeDiff} {...queueProps} />
         </div>
       )
@@ -135,6 +152,9 @@ export default function PreviewPanel({ file, fileDiffState, fileDiffQueueLength,
       const modified = lines.modified.length + paragraphs.modified.length
       return (
         <div className="preview-panel">
+          <div className="preview-category-bar">
+            <CategoryButtons category={category} onSelect={setCategory} t={t} />
+          </div>
           <CodeDiffViewer
             fileName={diffData?.file_name || fileDiffState!.fileName || activeTab?.name || ''}
             fileType={activeDiffType}
@@ -155,6 +175,9 @@ export default function PreviewPanel({ file, fileDiffState, fileDiffQueueLength,
       const lines = fileDiffState!.diffData?.lines || { added: [], removed: [], modified: [] }
       return (
         <div className="preview-panel">
+          <div className="preview-category-bar">
+            <CategoryButtons category={category} onSelect={setCategory} t={t} />
+          </div>
           <CodeDiffViewer
             fileName={fileDiffState!.diffData?.file_name || fileDiffState!.fileName || activeTab?.name || ''}
             fileType={activeDiffType}
@@ -172,29 +195,135 @@ export default function PreviewPanel({ file, fileDiffState, fileDiffQueueLength,
     }
   }
 
-  if (allTabs.length === 0) {
+  return (
+    <div className="preview-panel">
+      <div className="preview-category-bar">
+        <CategoryButtons category={category} onSelect={setCategory} t={t} />
+      </div>
+
+      {category === 'files' && allTabs.length === 0 && (
+        <div className="preview-empty-inner">
+          <SigmaLoadingAnimation />
+        </div>
+      )}
+
+      {category === 'files' && allTabs.length > 0 && (
+        <>
+          <div className="preview-tab-bar">
+            {allTabs.map(tab => (
+              <div key={tab.path} className={`preview-tab ${tab.path === activePath ? 'active' : ''} ${tab.isTerminal ? 'terminal' : ''}`}
+                onClick={() => { setActivePath(tab.path); lastClickRef.current = Date.now() }}>
+                {tab.isTerminal && <Terminal size={11} className="preview-tab-terminal-icon" />}
+                <span className="preview-tab-name">{tab.name}</span>
+                <button className="preview-tab-close" onClick={(e) => { e.stopPropagation(); handleCloseTab(tab.path) }}>
+                  <X size={12} />
+                </button>
+              </div>
+            ))}
+          </div>
+          {activeTab && <TabContent tab={activeTab} pptxCache={pptxCacheRef} />}
+        </>
+      )}
+
+      {category === 'canvas' && (
+        <CanvasView canvasPatch={canvasPatch} onCanvasPatchApplied={onCanvasPatchApplied} />
+      )}
+
+      {category === 'html' && (
+        <HtmlView file={file} />
+      )}
+    </div>
+  )
+}
+
+// ── 分类标签按钮 ──
+
+function CategoryButtons({ category, onSelect, t }: {
+  category: string
+  onSelect: (cat: 'files' | 'canvas' | 'html') => void
+  t: (key: string) => string
+}) {
+  const items: { key: 'files' | 'canvas' | 'html'; icon: React.ReactNode }[] = [
+    { key: 'files', icon: <FileCode size={14} /> },
+    { key: 'canvas', icon: <PenTool size={14} /> },
+    { key: 'html', icon: <Monitor size={14} /> },
+  ]
+  return (
+    <>
+      {items.map(item => (
+        <button
+          key={item.key}
+          className={`preview-category-btn ${category === item.key ? 'active' : ''}`}
+          onClick={() => onSelect(item.key)}
+        >
+          {item.icon}
+          <span>{t(`preview.category_${item.key}`)}</span>
+        </button>
+      ))}
+    </>
+  )
+}
+
+// ── 画布占位区 ──
+
+function CanvasView({ canvasPatch, onCanvasPatchApplied }: { canvasPatch?: { canvasName: string; operation: 'add' | 'replace'; elements: any[] } | null; onCanvasPatchApplied?: () => void }) {
+  return <CanvasPanel onCanvasPatch={canvasPatch ?? undefined} onCanvasPatchApplied={onCanvasPatchApplied} />
+}
+
+// ── HTML 渲染区 ──
+
+function HtmlView({ file }: { file: FolderTreeItem | null }) {
+  const { t } = useTranslation()
+  const [state, setState] = useState<{ loading: boolean; error: string; content: string }>({ loading: false, error: '', content: '' })
+
+  useEffect(() => {
+    let cancelled = false
+    if (!file || file.type !== 'html') {
+      setState({ loading: false, error: '', content: '' })
+      return
+    }
+    setState(s => ({ ...s, loading: true, error: '' }))
+    const load = async () => {
+      try {
+        const result = await window.electronAPI.readFile(file.path)
+        if (cancelled) return
+        if (!result.success) {
+          setState(s => ({ ...s, loading: false, error: result.error || 'Failed' }))
+          return
+        }
+        setState(s => ({ ...s, loading: false, content: (result.data as string) || '' }))
+      } catch (e: any) {
+        if (!cancelled) setState(s => ({ ...s, loading: false, error: e.message }))
+      }
+    }
+    load()
+    return () => { cancelled = true }
+  }, [file?.path, file?.type])
+
+  if (!file || file.type !== 'html') {
     return (
-      <div className="preview-panel preview-empty">
-        <SigmaLoadingAnimation />
+      <div className="preview-html-placeholder">
+        <Monitor size={40} className="preview-placeholder-icon" />
+        <span className="preview-placeholder-text">{t('preview.category_html')}</span>
       </div>
     )
   }
 
+  if (state.loading) return <div className="preview-loading">{t("preview.loading")} {file.name}...</div>
+  if (state.error) return <div className="preview-error">{state.error}</div>
+
   return (
-    <div className="preview-panel">
-      <div className="preview-tab-bar">
-        {allTabs.map(tab => (
-          <div key={tab.path} className={`preview-tab ${tab.path === activePath ? 'active' : ''} ${tab.isTerminal ? 'terminal' : ''}`}
-            onClick={() => { setActivePath(tab.path); lastClickRef.current = Date.now() }}>
-            {tab.isTerminal && <Terminal size={11} className="preview-tab-terminal-icon" />}
-            <span className="preview-tab-name">{tab.name}</span>
-            <button className="preview-tab-close" onClick={(e) => { e.stopPropagation(); handleCloseTab(tab.path) }}>
-              <X size={12} />
-            </button>
-          </div>
-        ))}
+    <div className="preview-content">
+      <div className="preview-html-toolbar">
+        <span className="preview-code-lang">HTML</span>
+        <span className="preview-code-lines">{t("preview.rendered")}</span>
       </div>
-      {activeTab && <TabContent tab={activeTab} pptxCache={pptxCacheRef} />}
+      <iframe
+        className="preview-html-iframe"
+        srcDoc={state.content}
+        sandbox="allow-scripts allow-modals allow-forms allow-popups"
+        title={file.name}
+      />
     </div>
   )
 }

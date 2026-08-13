@@ -6,6 +6,44 @@
   background: var(--bg-primary);
 }
 
+/* === Category Bar === */
+
+.preview-category-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 8px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.preview-category-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+
+.preview-category-btn:hover {
+  background: var(--overlay-hover);
+  color: var(--text-secondary);
+}
+
+.preview-category-btn.active {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
 /* === Tab Bar === */
 
 .preview-tab-bar {
@@ -195,6 +233,26 @@
   height: 100%;
   flex: 1;
   border: none;
+}
+
+/* === HTML 渲染预览 === */
+
+.preview-html-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 14px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-color);
+  flex-shrink: 0;
+}
+
+.preview-html-iframe {
+  width: 100%;
+  flex: 1;
+  min-height: 0;
+  border: none;
+  background: #ffffff;
 }
 
 /* === PDF/PPTX Controls === */
@@ -465,4 +523,33 @@
   white-space: pre-wrap;
   word-break: break-all;
   tab-size: 4;
+}
+
+/* === 画布 / HTML 占位区 === */
+
+.preview-empty-inner {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.preview-canvas-placeholder,
+.preview-html-placeholder {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  color: var(--text-muted);
+}
+
+.preview-placeholder-icon {
+  opacity: 0.3;
+}
+
+.preview-placeholder-text {
+  font-size: 14px;
+  font-weight: 500;
 }
