@@ -38,6 +38,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   showItemInFolder: (filePath) => ipcRenderer.invoke('file-show-in-folder', filePath),
   deleteFile: (filePath) => ipcRenderer.invoke('file-delete', filePath),
   renameFile: (filePath, newName) => ipcRenderer.invoke('file-rename', filePath, newName),
+  createFile: (parentDir, name) => ipcRenderer.invoke('file-create', parentDir, name),
+  createFolder: (parentDir, name) => ipcRenderer.invoke('folder-create', parentDir, name),
+  writeFile: (filePath, content) => ipcRenderer.invoke('file-write', filePath, content),
+  pasteFile: (sourcePath, targetDir) => ipcRenderer.invoke('file-paste', sourcePath, targetDir),
+  moveFiles: (sourcePaths, targetDir) => ipcRenderer.invoke('file-move', sourcePaths, targetDir),
+  copyPath: (filePath) => ipcRenderer.invoke('copy-path', filePath),
   addToChat: (filePath) => ipcRenderer.invoke('file-add-to-chat', filePath),
   convertPptxToImages: (filePath) => ipcRenderer.invoke('convert-pptx', filePath),
 

@@ -61,8 +61,12 @@ def _ensure_network_bridge_memory():
             encoding="utf-8",
         )
 from sigma_logger import log
+import voice_chat
 
 app = FastAPI(title="Sigma Server")
+
+# 语音实时通话（独立于主 LLM 链路）
+voice_chat.register(app)
 
 app.add_middleware(
     CORSMiddleware,
@@ -393,7 +397,7 @@ async def test_llm(request: Request):
 
 @app.post("/api/llm-balance")
 async def llm_balance(request: Request):
-    """查询 LLM 供应商账户实时余额或用量。支持 DeepSeek、Kimi Code。
+    """查询 LLM 供应商账户实时余额或用量。支持 DeepSeek、Kimi Code、MiniMax。
     余额接口从用户配置的 baseUrl 推导，不硬编码官方域名。"""
     import httpx
     from urllib.parse import urljoin
@@ -403,7 +407,7 @@ async def llm_balance(request: Request):
     api_key = body.get("apiKey") or ""
     base_url = (body.get("baseUrl") or "").rstrip("/")
 
-    if provider not in ("deepseek", "kimi-code"):
+    if provider not in ("deepseek", "kimi-code", "minimax"):
         return {"success": False, "error": f"Provider '{provider}' does not support balance query"}
     if not api_key:
         return {"success": False, "error": "Missing API Key"}
@@ -414,10 +418,14 @@ async def llm_balance(request: Request):
                 # sigma 中 DeepSeek 的 baseUrl 可能带 /anthropic 等 chat 路径后缀，
                 # 余额接口固定为官方地址，因此使用硬编码 URL。
                 url = "https://api.deepseek.com/user/balance"
-            else:
+            elif provider == "kimi-code":
                 if not base_url:
                     return {"success": False, "error": "Missing base URL for Kimi Code"}
                 url = urljoin(base_url + "/", "v1/usages")
+            else:
+                # MiniMax 用量接口独立于 chat 域名，按官方文档固定为 www.minimaxi.com。
+                # baseUrl 仅用于参考，应用真实接口走官方地址。
+                url = "https://www.minimaxi.com/v1/token_plan/remains"
 
             resp = await client.get(
                 url,
@@ -433,11 +441,52 @@ async def llm_balance(request: Request):
                 else:
                     error_msg = data.get("error", {}).get("message", "Unknown error") if isinstance(data, dict) and "error" in data else str(data)
                 return {"success": False, "error": f"{provider} API error: {error_msg}"}
+            # MiniMax 返回 { base_resp, model_remains: [...] }；如有 base_resp 则校验 status_code。
+            if provider == "minimax" and isinstance(data, dict):
+                base_resp = data.get("base_resp") or {}
+                if base_resp.get("status_code") not in (0, None):
+                    return {"success": False, "error": base_resp.get("status_msg") or f"minimax API error: {base_resp}"}
             return {"success": True, "balance": data}
     except httpx.TimeoutException:
         return {"success": False, "error": "Request timeout"}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+@app.post("/api/test-music")
+async def test_music(request: Request):
+    """测试 MiniMax 音乐模型是否可调用，不保存生成音频。"""
+    import httpx
+
+    body = await request.json()
+    api_key = body.get("apiKey") or ""
+    base_url = (body.get("baseUrl") or "https://api.minimaxi.com/v1").rstrip("/")
+    model = body.get("model") or "music-3.0"
+    if not api_key:
+        return {"success": False, "error": "Missing MiniMax music API key"}
+
+    payload = {
+        "model": model,
+        "prompt": "短小的钢琴纯音乐测试片段，明亮、舒缓",
+        "is_instrumental": True,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(
+                f"{base_url}/music_generation",
+                headers={"Authorization": f"Bearer {api_key}"},
+                json=payload,
+            )
+        data = response.json()
+        base_resp = data.get("base_resp") or {} if isinstance(data, dict) else {}
+        if response.status_code >= 400 or base_resp.get("status_code") not in (0, None):
+            message = base_resp.get("status_msg") or data.get("message") or str(data)
+            return {"success": False, "error": f"{model}: {message}", "model": model, "status": response.status_code}
+        return {"success": True, "model": model, "message": f"{model} 可调用", "response": data}
+    except httpx.TimeoutException:
+        return {"success": False, "error": f"{model}: request timeout"}
+    except Exception as error:
+        return {"success": False, "error": f"{model}: {error}"}
 
 
 @app.post("/api/test-vision")
@@ -924,8 +973,22 @@ async def _execute_custom_agent_chat(
         web_search_api_key=skill_keys.get("webSearchApiKey", ""),
         web_search_base_url=skill_keys.get("webSearchBaseUrl", ""),
         tavily_api_key=skill_keys.get("tavilyApiKey", ""),
-        image_gen_api_key=skill_keys.get("imageGenApiKey", ""),
-        image_gen_base_url=skill_keys.get("imageGenBaseUrl", "https://ark.cn-beijing.volces.com/api/v3"),
+        image_gen_provider=skill_keys.get("imageGenProvider", "ark"),
+        image_gen_api_key=skill_keys.get(
+            "imageMinimaxApiKey" if skill_keys.get("imageGenProvider") == "minimax" else "imageArkApiKey",
+            skill_keys.get("imageGenApiKey", ""),
+        ),
+        image_gen_base_url=skill_keys.get(
+            "imageMinimaxBaseUrl" if skill_keys.get("imageGenProvider") == "minimax" else "imageArkBaseUrl",
+            skill_keys.get("imageGenBaseUrl", "https://ark.cn-beijing.volces.com/api/v3"),
+        ),
+        image_gen_model=skill_keys.get(
+            "imageMinimaxModel" if skill_keys.get("imageGenProvider") == "minimax" else "imageArkModel",
+            skill_keys.get("imageGenModel", ""),
+        ),
+        music_gen_api_key=skill_keys.get("musicGenApiKey", ""),
+        music_gen_base_url=skill_keys.get("musicGenBaseUrl", "https://api.minimaxi.com/v1"),
+        music_gen_model=skill_keys.get("musicGenModel", "music-3.0"),
         vision_api_key=skill_keys.get("visionApiKey", ""),
         vision_model=skill_keys.get("visionModel", "kimi-for-coding"),
         vision_base_url=skill_keys.get("visionBaseUrl", "https://api.moonshot.cn/anthropic"),
@@ -935,6 +998,7 @@ async def _execute_custom_agent_chat(
         wechat_relay_key=skill_keys.get("wechatRelayKey", ""),
         fengniao_api_key=skill_keys.get("fengniaoApiKey", ""),
         flyai_api_key=skill_keys.get("flyaiApiKey", ""),
+        baidu_map_auth_token=skill_keys.get("baiduMapAuthToken", ""),
         mail163_address=skill_keys.get("mail163Address", ""),
         mail163_auth_code=skill_keys.get("mail163AuthCode", ""),
         mail163_smtp_host=skill_keys.get("mail163SmtpHost", ""),
@@ -1368,6 +1432,15 @@ async def _execute_chat(
     base_url = (config.get("baseUrl") or "https://api.kimi.com/coding").rstrip("/")
     api_key = config.get("apiKey") or ""
     model = config.get("model") or "kimi-for-coding"
+    provider = config.get("provider") or "generic"
+    llm_params = {
+        "provider": provider,
+        "thinking": config.get("thinking") or ("enabled" if provider == "minimax" else None),
+        "context_size": config.get("contextSize") or (1_000_000 if provider == "minimax" else None),
+        "max_tokens": config.get("maxTokens") or (32768 if provider == "minimax" else None),
+        "temperature": config.get("temperature") if config.get("temperature") is not None else (1.0 if provider == "minimax" else None),
+        "top_p": config.get("topP") if config.get("topP") is not None else (0.95 if provider == "minimax" else None),
+    }
 
     if not api_key:
         return {"error": "API Key is required"}
@@ -1386,8 +1459,11 @@ async def _execute_chat(
     # 推送最新配置到已连接的浏览器扩展
     asyncio.create_task(bridge_manager._push_llm_configs())
 
-    # ── 同步 vision 配置，供 network_bridge analyze_screenshot 使用 ──
+    # ── 同步 skillKeys，供语音桥接等复用主程序完整配置 ──
     skill_keys = config.get("skillKeys", {}) or {}
+    bridge_manager.register_skill_keys(skill_keys)
+
+    # ── 同步 vision 配置，供 network_bridge analyze_screenshot 使用 ──
     vision_api_key = skill_keys.get("visionApiKey", "")
     vision_model = skill_keys.get("visionModel", "")
     vision_base_url = skill_keys.get("visionBaseUrl", "")
@@ -1431,7 +1507,7 @@ async def _execute_chat(
 
     todo_manager = _get_todo_manager(session_id)
     session_state = _get_session_state(session_id)
-    context_tracker = ContextTracker(model)
+    context_tracker = ContextTracker(model, llm_params["context_size"])
     existing_messages = _session_messages.get(session_id, [])
 
     skill_keys = config.get("skillKeys", {}) or {}
@@ -1451,8 +1527,22 @@ async def _execute_chat(
         web_search_api_key=skill_keys.get("webSearchApiKey", ""),
         web_search_base_url=skill_keys.get("webSearchBaseUrl", ""),
         tavily_api_key=skill_keys.get("tavilyApiKey", ""),
-        image_gen_api_key=skill_keys.get("imageGenApiKey", ""),
-        image_gen_base_url=skill_keys.get("imageGenBaseUrl", "https://ark.cn-beijing.volces.com/api/v3"),
+        image_gen_provider=skill_keys.get("imageGenProvider", "ark"),
+        image_gen_api_key=skill_keys.get(
+            "imageMinimaxApiKey" if skill_keys.get("imageGenProvider") == "minimax" else "imageArkApiKey",
+            skill_keys.get("imageGenApiKey", ""),
+        ),
+        image_gen_base_url=skill_keys.get(
+            "imageMinimaxBaseUrl" if skill_keys.get("imageGenProvider") == "minimax" else "imageArkBaseUrl",
+            skill_keys.get("imageGenBaseUrl", "https://ark.cn-beijing.volces.com/api/v3"),
+        ),
+        image_gen_model=skill_keys.get(
+            "imageMinimaxModel" if skill_keys.get("imageGenProvider") == "minimax" else "imageArkModel",
+            skill_keys.get("imageGenModel", ""),
+        ),
+        music_gen_api_key=skill_keys.get("musicGenApiKey", ""),
+        music_gen_base_url=skill_keys.get("musicGenBaseUrl", "https://api.minimaxi.com/v1"),
+        music_gen_model=skill_keys.get("musicGenModel", "music-3.0"),
         vision_api_key=skill_keys.get("visionApiKey", ""),
         vision_model=skill_keys.get("visionModel", "kimi-for-coding"),
         vision_base_url=skill_keys.get("visionBaseUrl", "https://api.moonshot.cn/anthropic"),
@@ -1462,6 +1552,7 @@ async def _execute_chat(
         wechat_relay_key=skill_keys.get("wechatRelayKey", ""),
         fengniao_api_key=skill_keys.get("fengniaoApiKey", ""),
         flyai_api_key=skill_keys.get("flyaiApiKey", ""),
+        baidu_map_auth_token=skill_keys.get("baiduMapAuthToken", ""),
         mail163_address=skill_keys.get("mail163Address", ""),
         mail163_auth_code=skill_keys.get("mail163AuthCode", ""),
         mail163_smtp_host=skill_keys.get("mail163SmtpHost", ""),
@@ -1493,6 +1584,7 @@ async def _execute_chat(
         tool_timeout=int(config.get("toolTimeout", 300)),
         protocol=config.get("protocol", "anthropic"),
         language=language,
+        llm_params=llm_params,
     )
 
     queue = asyncio.Queue()
@@ -1793,6 +1885,10 @@ async def network_bridge_sync_configs(request: Request):
             )
             count += 1
 
+    # 同步 skillKeys 配置
+    skill_keys = body.get("skillKeys") or {}
+    bridge_manager.register_skill_keys(skill_keys)
+
     # 同步 vision 配置
     vision = body.get("vision") or {}
     bridge_manager.register_vision_config(
@@ -1810,6 +1906,30 @@ async def network_bridge_sync_configs(request: Request):
     await bridge_manager._push_llm_configs()
 
     return {"success": True, "synced": count}
+
+
+@app.post("/api/voice/config")
+async def voice_config_save(request: Request):
+    """接收前端 Skill Keys 中的语音记忆配置，写入 .sigma/voice/config.json。"""
+    import voice_memory
+    body = await request.json()
+    cfg = {
+        "volcApiKey": body.get("volcApiKey", ""),
+        "embedBaseUrl": body.get("embedBaseUrl", ""),
+        "embedApiKey": body.get("embedApiKey", ""),
+        "embedModel": body.get("embedModel", ""),
+        "voiceLlmBaseUrl": body.get("voiceLlmBaseUrl", ""),
+        "voiceLlmApiKey": body.get("voiceLlmApiKey", ""),
+        "voiceLlmModel": body.get("voiceLlmModel", ""),
+    }
+    try:
+        voice_memory.MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+        (voice_memory.MEMORY_DIR / "config.json").write_text(
+            json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return {"success": True}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
 
 
 @app.get("/api/network-bridge/vision-config")

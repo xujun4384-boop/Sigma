@@ -335,32 +335,38 @@ class CustomAgentTool(BaseTool):
         return tools
 
     def _call_anthropic(self, client, base_url, api_key, model, messages, tools_schema) -> dict | None:
-        body = {
-            "model": model,
-            "max_tokens": 16384,
-            "messages": self._convert_messages_anthropic(messages),
-        }
-        if tools_schema:
-            body["tools"] = tools_schema
+	        converted = self._convert_messages_anthropic(messages)
+	        system_parts = [m["content"] for m in converted if m.get("role") == "system"]
+	        non_system = [m for m in converted if m.get("role") != "system"]
+	        body = {
+	            "model": model,
+	            "max_tokens": 16384,
+	            "messages": non_system,
+	        }
+	        if system_parts:
+	            body["system"] = "\n\n".join(system_parts)
+	        if tools_schema:
+	            body["tools"] = tools_schema
 
-        url = f"{base_url}/v1/messages" if "/v1" not in base_url else f"{base_url}/messages"
-        try:
-            resp = client.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "anthropic-version": "2023-06-01",
-                    "Content-Type": "application/json",
-                },
-                json=body,
-            )
-            if resp.status_code != 200:
-                log.warning(f"[CustomAgent API] Anthropic HTTP {resp.status_code} | {resp.text[:300]}")
-                return None
-            return self._parse_anthropic_response(resp.json())
-        except Exception as e:
-            log.warning(f"[CustomAgent API] Anthropic 异常: {e}")
-            return None
+	        url = f"{base_url}/v1/messages" if "/v1" not in base_url else f"{base_url}/messages"
+	        try:
+	            resp = client.post(
+	                url,
+	                headers={
+	                    "Authorization": f"Bearer {api_key}",
+	                    "x-api-key": api_key,
+	                    "anthropic-version": "2023-06-01",
+	                    "Content-Type": "application/json",
+	                },
+	                json=body,
+	            )
+	            if resp.status_code != 200:
+	                log.warning(f"[CustomAgent API] Anthropic HTTP {resp.status_code} | {resp.text[:300]}")
+	                return None
+	            return self._parse_anthropic_response(resp.json())
+	        except Exception as e:
+	            log.warning(f"[CustomAgent API] Anthropic 异常: {e}")
+	            return None
 
     def _call_openai(self, client, base_url, api_key, model, messages, tools_schema) -> dict | None:
         openai_msgs = self._convert_messages_openai(messages)

@@ -5,7 +5,7 @@ Skill 基类：BaseTool, ToolParameter, ToolResult
 from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 
 @dataclass
@@ -43,6 +43,21 @@ class BaseTool(ABC):
 
     def __init__(self, cwd: str = "."):
         self.cwd = cwd
+        self._progress_callback: Callable[[dict], None] | None = None
+
+    def set_progress_callback(self, callback: Callable[[dict], None] | None) -> None:
+        """设置进度回调，用于实时推送工具执行进度到前端"""
+        self._progress_callback = callback
+
+    def _emit_progress(self, content: str, **extra) -> None:
+        """上报进度，子类在关键节点调用"""
+        if self._progress_callback:
+            try:
+                event = {"type": "tool_progress", "tool_name": self.name, "content": content}
+                event.update(extra)
+                self._progress_callback(event)
+            except Exception:
+                pass  # 进度上报失败不影响主流程
 
     def _resolve_path(self, path: str):
         """Resolve relative path against cwd and return a Path object."""

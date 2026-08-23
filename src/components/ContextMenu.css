@@ -67,3 +67,13 @@
   background: var(--border-color);
   margin: 4px 8px;
 }
+
+.context-menu-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.context-menu-item:disabled:hover {
+  background: none;
+  color: var(--text-secondary);
+}

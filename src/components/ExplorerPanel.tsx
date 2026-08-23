@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Folder, File, FileText, FileSpreadsheet, Presentation, Image, ChevronRight, ChevronDown, RefreshCw, Trash2, X, FolderOpen, FolderPlus, Edit3, Film, PanelRightClose } from 'lucide-react'
+import { Folder, File, FileText, FileSpreadsheet, Presentation, Image, ChevronRight, ChevronDown, RefreshCw, Trash2, X, FolderOpen, FolderPlus, Edit3, Film, PanelRightClose, FilePlus, FolderDot } from 'lucide-react'
 import ContextMenu from './ContextMenu'
 import type { FolderTreeItem } from '../types/electron'
 import { useTranslation } from '../i18n/I18nContext'
@@ -22,6 +22,115 @@ const FILE_ICONS: Record<string, React.ReactNode> = {
   file: <File size={14} />,
 }
 
+// 新建文件时的扩展名选择清单（按类别分组）
+// key 为选项展示文本，ext 为实际扩展名（不含点）。扩展名为空表示「无扩展名」。
+const FILE_EXT_GROUPS: Array<{ label: string; options: Array<{ label: string; ext: string }> }> = [
+  {
+    label: '文档与文本',
+    options: [
+      { label: '.txt', ext: 'txt' },
+      { label: '.md', ext: 'md' },
+      { label: '.docx', ext: 'docx' },
+      { label: '.pdf', ext: 'pdf' },
+      { label: '.rtf', ext: 'rtf' },
+      { label: '.tex', ext: 'tex' },
+    ],
+  },
+  {
+    label: '表格数据',
+    options: [
+      { label: '.xlsx', ext: 'xlsx' },
+      { label: '.csv', ext: 'csv' },
+      { label: '.tsv', ext: 'tsv' },
+    ],
+  },
+  {
+    label: '演示文稿',
+    options: [
+      { label: '.pptx', ext: 'pptx' },
+      { label: '.key', ext: 'key' },
+      { label: '.odp', ext: 'odp' },
+    ],
+  },
+  {
+    label: '开发代码',
+    options: [
+      { label: '.py', ext: 'py' },
+      { label: '.js', ext: 'js' },
+      { label: '.ts', ext: 'ts' },
+      { label: '.tsx', ext: 'tsx' },
+      { label: '.jsx', ext: 'jsx' },
+      { label: '.java', ext: 'java' },
+      { label: '.c', ext: 'c' },
+      { label: '.cpp', ext: 'cpp' },
+      { label: '.h', ext: 'h' },
+      { label: '.hpp', ext: 'hpp' },
+      { label: '.cs', ext: 'cs' },
+      { label: '.go', ext: 'go' },
+      { label: '.rs', ext: 'rs' },
+      { label: '.rb', ext: 'rb' },
+      { label: '.php', ext: 'php' },
+      { label: '.swift', ext: 'swift' },
+      { label: '.kt', ext: 'kt' },
+      { label: '.sh', ext: 'sh' },
+      { label: '.ps1', ext: 'ps1' },
+      { label: '.bat', ext: 'bat' },
+    ],
+  },
+  {
+    label: '网页前端',
+    options: [
+      { label: '.html', ext: 'html' },
+      { label: '.htm', ext: 'htm' },
+      { label: '.css', ext: 'css' },
+      { label: '.scss', ext: 'scss' },
+      { label: '.less', ext: 'less' },
+      { label: '.vue', ext: 'vue' },
+      { label: '.svelte', ext: 'svelte' },
+    ],
+  },
+  {
+    label: '数据与配置',
+    options: [
+      { label: '.json', ext: 'json' },
+      { label: '.xml', ext: 'xml' },
+      { label: '.yaml', ext: 'yaml' },
+      { label: '.yml', ext: 'yml' },
+      { label: '.toml', ext: 'toml' },
+      { label: '.ini', ext: 'ini' },
+      { label: '.env', ext: 'env' },
+      { label: '.sql', ext: 'sql' },
+    ],
+  },
+  {
+    label: '图片与媒体',
+    options: [
+      { label: '.png', ext: 'png' },
+      { label: '.jpg', ext: 'jpg' },
+      { label: '.jpeg', ext: 'jpeg' },
+      { label: '.gif', ext: 'gif' },
+      { label: '.svg', ext: 'svg' },
+      { label: '.webp', ext: 'webp' },
+      { label: '.bmp', ext: 'bmp' },
+      { label: '.ico', ext: 'ico' },
+      { label: '.mp4', ext: 'mp4' },
+      { label: '.mov', ext: 'mov' },
+      { label: '.mp3', ext: 'mp3' },
+      { label: '.wav', ext: 'wav' },
+      { label: '.flac', ext: 'flac' },
+    ],
+  },
+  {
+    label: '其他类型',
+    options: [
+      { label: '.log', ext: 'log' },
+      { label: '.zip', ext: 'zip' },
+      { label: '.tar', ext: 'tar' },
+      { label: '.gz', ext: 'gz' },
+    ],
+  },
+]
+
 export default function ExplorerPanel({ width, onSelectFile, highlightPath, onToggleCollapse }: Props) {
   const [tree, setTree] = useState<FolderTreeItem[]>([])
   const [rootPath, setRootPath] = useState('')
@@ -31,6 +140,15 @@ export default function ExplorerPanel({ width, onSelectFile, highlightPath, onTo
   const [renameTarget, setRenameTarget] = useState<{ name: string; path: string } | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const [renaming, setRenaming] = useState(false)
+  const [createTarget, setCreateTarget] = useState<{ kind: 'file' | 'folder'; parentDir: string } | null>(null)
+  const [createValue, setCreateValue] = useState('')
+  const [selectedGroupIndex, setSelectedGroupIndex] = useState(0)
+  const [selectedExt, setSelectedExt] = useState('')
+  const [creating, setCreating] = useState(false)
+  const [clipboard, setClipboard] = useState<{ path: string; name: string } | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [draggingPath, setDraggingPath] = useState<string | null>(null)
+  const [dropTargetPath, setDropTargetPath] = useState<string | null>(null)
   const { t } = useTranslation()
 
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set())
@@ -78,6 +196,68 @@ export default function ExplorerPanel({ width, onSelectFile, highlightPath, onTo
       setRenameTarget({ name: item.name, path: item.path })
       setRenameValue(item.name)
     }
+    if (action === 'newFile' || action === 'newFolder') {
+      const isDir = item.type === 'folder' || item.type === 'workspace-folder'
+      const kind = action === 'newFile' ? 'file' : 'folder'
+      setCreateTarget({ kind, parentDir: isDir ? item.path : getParentPath(item.path) })
+      setCreateValue('')
+      setSelectedGroupIndex(0)
+      setSelectedExt(kind === 'file' ? 'txt' : '')
+    }
+    if (action === 'copy') {
+      setClipboard({ path: item.path, name: item.name })
+    }
+    if (action === 'paste') {
+      handlePaste(item)
+    }
+  }
+
+  // 从路径推导父目录（兼容 Windows/Unix 分隔符）
+  const getParentPath = (p: string) => {
+    const idx = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'))
+    return idx > 0 ? p.slice(0, idx) : p
+  }
+
+  const handlePaste = async (targetItem: any) => {
+    if (!clipboard || !window.electronAPI?.pasteFile) return
+    const isDir = targetItem.type === 'folder' || targetItem.type === 'workspace-folder'
+    const targetDir = isDir ? targetItem.path : getParentPath(targetItem.path)
+    try {
+      const result = await window.electronAPI.pasteFile(clipboard.path, targetDir)
+      if (result.success) {
+        if (isDir) setExpandedPaths(prev => new Set(prev).add(targetDir))
+        loadTree()
+      } else if (result.error) {
+        setNotice(result.error)
+      }
+    } catch {}
+  }
+
+  const handleCreate = async () => {
+    if (!createTarget || !createValue.trim()) return
+    setCreating(true)
+    try {
+      const api = window.electronAPI
+      let name = createValue.trim()
+      if (createTarget.kind === 'file') {
+        // 文件名去掉可能已有的扩展名，再用下拉选中的扩展名（如果有）
+        const baseName = name.replace(/\.[^./\\]+$/, '')
+        const trimmedBase = baseName.replace(/[.\s]+$/, '')
+        name = selectedExt ? `${trimmedBase}.${selectedExt}` : trimmedBase
+        if (!name || name === '.' + selectedExt) name = selectedExt ? `untitled.${selectedExt}` : 'untitled'
+      }
+      const result = createTarget.kind === 'file'
+        ? await api?.createFile(createTarget.parentDir, name)
+        : await api?.createFolder(createTarget.parentDir, name)
+      if (result?.success) {
+        setExpandedPaths(prev => new Set(prev).add(createTarget.parentDir))
+        setCreateTarget(null)
+        loadTree()
+      } else if (result?.error) {
+        setNotice(result.error === 'already_exists' ? t('explorer.error_exists') : result.error)
+      }
+    } catch {}
+    setCreating(false)
   }
 
   const handleConfirmDelete = async () => {
@@ -162,6 +342,48 @@ export default function ExplorerPanel({ width, onSelectFile, highlightPath, onTo
     return () => clearTimeout(timer)
   }, [highlightPath, expandedPaths])
 
+  const handleDrop = async (sourcePath: string, targetPath: string) => {
+    setDropTargetPath(null)
+    setDraggingPath(null)
+    if (!sourcePath || sourcePath === targetPath || !window.electronAPI?.moveFiles) return
+    const result = await window.electronAPI.moveFiles([sourcePath], targetPath)
+    if (!result.success) {
+      const message = result.error === 'already_exists'
+        ? t('explorer.move_exists')
+        : result.error === 'invalid_target'
+          ? t('explorer.move_invalid_target')
+          : t('explorer.move_failed')
+      setNotice(message)
+      return
+    }
+    loadTree()
+  }
+
+  const handleDragEnd = () => {
+    setDraggingPath(null)
+    setDropTargetPath(null)
+  }
+
+  const getTreeItemProps = (item: FolderTreeItem) => ({
+    item,
+    onSelect: onSelectFile,
+    onContextMenu: handleContextMenu,
+    expandedPaths,
+    onToggleExpand: (path: string) => setExpandedPaths(prev => {
+      const next = new Set(prev)
+      if (next.has(path)) next.delete(path); else next.add(path)
+      return next
+    }),
+    highlightPath,
+    draggingPath,
+    dropTargetPath,
+    onDragStart: (path: string) => setDraggingPath(path),
+    onDragEnd: handleDragEnd,
+    onDragOver: (path: string) => setDropTargetPath(path),
+    onDragLeave: (path: string) => setDropTargetPath(prev => prev === path ? null : prev),
+    onDrop: handleDrop,
+  })
+
   return (
     <div className="explorer-panel" style={{ width }}>
       <div className="explorer-header">
@@ -169,6 +391,12 @@ export default function ExplorerPanel({ width, onSelectFile, highlightPath, onTo
         <div className="explorer-header-actions">
           <button className="explorer-collapse-btn" onClick={onToggleCollapse} title="折叠资源管理器">
             <PanelRightClose size={14} />
+          </button>
+          <button className="explorer-refresh" onClick={() => { if (rootPath) { setCreateTarget({ kind: 'file', parentDir: rootPath }); setCreateValue(''); setSelectedGroupIndex(0); setSelectedExt('txt') } }} title={t("explorer.new_file")}>
+            <FilePlus size={14} />
+          </button>
+          <button className="explorer-refresh" onClick={() => { if (rootPath) { setCreateTarget({ kind: 'folder', parentDir: rootPath }); setCreateValue(''); setSelectedGroupIndex(0); setSelectedExt('') } }} title={t("explorer.new_folder")}>
+            <FolderDot size={14} />
           </button>
           <button className="explorer-refresh" onClick={handleOpenFolder} title={t("explorer.open_folder")}>
             <FolderOpen size={14} />
@@ -181,19 +409,21 @@ export default function ExplorerPanel({ width, onSelectFile, highlightPath, onTo
           </button>
         </div>
       </div>
-      <div className="explorer-tree" ref={treeContainerRef}>
+      <div
+        className="explorer-tree"
+        ref={treeContainerRef}
+        onDragOver={e => {
+          if (e.dataTransfer.types.includes('application/x-sigma-path')) {
+            e.preventDefault()
+            e.dataTransfer.dropEffect = 'move'
+          }
+        }}
+      >
         {tree.map((item, i) => (
           <TreeItem
-            key={i} item={item} level={0}
-            onSelect={onSelectFile}
-            onContextMenu={handleContextMenu}
-            expandedPaths={expandedPaths}
-            onToggleExpand={(path) => setExpandedPaths(prev => {
-              const next = new Set(prev)
-              if (next.has(path)) next.delete(path); else next.add(path)
-              return next
-            })}
-            highlightPath={highlightPath}
+            key={i}
+            level={0}
+            {...getTreeItemProps(item)}
           />
         ))}
       </div>
@@ -204,9 +434,100 @@ export default function ExplorerPanel({ width, onSelectFile, highlightPath, onTo
           x={contextMenu.x}
           y={contextMenu.y}
           item={contextMenu.item}
+          hasClipboard={!!clipboard}
           onClose={() => setContextMenu(null)}
           onAction={handleMenuAction}
         />
+      )}
+
+      {/* 轻量提示条（复制路径成功、错误信息等） */}
+      {notice && (
+        <div className="explorer-notice" onAnimationEnd={() => setNotice(null)}>
+          {notice}
+        </div>
+      )}
+
+      {/* Create File/Folder Modal */}
+      {createTarget && (
+        <div className="explorer-modal-backdrop" onClick={() => setCreateTarget(null)}>
+          <div className="explorer-modal" onClick={e => e.stopPropagation()}>
+            <div className="explorer-modal-icon explorer-modal-icon-accent">
+              {createTarget.kind === 'file' ? <FilePlus size={24} /> : <FolderDot size={24} />}
+            </div>
+            <div className="explorer-modal-text">
+              <p className="explorer-modal-title">
+                {createTarget.kind === 'file' ? t("explorer.new_file") : t("explorer.new_folder")}
+              </p>
+              <p className="explorer-modal-name">{createTarget.parentDir}</p>
+            </div>
+            <div className="explorer-create-form">
+              <label className="explorer-form-field explorer-form-field-full">
+                <span className="explorer-form-label">{t("explorer.file_name_label")}</span>
+                <input
+                  className="rename-input explorer-file-name-input"
+                  value={createValue}
+                  placeholder={createTarget.kind === 'file' ? t("explorer.new_file_placeholder") : t("explorer.new_folder_placeholder")}
+                  onChange={e => {
+                    const v = e.target.value
+                    setCreateValue(v)
+                    if (createTarget.kind === 'file') {
+                      const m = v.match(/\.([^./\\]+)$/)
+                      const ext = m ? m[1].toLowerCase() : ''
+                      setSelectedExt(ext)
+                      const groupIndex = FILE_EXT_GROUPS.findIndex(group => group.options.some(option => option.ext === ext))
+                      if (groupIndex >= 0) setSelectedGroupIndex(groupIndex)
+                    }
+                  }}
+                  onKeyDown={e => { if (e.key === 'Enter') handleCreate(); if (e.key === 'Escape') setCreateTarget(null) }}
+                  autoFocus
+                />
+              </label>
+              {createTarget.kind === 'file' && (
+                <div className="explorer-type-picker">
+                  <label className="explorer-form-field">
+                    <span className="explorer-form-label">{t("explorer.file_category_label")}</span>
+                    <select
+                      className="explorer-form-select"
+                      value={selectedGroupIndex}
+                      onChange={e => {
+                        const nextIndex = Number(e.target.value)
+                        const nextGroup = FILE_EXT_GROUPS[nextIndex]
+                        setSelectedGroupIndex(nextIndex)
+                        setSelectedExt(nextGroup.options[0]?.ext || '')
+                      }}
+                    >
+                      {FILE_EXT_GROUPS.map((group, index) => (
+                        <option key={group.label} value={index}>{group.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="explorer-form-field">
+                    <span className="explorer-form-label">{t("explorer.file_format_label")}</span>
+                    <select
+                      className="explorer-form-select"
+                      value={selectedExt}
+                      onChange={e => setSelectedExt(e.target.value)}
+                      title={t("explorer.ext_select_title")}
+                    >
+                      <option value="">{t("explorer.ext_none")}</option>
+                      {FILE_EXT_GROUPS[selectedGroupIndex]?.options.map(option => (
+                        <option key={option.ext} value={option.ext}>{option.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+              )}
+            </div>
+            <div className="explorer-modal-actions">
+              <button className="modal-btn modal-btn-cancel" onClick={() => setCreateTarget(null)} disabled={creating}>
+                {t("explorer.cancel")}
+              </button>
+              <button className="modal-btn modal-btn-delete" onClick={handleCreate} disabled={creating || !createValue.trim()}>
+                {creating ? t("explorer.creating") : t("explorer.create")}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Delete Confirmation Modal */}
@@ -265,19 +586,28 @@ export default function ExplorerPanel({ width, onSelectFile, highlightPath, onTo
   )
 }
 
-function TreeItem({ item, level, onSelect, onContextMenu, expandedPaths, onToggleExpand, highlightPath }: {
+function TreeItem({ item, level, onSelect, onContextMenu, expandedPaths, onToggleExpand, highlightPath, draggingPath, dropTargetPath, onDragStart, onDragEnd, onDragOver, onDragLeave, onDrop }: {
   item: FolderTreeItem; level: number;
   onSelect: (item: FolderTreeItem) => void;
   onContextMenu: (e: React.MouseEvent, item: FolderTreeItem) => void;
   expandedPaths: Set<string>;
   onToggleExpand: (path: string) => void;
   highlightPath?: string;
+  draggingPath: string | null;
+  dropTargetPath: string | null;
+  onDragStart: (path: string) => void;
+  onDragEnd: () => void;
+  onDragOver: (path: string) => void;
+  onDragLeave: (path: string) => void;
+  onDrop: (sourcePath: string, targetPath: string) => void;
 }) {
   const isWorkspace = item.type === 'workspace-folder'
   const isFolder = item.type === 'folder' || item.type === 'workspace-folder'
   const hasChildren = isFolder && item.children && item.children.length > 0
   const expanded = expandedPaths.has(item.path) || isWorkspace
   const isHighlighted = !!highlightPath && item.path === highlightPath
+  const isDragging = draggingPath === item.path
+  const isDropTarget = isFolder && dropTargetPath === item.path && draggingPath !== item.path
 
   const icon = isFolder
     ? (expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />)
@@ -298,8 +628,39 @@ function TreeItem({ item, level, onSelect, onContextMenu, expandedPaths, onToggl
   return (
     <div>
       <div
-        className={`explorer-item ${isFolder ? 'folder' : ''} ${isWorkspace ? 'workspace-root' : ''} ${isHighlighted ? 'selected' : ''}`}
+        className={`explorer-item ${isFolder ? 'folder' : ''} ${isWorkspace ? 'workspace-root' : ''} ${isHighlighted ? 'selected' : ''} ${isDragging ? 'dragging' : ''} ${isDropTarget ? 'drop-target' : ''}`}
         style={{ paddingLeft: 12 + level * 14 }}
+        draggable={!isWorkspace}
+        onDragStart={e => {
+          e.dataTransfer.effectAllowed = 'copyMove'
+          e.dataTransfer.setData('application/x-sigma-path', item.path)
+          e.dataTransfer.setData('application/x-sigma-paths', JSON.stringify([{ path: item.path, name: item.name }]))
+          e.dataTransfer.setData('text/plain', item.path)
+          onDragStart(item.path)
+        }}
+        onDragEnd={onDragEnd}
+        onDragEnter={e => {
+          if (!isFolder || draggingPath === item.path) return
+          e.preventDefault()
+          onDragOver(item.path)
+        }}
+        onDragOver={e => {
+          if (!isFolder || draggingPath === item.path) return
+          e.preventDefault()
+          e.stopPropagation()
+          e.dataTransfer.dropEffect = 'move'
+          onDragOver(item.path)
+        }}
+        onDragLeave={e => {
+          if (isFolder && !e.currentTarget.contains(e.relatedTarget as Node)) onDragLeave(item.path)
+        }}
+        onDrop={e => {
+          if (!isFolder) return
+          e.preventDefault()
+          e.stopPropagation()
+          const sourcePath = e.dataTransfer.getData('application/x-sigma-path') || e.dataTransfer.getData('text/plain')
+          onDrop(sourcePath, item.path)
+        }}
         onClick={handleClick}
         onContextMenu={(e) => onContextMenu(e, item)}
         data-highlighted={isHighlighted ? 'true' : undefined}
@@ -309,7 +670,23 @@ function TreeItem({ item, level, onSelect, onContextMenu, expandedPaths, onToggl
         <span className="explorer-name">{item.name}</span>
       </div>
       {isFolder && expanded && hasChildren && item.children!.map((child, i) => (
-        <TreeItem key={i} item={child} level={level + 1} onSelect={onSelect} onContextMenu={onContextMenu} expandedPaths={expandedPaths} onToggleExpand={onToggleExpand} highlightPath={highlightPath} />
+        <TreeItem
+          key={i}
+          level={level + 1}
+          item={child}
+          onSelect={onSelect}
+          onContextMenu={onContextMenu}
+          expandedPaths={expandedPaths}
+          onToggleExpand={onToggleExpand}
+          highlightPath={highlightPath}
+          draggingPath={draggingPath}
+          dropTargetPath={dropTargetPath}
+          onDragStart={onDragStart}
+          onDragEnd={onDragEnd}
+          onDragOver={onDragOver}
+          onDragLeave={onDragLeave}
+          onDrop={onDrop}
+        />
       ))}
     </div>
   )

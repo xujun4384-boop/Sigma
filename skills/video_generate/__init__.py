@@ -150,6 +150,7 @@ class VideoSceneTool(BaseTool):
             html_file = str(p)
 
         try:
+            self._emit_progress(f"正在录制场景 ({duration}s, {width}x{height})...")
             result_path = record_sync(html_file, str(out), duration, fps, width, height)
         except ImportError as e:
             return ToolResult.fail(
@@ -192,6 +193,7 @@ class VideoTTSTool(BaseTool):
         out = _auto_output_path(output_path, project, self.cwd)
         out.parent.mkdir(parents=True, exist_ok=True)
 
+        self._emit_progress(f"正在合成语音 ({len(text)} 字, 音色: {voice})...")
         try:
             result = generate(text, str(out), voice)
         except ImportError:
@@ -275,6 +277,7 @@ class VideoComposeTool(BaseTool):
         # BGM
         bgm_path = None
         if bgm_enabled:
+            self._emit_progress("正在生成背景音乐...")
             try:
                 from .scripts.composer import get_video_duration
                 total_dur = 0
@@ -297,6 +300,7 @@ class VideoComposeTool(BaseTool):
                 bgm_path = None
 
         try:
+            self._emit_progress(f"正在合成最终视频 ({len(scene_videos)} 个场景)...")
             result = compose(
                 scene_videos=[str(v) for v in scene_videos],
                 scene_audios=audios,

@@ -25,12 +25,14 @@
 #         示例: "output/images"
 #   size (string, 可选, 默认 "2K") 输出尺寸。
 #         示例: "2K", "1024x1024"
-#   model (string, 可选, 默认 doubao-seedream-4-5-251128) 模型名称。
+#   model (string, 可选) 模型名称。不填则使用 Settings 中配置的模型
+#         （Settings → Skill Keys → ImageGen → Model），未配置时回退到 doubao-seedream-4-5-251128。
 #
 # 输出: 生成图片的文件路径、尺寸、格式信息。
 #
 # API key 配置:
 #   需要火山引擎 ARK API Key。在 Settings → Skill Keys → ImageGen 中配置。
+#   模型名也在该处配置，必须填写用户账户中实际可用的模型，否则会调用失败。
 #   注册地址: https://console.volcengine.com/ark/
 # ---------------------------------------------------------------------------
 

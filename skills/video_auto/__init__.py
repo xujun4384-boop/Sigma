@@ -3,7 +3,7 @@ video_auto skill - 新闻解说短视频一键生成
 
 提供 video_auto 工具，接收新闻原文后自动完成:
   1. 脚本提炼（LLM 提取标题/副标题/分镜）
-  2. 场景配图（搜索+视觉判断 / AI 生成）
+  2. 场景配图（AI 生成）
   3. 竖版视频合成（打字机字幕 + 场景切换动效）
 
 断点续传：
@@ -60,7 +60,7 @@ class VideoAutoTool(BaseTool):
     name = "video_auto"
     description = (
         "新闻类竖版（9:16）无声短视频一键生成。接收新闻原文后自动提炼标题和分镜文案，"
-        "自动配图（搜索或AI生成），合成带标题卡片+图片+打字机字幕+场景动效的无声MP4（纯视觉，无旁白无BGM）。"
+        "自动配图（AI生成），合成带标题卡片+图片+打字机字幕+场景动效的无声MP4（纯视觉，无旁白无BGM）。"
         "支持断点续传：超时后再次调用相同 output_path 可自动从失败阶段继续，不会重复解析或生成图片。"
         "这是做新闻/资讯竖版卡片视频的最简路径，无需手写HTML Canvas动画。"
     )
@@ -70,7 +70,7 @@ class VideoAutoTool(BaseTool):
         ToolParameter("title", "string", "大标题（若提供 news_content 可留空自动提炼）", required=False),
         ToolParameter("subtitle", "string", "副标题", required=False),
         ToolParameter("scenes", "array", "场景列表 [{\"text\":\"文案\",\"duration\":5}]，提供 news_content 时自动生成", required=False),
-        ToolParameter("image_source", "string", "图片来源策略: auto | search | generate | mixed", required=False, default="auto"),
+        ToolParameter("image_source", "string", "图片来源策略（保留参数，当前统一使用 AI 生成）", required=False, default="auto"),
         ToolParameter("image_style", "string", "AI生成图片风格前缀", required=False, default=DEFAULT_IMAGE_STYLE),
         ToolParameter("width", "integer", "视频宽度，默认 1080", required=False, default=1080),
         ToolParameter("height", "integer", "视频高度，默认 1920（竖版 9:16）", required=False, default=1920),
@@ -111,6 +111,8 @@ class VideoAutoTool(BaseTool):
         stage = STAGE_INIT
         image_paths = []
 
+        self._emit_progress(f"开始生成视频: {out.name}")
+
         # 如果目标文件已存在，直接返回
         if out.exists() and out.stat().st_size > 1024:
             size_mb = out.stat().st_size / 1024 / 1024
@@ -136,6 +138,7 @@ class VideoAutoTool(BaseTool):
             resumed_from = stage
         elif news_content and news_content.strip():
             # 新闻内容 → LLM 解析
+            self._emit_progress("正在提炼新闻脚本...")
             try:
                 from .scripts.news_parser import call_llm_parse_news
 
@@ -217,6 +220,7 @@ class VideoAutoTool(BaseTool):
 
         if stage != STAGE_IMAGES_READY:
             # 调用 image_provider（内部自动做池匹配 → 搜索 → 生成）
+            self._emit_progress(f"正在为 {len(scenes)} 个场景配图...")
             from .scripts.image_provider import provide_images_for_scenes
 
             try:
@@ -262,6 +266,7 @@ class VideoAutoTool(BaseTool):
             })
 
         # ── 4. 视频渲染 ──
+        self._emit_progress("正在渲染视频...")
         from .scripts.video_short import render_news_video
 
         try:

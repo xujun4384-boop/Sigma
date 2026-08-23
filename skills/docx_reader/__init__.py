@@ -56,6 +56,24 @@ class ReadDocxTool(BaseTool):
                         lines.append(f"  {k}: {v}")
             lines.append(f"\n--- 正文 ---")
             lines.append(content_result["content"])
+            # 分块信息拼进正文，让 LLM 知道总数与当前位置，避免盲猜反复调用
+            total_paragraphs = content_result["total_paragraphs"]
+            chunk_info = content_result.get("chunk_info") or {}
+            if chunk_info.get("is_chunked"):
+                total_chunks = chunk_info.get("total_chunks", 1)
+                current = chunk_info.get("current_chunk", 0)
+                if chunk_info.get("error"):
+                    chunk_desc = chunk_info["error"]
+                else:
+                    count_in_chunk = chunk_info.get("paragraphs_in_chunk")
+                    chunk_desc = (
+                        f"第 {current + 1}/{total_chunks} 块"
+                        + (f"（本块 {count_in_chunk} 段）" if count_in_chunk is not None else "")
+                        + f" | 全文共 {total_paragraphs} 段"
+                    )
+            else:
+                chunk_desc = f"全文共 {total_paragraphs} 段（未分块）"
+            lines.append(f"\n--- 分块信息 ---\n{chunk_desc}")
             if tables:
                 lines.append(f"\n--- 表格 ({len(tables)} 个) ---")
                 for t in tables:

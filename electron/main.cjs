@@ -209,7 +209,7 @@ function getFileType(ext) {
 
 // ── sigma-file:// 协议辅助 ──
 
-const VIDEO_MIME_TYPES = {
+const SIGMA_FILE_MIME_TYPES = {
   '.mp4': 'video/mp4',
   '.webm': 'video/webm',
   '.mov': 'video/quicktime',
@@ -219,6 +219,7 @@ const VIDEO_MIME_TYPES = {
   '.ogv': 'video/ogg',
   '.flv': 'video/x-flv',
   '.wmv': 'video/x-ms-wmv',
+  '.pdf': 'application/pdf',
 }
 
 function resolveSigmaFilePath(requestUrl) {
@@ -370,6 +371,15 @@ function createMainWindow() {
     show: false,
     icon: path.join(__dirname, '..', 'icon.png'),
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: false },
+  })
+
+  // 允许麦克风权限（语音实时通话使用 getUserMedia）
+  const ses = mainWindow.webContents.session
+  ses.setPermissionRequestHandler((webContents, permission, callback) => {
+    callback(permission === 'media')
+  })
+  ses.setPermissionCheckHandler((webContents, permission) => {
+    return permission === 'media'
   })
 
   const isDev = process.env.NODE_ENV === 'development'
@@ -587,6 +597,18 @@ ipcMain.handle('read-file', async (event, filePath) => {
   } catch (err) { return { success: false, error: err.message } }
 })
 
+ipcMain.handle('file-write', async (event, filePath, content) => {
+  try {
+    const fp = path.isAbsolute(filePath) ? filePath : path.join(currentWorkingDir, filePath)
+    if (typeof content !== 'string') return { success: false, error: 'content_must_be_string' }
+    fs.writeFileSync(fp, content, 'utf-8')
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('file-system-change', { type: 'change', path: fp })
+    }
+    return { success: true }
+  } catch (err) { return { success: false, error: err.message } }
+})
+
 ipcMain.handle('get-working-directory', async () => ({ success: true, data: currentWorkingDir }))
 
 ipcMain.handle('select-folder', async () => {
@@ -699,6 +721,78 @@ ipcMain.handle('file-delete', async (event, filePath) => {
   } catch (err) { return { success: false, error: err.message } }
 })
 
+ipcMain.handle('file-create', async (event, parentDir, name) => {
+  try {
+    const dir = path.isAbsolute(parentDir) ? parentDir : path.join(currentWorkingDir, parentDir)
+    const fp = path.join(dir, name)
+    if (fs.existsSync(fp)) return { success: false, error: 'already_exists' }
+    fs.writeFileSync(fp, '')
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('file-system-change', { type: 'add', path: fp })
+    }
+    return { success: true, path: fp }
+  } catch (err) { return { success: false, error: err.message } }
+})
+
+ipcMain.handle('folder-create', async (event, parentDir, name) => {
+  try {
+    const dir = path.isAbsolute(parentDir) ? parentDir : path.join(currentWorkingDir, parentDir)
+    const fp = path.join(dir, name)
+    if (fs.existsSync(fp)) return { success: false, error: 'already_exists' }
+    fs.mkdirSync(fp, { recursive: true })
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('file-system-change', { type: 'addDir', path: fp, isDirectory: true })
+    }
+    return { success: true, path: fp }
+  } catch (err) { return { success: false, error: err.message } }
+})
+
+// 递归复制文件/文件夹，重名时自动追加序号
+function copyRecursive(src, dest) {
+  const stat = fs.statSync(src)
+  if (stat.isDirectory()) {
+    fs.mkdirSync(dest, { recursive: true })
+    for (const entry of fs.readdirSync(src)) {
+      copyRecursive(path.join(src, entry), path.join(dest, entry))
+    }
+  } else {
+    fs.copyFileSync(src, dest)
+  }
+}
+
+function uniqueDestPath(destDir, name) {
+  let candidate = path.join(destDir, name)
+  if (!fs.existsSync(candidate)) return candidate
+  const ext = path.extname(name)
+  const base = path.basename(name, ext)
+  for (let i = 1; ; i++) {
+    candidate = path.join(destDir, `${base} (${i})${ext}`)
+    if (!fs.existsSync(candidate)) return candidate
+  }
+}
+
+ipcMain.handle('file-paste', async (event, sourcePath, targetDir) => {
+  try {
+    const src = path.isAbsolute(sourcePath) ? sourcePath : path.join(currentWorkingDir, sourcePath)
+    const dir = path.isAbsolute(targetDir) ? targetDir : path.join(currentWorkingDir, targetDir)
+    if (!fs.existsSync(src)) return { success: false, error: 'source_not_found' }
+    const dest = uniqueDestPath(dir, path.basename(src))
+    copyRecursive(src, dest)
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('file-system-change', { type: 'add', path: dest })
+    }
+    return { success: true, path: dest }
+  } catch (err) { return { success: false, error: err.message } }
+})
+
+ipcMain.handle('copy-path', async (event, filePath) => {
+  try {
+    const fp = path.isAbsolute(filePath) ? filePath : path.join(currentWorkingDir, filePath)
+    electron.clipboard.writeText(fp)
+    return { success: true }
+  } catch (err) { return { success: false, error: err.message } }
+})
+
 ipcMain.handle('file-rename', async (event, filePath, newName) => {
   try {
     const fp = path.isAbsolute(filePath) ? filePath : path.join(currentWorkingDir, filePath)
@@ -708,6 +802,49 @@ ipcMain.handle('file-rename', async (event, filePath, newName) => {
       mainWindow.webContents.send('file-system-change', { type: 'rename', path: newPath, oldPath: fp })
     }
     return { success: true, newPath }
+  } catch (err) { return { success: false, error: err.message } }
+})
+
+ipcMain.handle('file-move', async (event, sourcePaths, targetDir) => {
+  try {
+    const sources = Array.isArray(sourcePaths) ? sourcePaths : [sourcePaths]
+    const target = path.isAbsolute(targetDir) ? targetDir : path.join(currentWorkingDir, targetDir)
+    if (!fs.existsSync(target) || !fs.statSync(target).isDirectory()) {
+      return { success: false, error: 'target_not_found' }
+    }
+
+    const resolvedSources = sources.map(sourcePath => (
+      path.isAbsolute(sourcePath) ? sourcePath : path.join(currentWorkingDir, sourcePath)
+    ))
+
+    for (const source of resolvedSources) {
+      if (!fs.existsSync(source)) return { success: false, error: 'source_not_found' }
+      if (path.resolve(source) === path.resolve(target)) return { success: false, error: 'same_location' }
+      if (fs.statSync(source).isDirectory()) {
+        const relativeTarget = path.relative(source, target)
+        if (relativeTarget && !relativeTarget.startsWith('..') && !path.isAbsolute(relativeTarget)) {
+          return { success: false, error: 'invalid_target' }
+        }
+      }
+    }
+
+    const conflicts = resolvedSources
+      .map(source => path.join(target, path.basename(source)))
+      .filter(destination => fs.existsSync(destination))
+    if (conflicts.length > 0) {
+      return { success: false, error: 'already_exists', conflicts }
+    }
+
+    for (const source of resolvedSources) {
+      fs.renameSync(source, path.join(target, path.basename(source)))
+    }
+
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('file-system-change', {
+        type: 'move', paths: resolvedSources, targetDir: target,
+      })
+    }
+    return { success: true, count: resolvedSources.length }
   } catch (err) { return { success: false, error: err.message } }
 })
 
@@ -805,8 +942,8 @@ ipcMain.handle('convert-pptx', async (event, filePath) => {
 // ── App Lifecycle ──
 
 app.whenReady().then(async () => {
-  // 注册 sigma-file:// 自定义协议，用于视频等大型二进制文件流式加载
-  // 手动处理 MIME 类型 + Range 请求，保证 <video> 能正常播放/拖动进度
+  // 注册 sigma-file:// 自定义协议，用于视频/PDF 等大型二进制文件流式加载
+  // 手动处理 MIME 类型 + Range 请求，保证 <video> 能正常播放/拖动进度，以及 PDF 大文件能被 iframe 加载
   protocol.handle('sigma-file', (request) => {
     try {
       const filePath = resolveSigmaFilePath(request.url)
@@ -814,7 +951,7 @@ app.whenReady().then(async () => {
         return new Response('File not found', { status: 404 })
       }
       const stat = fs.statSync(filePath)
-      const mime = VIDEO_MIME_TYPES[path.extname(filePath).toLowerCase()] || 'application/octet-stream'
+      const mime = SIGMA_FILE_MIME_TYPES[path.extname(filePath).toLowerCase()] || 'application/octet-stream'
       const rangeHeader = request.headers.get('range')
 
       if (rangeHeader) {

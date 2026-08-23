@@ -99,6 +99,22 @@
   color: var(--accent);
 }
 
+.explorer-item.dragging {
+  opacity: 0.45;
+}
+
+.explorer-item.drop-target {
+  background: var(--accent-dim);
+  outline: 1px dashed var(--accent);
+  outline-offset: -1px;
+  color: var(--accent);
+}
+
+.explorer-item.drop-target .explorer-name,
+.explorer-item.drop-target .explorer-icon {
+  color: var(--accent);
+}
+
 .explorer-arrow {
   width: 14px;
   display: flex;
@@ -241,4 +257,90 @@
 
 .rename-input:focus {
   border-color: var(--accent);
+}
+
+.explorer-create-form {
+  margin-top: 16px;
+  text-align: left;
+}
+
+.explorer-form-field {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.explorer-form-label {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.15px;
+}
+
+.explorer-file-name-input {
+  margin: 0;
+}
+
+.explorer-type-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1.45fr) minmax(0, 0.8fr);
+  gap: 10px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-color);
+}
+
+.explorer-form-select {
+  width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  outline: none;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.explorer-form-select:focus {
+  border-color: var(--accent);
+}
+
+@media (max-width: 360px) {
+  .explorer-type-picker {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* 新建文件/文件夹的图标使用强调色，区别于删除的红色 */
+.explorer-modal-icon-accent {
+  color: var(--accent);
+}
+
+/* 轻量 Toast 提示条 */
+.explorer-notice {
+  position: absolute;
+  left: 50%;
+  bottom: 16px;
+  transform: translateX(-50%);
+  padding: 8px 14px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  font-size: 12px;
+  box-shadow: 0 4px 16px var(--backdrop);
+  z-index: 30000;
+  animation: explorer-notice-fade 2.6s ease forwards;
+}
+
+@keyframes explorer-notice-fade {
+  0% { opacity: 0; transform: translate(-50%, 8px); }
+  10% { opacity: 1; transform: translate(-50%, 0); }
+  80% { opacity: 1; transform: translate(-50%, 0); }
+  100% { opacity: 0; transform: translate(-50%, -4px); }
 }

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { ChevronDown, ChevronRight, Send, Wrench, CheckCircle2, XCircle, Menu, X, StopCircle, AlertCircle, Bot, Stethoscope } from 'lucide-react'
+import { ChevronDown, ChevronRight, Send, Wrench, CheckCircle2, XCircle, Menu, X, StopCircle, AlertCircle, Bot } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useTranslation } from '../i18n/I18nContext'
@@ -10,11 +10,7 @@ import TodoListDisplay from './TodoListDisplay'
 import ContextUsageIndicator, { type ContextUsageData } from './ContextUsageIndicator'
 import ThinkingAnimation from './ThinkingAnimation'
 import QuestionnaireDisplay, { type QuestionnaireData } from './QuestionnaireDisplay'
-import AgentAppModal from './AgentAppModal'
 import './ChatPanel.css'
-
-// 灵医智能体 H5 分享链接（百度千帆 AppBuilder 托管页面）
-const MEDICAL_AGENT_URL = 'https://01.baidu.com/m/agent-app?share_token=4f7eaec4c63034376a99b44241ebcaf487ec1ed0fe7a6a01c434f495f3747b069cbb90516115c114ef16dd9e76f5ac2aad1fb598ea6d10179f8395081742de7f'
 
 // ── 系统通知工具 ──
 
@@ -40,7 +36,7 @@ type AgentInternalBlock =
 type Block =
   | { type: 'thinking'; content: string }
   | { type: 'response_text'; content: string }
-  | { type: 'tool_call'; toolName: string; toolInput: Record<string, unknown>; result?: string; success?: boolean; displayName?: string }
+  | { type: 'tool_call'; toolName: string; toolInput: Record<string, unknown>; result?: string; success?: boolean; displayName?: string; progressLog?: string[] }
   | { type: 'subagent_batch'; tasks: SubAgentTask[] }
   | { type: 'agent_execution'; agentName: string; status: 'running' | 'done'; turn: number; agentBlocks: AgentInternalBlock[] }
 
@@ -66,6 +62,7 @@ interface UserMessage {
   id: string
   role: 'user'
   content: string
+  attachments?: { name: string; path: string }[]
 }
 
 type Message = UserMessage | AssistantMessage
@@ -150,7 +147,7 @@ function parseTodoResult(content: string): TodoListData | null {
 
 // ── 解析当前活跃的 LLM 配置 ──
 
-function resolveActiveLLM(config: KimiConfig): { name: string; baseUrl: string; apiKey: string; model: string; protocol: 'anthropic' | 'openai'; label: string } {
+function resolveActiveLLM(config: KimiConfig): { name: string; baseUrl: string; apiKey: string; model: string; protocol: 'anthropic' | 'openai'; provider?: LLMEntry['provider']; thinking?: LLMEntry['thinking']; contextSize?: number; maxTokens?: number; temperature?: number; topP?: number; label: string } {
   if (config.activeLLMId && config.llms.length > 0) {
     const active = config.llms.find(l => l.id === config.activeLLMId)
     if (active) {
@@ -160,11 +157,17 @@ function resolveActiveLLM(config: KimiConfig): { name: string; baseUrl: string; 
         apiKey: active.apiKey,
         model: active.model,
         protocol: active.protocol,
+        provider: active.provider,
+        thinking: active.thinking,
+        contextSize: active.contextSize,
+        maxTokens: active.maxTokens,
+        temperature: active.temperature,
+        topP: active.topP,
         label: `${active.name} (${active.model})`,
       }
     }
   }
-  // fallback: legacy config
+
   const apiKey = config.activeApiKey === 'key1' ? config.apiKey : (config.apiKey2 || config.apiKey)
   return {
     name: config.model,
@@ -183,6 +186,7 @@ export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKe
   const [messages, setMessages] = useState<Message[]>([])
   const [input, setInput] = useState('')
   const [attachedFiles, setAttachedFiles] = useState<{ name: string; path: string }[]>([])
+  const [isDropActive, setIsDropActive] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [backendConnected, setBackendConnected] = useState(false)
   const [contextUsage, setContextUsage] = useState<ContextUsageData | null>(null)
@@ -194,7 +198,6 @@ export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKe
   const [selectedAgent, setSelectedAgent] = useState<CustomAgent | null>(null)
   const [agentSuggestions, setAgentSuggestions] = useState<CustomAgent[]>([])
   const [showAgentSuggestions, setShowAgentSuggestions] = useState(false)
-  const [showMedicalAgent, setShowMedicalAgent] = useState(false)
   const inputRef = useRef<HTMLTextAreaElement>(null)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const abortRef = useRef<AbortController | null>(null)
@@ -337,7 +340,12 @@ export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKe
 
     // 构建显示用的消息内容
     const displayText = selectedAgent ? `@${selectedAgent.name} ${text}` : text
-    const userMsg: UserMessage = { id: Date.now().toString(), role: 'user', content: displayText }
+    const userMsg: UserMessage = {
+      id: Date.now().toString(),
+      role: 'user',
+      content: displayText,
+      attachments: attachedFiles.length > 0 ? attachedFiles.map(f => ({ name: f.name, path: f.path })) : undefined,
+    }
     setMessages(prev => [...prev, userMsg])
     setInput('')
     setContextUsage(null)
@@ -575,8 +583,49 @@ export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKe
     }
   }, [toolTimeout])
 
+  const handleChatDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setIsDropActive(false)
+
+    const rawFiles = e.dataTransfer.getData('application/x-sigma-paths')
+    const rawPath = e.dataTransfer.getData('application/x-sigma-path')
+    let files: { name: string; path: string }[] = []
+    try {
+      files = rawFiles ? JSON.parse(rawFiles) : []
+    } catch {
+      files = []
+    }
+    if (files.length === 0 && rawPath) {
+      files = [{ path: rawPath, name: rawPath.split(/[\\/]/).pop() || rawPath }]
+    }
+    if (files.length > 0) {
+      setAttachedFiles(prev => {
+        const existing = new Set(prev.map(file => file.path))
+        return [...prev, ...files.filter(file => file.path && !existing.has(file.path))]
+      })
+    }
+  }, [])
+
+  const handleChatDragOver = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    if (!e.dataTransfer.types.includes('application/x-sigma-path') && !e.dataTransfer.types.includes('application/x-sigma-paths')) return
+    e.preventDefault()
+    e.stopPropagation()
+    e.dataTransfer.dropEffect = 'copy'
+    setIsDropActive(true)
+  }, [])
+
+  const handleChatDragLeave = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+    if (!e.currentTarget.contains(e.relatedTarget as Node)) setIsDropActive(false)
+  }, [])
+
   return (
-    <div className="chat-panel">
+    <div
+      className={`chat-panel ${isDropActive ? 'drop-active' : ''}`}
+      onDragOver={handleChatDragOver}
+      onDragLeave={handleChatDragLeave}
+      onDrop={handleChatDrop}
+    >
       <div className="chat-header">
         <button className="chat-menu-btn" onClick={() => {
           const event = new CustomEvent('sigma-toggle-sidebar')
@@ -586,9 +635,6 @@ export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKe
         </button>
         <h2>{t("chat.assistant")}</h2>
         <div className="chat-header-actions">
-          <button title="灵医智能体" onClick={() => setShowMedicalAgent(true)}>
-            <Stethoscope size={16} />
-          </button>
           <span className="backend-status">
             <span className={`dot ${backendConnected ? 'connected' : 'disconnected'}`} />
             {backendConnected ? t("chat.connected") : t("chat.disconnected")}
@@ -605,9 +651,20 @@ export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKe
         )}
         {messages.map(msg =>
           msg.role === 'user' ? (
-            <div key={msg.id} className="message user">
-              <div className="role-label">{t("chat.you")}</div>
-              <div className="message-text">{msg.content}</div>
+            <div key={msg.id} className="user-message">
+              <div className="message user">
+                <div className="role-label">{t("chat.you")}</div>
+                <div className="message-text">{msg.content}</div>
+              </div>
+              {msg.attachments && msg.attachments.length > 0 && (
+                <div className="user-message-attachments">
+                  {msg.attachments.map(file => (
+                    <div key={file.path} className="file-chip user-file-chip" title={file.path}>
+                      <span className="file-chip-name">{file.name}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           ) : (
             <SigmaMessage key={msg.id} msg={msg as AssistantMessage} toolTimeout={toolTimeout} onToolTimeoutChoice={handleToolTimeoutChoice} questionnaire={questionnaire} onQuestionnaireSubmit={handleQuestionnaireSubmit} onOpenTerminal={onOpenTerminal} />
@@ -621,7 +678,12 @@ export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKe
         )}
       </div>
 
-      <div className="chat-input-area">
+      <div
+        className={`chat-input-area ${isDropActive ? 'drop-active' : ''}`}
+        onDragOver={handleChatDragOver}
+        onDragLeave={handleChatDragLeave}
+        onDrop={handleChatDrop}
+      >
         {isLoading ? (
           <div className="chat-input-working">
             <ThinkingAnimation isStreaming={true} />
@@ -713,14 +775,6 @@ export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKe
           </>
         )}
       </div>
-
-      {showMedicalAgent && (
-        <AgentAppModal
-          url={MEDICAL_AGENT_URL}
-          title="灵医智能体 Sigma 版"
-          onClose={() => setShowMedicalAgent(false)}
-        />
-      )}
     </div>
   )
 }
@@ -886,6 +940,27 @@ function handleSSEEvent(
       if (m.id !== assistantId || m.role !== 'assistant') return m
       const am = m as AssistantMessage
       return { ...am, blocks: [...am.blocks, { type: 'tool_call', toolName, toolInput, displayName }] }
+    }))
+    return
+  }
+
+  if (type === 'tool_progress') {
+    const toolName = data.tool_name as string
+    const content = (data.content as string) || ''
+    setMessages(prev => prev.map(m => {
+      if (m.id !== assistantId || m.role !== 'assistant') return m
+      const am = m as AssistantMessage
+      const blocks = [...am.blocks]
+      // 找到最后一个匹配的未完成 tool_call
+      for (let i = blocks.length - 1; i >= 0; i--) {
+        const b = blocks[i]
+        if (b.type === 'tool_call' && b.toolName === toolName && b.result === undefined) {
+          const log = [...(b.progressLog || []), content]
+          blocks[i] = { ...b, progressLog: log }
+          break
+        }
+      }
+      return { ...am, blocks }
     }))
     return
   }
@@ -1403,6 +1478,14 @@ function ToolCallBlock({ block, onOpenTerminal }: { block: Extract<Block, { type
           </span>
         )}
       </div>
+      {/* 运行中：显示实时进度日志 */}
+      {!hasResult && block.progressLog && block.progressLog.length > 0 && (
+        <div className="tool-call-progress-log">
+          {block.progressLog.slice(-5).map((line, i) => (
+            <div key={i} className="tool-progress-line">{line}</div>
+          ))}
+        </div>
+      )}
       {!collapsed && hasResult && (
         <div className="tool-call-body">
           <div className="tool-call-section">

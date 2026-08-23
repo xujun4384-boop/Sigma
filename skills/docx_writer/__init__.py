@@ -618,13 +618,16 @@ class WriteDocxTool(BaseTool):
         try:
             import httpx
 
+            # 超时可由调用方传入（秒），默认 120；流式下作用于数据块间隔
+            timeout = float(kwargs.get("timeout", 120))
+
             if protocol == "anthropic":
                 content_text = self._call_llm_anthropic(
-                    base_url, api_key, model, system_prompt, user_prompt,
+                    base_url, api_key, model, system_prompt, user_prompt, timeout,
                 )
             else:
                 content_text = self._call_llm_openai(
-                    base_url, api_key, model, system_prompt, user_prompt,
+                    base_url, api_key, model, system_prompt, user_prompt, timeout,
                 )
 
             if not content_text or not content_text.strip():
@@ -648,68 +651,120 @@ class WriteDocxTool(BaseTool):
             )
         except ImportError:
             return ToolResult.fail("缺少 httpx 库，请运行: pip install httpx")
+        except httpx.ReadTimeout:
+            return ToolResult.fail(
+                f"大纲展开超时：LLM 在 {timeout:.0f} 秒内未返回数据。"
+                "文档过长或模型响应较慢时易触发。建议：拆分大纲分多次生成，或传入更大的 timeout 参数。"
+            )
         except Exception as e:
             return ToolResult.fail(f"大纲展开或文档创建失败: {e}")
 
     def _call_llm_anthropic(self, base_url: str, api_key: str, model: str,
-                              system_prompt: str, user_prompt: str) -> str:
-        """调用 Anthropic 协议 LLM，返回文本内容。"""
+                              system_prompt: str, user_prompt: str,
+                              timeout: float = 120.0) -> str:
+        """调用 Anthropic 协议 LLM，SSE 流式读取并拼接文本。
+
+        采用流式（stream=True）：把"等待整个响应"变成"等待下一个数据块"，
+        避免长文档一次性生成时超过固定 read 超时。
+        """
         import httpx
 
         url = f"{base_url}/v1/messages" if "/v1" not in base_url else f"{base_url}/messages"
         body = {
             "model": model,
             "max_tokens": 16384,
+            "stream": True,
             "system": system_prompt,
             "messages": [{"role": "user", "content": user_prompt}],
         }
-        with httpx.Client(timeout=120) as client:
-            resp = client.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "anthropic-version": "2023-06-01",
-                    "Content-Type": "application/json",
-                },
-                json=body,
-            )
-            if resp.status_code != 200:
-                raise RuntimeError(f"LLM API error {resp.status_code}: {resp.text[:300]}")
-
-            data = resp.json()
-            content_blocks = data.get("content", [])
-            return "".join(
-                b.get("text", "") for b in content_blocks if b.get("type") == "text"
-            )
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "anthropic-version": "2023-06-01",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        }
+        parts: list[str] = []
+        with httpx.Client(timeout=self._make_timeout(timeout)) as client:
+            with client.stream("POST", url, headers=headers, json=body) as resp:
+                if resp.status_code != 200:
+                    resp.read()
+                    raise RuntimeError(f"LLM API error {resp.status_code}: {resp.text[:300]}")
+                for data_str in self._iter_sse_data(resp):
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        event = json.loads(data_str)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    etype = event.get("type")
+                    if etype == "content_block_delta":
+                        delta = event.get("delta", {})
+                        if delta.get("type") == "text_delta":
+                            parts.append(delta.get("text", ""))
+                    elif etype == "error":
+                        err = event.get("error", {})
+                        raise RuntimeError(f"LLM API stream error: {err.get('message', data_str)[:300]}")
+        return "".join(parts)
 
     def _call_llm_openai(self, base_url: str, api_key: str, model: str,
-                           system_prompt: str, user_prompt: str) -> str:
-        """调用 OpenAI 协议 LLM，返回文本内容。"""
+                           system_prompt: str, user_prompt: str,
+                           timeout: float = 120.0) -> str:
+        """调用 OpenAI 协议 LLM，SSE 流式读取并拼接文本。"""
         import httpx
 
         url = f"{base_url}/chat/completions"
         body = {
             "model": model,
             "max_tokens": 16384,
+            "stream": True,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
         }
-        with httpx.Client(timeout=120) as client:
-            resp = client.post(
-                url,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=body,
-            )
-            if resp.status_code != 200:
-                raise RuntimeError(f"LLM API error {resp.status_code}: {resp.text[:300]}")
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        }
+        parts: list[str] = []
+        with httpx.Client(timeout=self._make_timeout(timeout)) as client:
+            with client.stream("POST", url, headers=headers, json=body) as resp:
+                if resp.status_code != 200:
+                    resp.read()
+                    raise RuntimeError(f"LLM API error {resp.status_code}: {resp.text[:300]}")
+                for data_str in self._iter_sse_data(resp):
+                    if data_str == "[DONE]":
+                        break
+                    try:
+                        chunk = json.loads(data_str)
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+                    for choice in chunk.get("choices", []):
+                        delta = choice.get("delta", {})
+                        text = delta.get("content")
+                        if text:
+                            parts.append(text)
+        return "".join(parts)
 
-            data = resp.json()
-            choices = data.get("choices", [])
-            if choices:
-                return choices[0].get("message", {}).get("content", "") or ""
-            return ""
+    # ─── 流式辅助 ───
+
+    @staticmethod
+    def _make_timeout(timeout: float):
+        """构造 httpx 超时配置。
+
+        流式下 read 超时作用于"相邻两个数据块之间的间隔"，
+        而非整个响应总时长，因此长文档生成不会因总耗时超限。
+        connect/write 保持较短，read 用传入值，pool 不限制。
+        """
+        import httpx
+        return httpx.Timeout(connect=30.0, read=timeout, write=30.0, pool=None)
+
+    @staticmethod
+    def _iter_sse_data(resp):
+        """逐条解析 SSE 响应中的 data: 行，yield 其内容。"""
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            if line.startswith("data:"):
+                yield line[len("data:"):].strip()

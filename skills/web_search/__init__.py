@@ -44,6 +44,7 @@ class WebSearchTool(BaseTool):
             )
 
         limit = min(max(limit, 1), 10)
+        self._emit_progress(f"正在搜索: {query}")
 
         if self.provider == "kimi":
             return self._search_kimi(query, limit)

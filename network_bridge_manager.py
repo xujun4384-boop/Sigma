@@ -39,6 +39,8 @@ class NetworkBridgeManager:
         self._vision_config: dict | None = None
         # 最大工具调用轮次（默认 10，由主程序 Settings 面板同步）
         self._max_iterations: int = 10
+        # Skill Keys 配置缓存：完整 skillKeys（web_search/tavily/image_gen/…等各 skill 的 key）
+        self._skill_keys: dict = {}
 
     # ── LLM 配置管理 ──
 
@@ -110,6 +112,19 @@ class NetworkBridgeManager:
     def get_vision_config(self) -> dict | None:
         """获取视觉模型配置（含完整 apiKey）。"""
         return self._vision_config
+
+    # ── Skill Keys 配置管理 ──
+
+    def register_skill_keys(self, skill_keys: dict):
+        """注册完整 skillKeys 配置（web_search/tavily/image_gen/…等）。"""
+        if not isinstance(skill_keys, dict) or not skill_keys:
+            return
+        self._skill_keys = dict(skill_keys)
+        log.info(f"[Bridge] Skill Keys 已缓存: {len(self._skill_keys)} 个字段")
+
+    def get_skill_keys(self) -> dict:
+        """获取完整 skillKeys 配置。"""
+        return dict(self._skill_keys)
 
     # ── 最大工具调用轮次 ──
 

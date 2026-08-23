@@ -24,6 +24,7 @@ from skills.docx_analyzer import SearchDocxTool
 from skills.image_reader import ImagePreviewTool, ImageReaderTool
 from skills.image_search import ImageSearchTool
 from skills.image_generate import ImageGenerateTool
+from skills.music_generate import MusicGenerateTool
 from skills.sandbox import SandboxTool
 from skills.sub_agent import SubAgentTool
 from skills.custom_agent import CustomAgentTool
@@ -62,6 +63,10 @@ from skills.flyai import (
     FlyAIKeywordSearch, FlyAIAISearch, FlyAISearchFlight, FlyAISearchTrain,
     FlyAISearchHotel, FlyAISearchPOI, FlyAISearchMarriottHotel, FlyAISearchMarriottPackage,
 )
+from skills.baidu_map import (
+    BaiduMapPlaceTool, BaiduMapDirectionTool, BaiduMapGeocodingTool,
+    BaiduMapReverseGeocodingTool, BaiduMapWeatherTool, BaiduMapRenderTool,
+)
 
 # 内部工具：仅供子 Agent 使用，不对外暴露给 LLM（只读工具由 batch_read 统一入口）
 _INTERNAL_TOOLS = {"read", "read_docx", "read_pdf", "read_pptx"}
@@ -79,6 +84,7 @@ ALL_TOOL_CLASSES: dict[str, type] = {
     "preview_image": ImagePreviewTool,
     "search_image": ImageSearchTool,
     "generate_image": ImageGenerateTool,
+    "generate_music": MusicGenerateTool,
     "sandbox_run": SandboxTool,
     "sub_agent": SubAgentTool,
     "custom_agent": CustomAgentTool,
@@ -123,6 +129,12 @@ ALL_TOOL_CLASSES: dict[str, type] = {
     "flyai_search_poi": FlyAISearchPOI,
     "flyai_search_marriott_hotel": FlyAISearchMarriottHotel,
     "flyai_search_marriott_package": FlyAISearchMarriottPackage,
+    "baidu_map_place": BaiduMapPlaceTool,
+    "baidu_map_direction": BaiduMapDirectionTool,
+    "baidu_map_geocoding": BaiduMapGeocodingTool,
+    "baidu_map_reverse_geocoding": BaiduMapReverseGeocodingTool,
+    "baidu_map_weather": BaiduMapWeatherTool,
+    "baidu_map_render": BaiduMapRenderTool,
     # 以下为内部工具，仅供子 Agent 使用，不对外暴露
     "read": ReadTool,
     "read_docx": ReadDocxTool,
@@ -172,6 +184,10 @@ ALL_SKILLS: dict[str, dict] = {
     "image_generate": {
         "label": "图片生成",
         "tool_names": ["generate_image"],
+    },
+    "music_generate": {
+        "label": "音乐生成",
+        "tool_names": ["generate_music"],
     },
     "sandbox": {
         "label": "沙箱执行",
@@ -274,6 +290,17 @@ ALL_SKILLS: dict[str, dict] = {
             "flyai_search_marriott_hotel", "flyai_search_marriott_package",
         ],
     },
+    "baidu_map": {
+        "label": "百度地图",
+        "tool_names": [
+            "baidu_map_place", "baidu_map_direction", "baidu_map_geocoding",
+            "baidu_map_reverse_geocoding", "baidu_map_weather", "baidu_map_render",
+        ],
+    },
+    "pptx": {
+        "label": "PPT 生成",
+        "tool_names": ["convert_pptx"],
+    },
 }
 
 
@@ -281,12 +308,16 @@ class SkillManager:
     def __init__(self, cwd: str = ".", web_search_provider: str = "kimi",
                  web_search_api_key: str = "", web_search_base_url: str = "",
                  tavily_api_key: str = "", image_gen_api_key: str = "",
-                 image_gen_base_url: str = "",
+                 image_gen_base_url: str = "", image_gen_model: str = "",
+                 image_gen_provider: str = "ark",
+                 music_gen_api_key: str = "", music_gen_base_url: str = "",
+                 music_gen_model: str = "",
                  vision_api_key: str = "", vision_model: str = "",
                  vision_base_url: str = "",
                  wechat_appid: str = "", wechat_appsecret: str = "",
                  wechat_relay_url: str = "", wechat_relay_key: str = "",
                  fengniao_api_key: str = "", flyai_api_key: str = "",
+                 baidu_map_auth_token: str = "",
                  mail163_address: str = "", mail163_auth_code: str = "",
                  mail163_smtp_host: str = "", mail163_smtp_port: str = "",
                  mail163_imap_host: str = "", mail163_imap_port: str = "",
@@ -304,6 +335,11 @@ class SkillManager:
         self.tavily_api_key = tavily_api_key
         self.image_gen_api_key = image_gen_api_key
         self.image_gen_base_url = image_gen_base_url
+        self.image_gen_model = image_gen_model
+        self.image_gen_provider = image_gen_provider
+        self.music_gen_api_key = music_gen_api_key
+        self.music_gen_base_url = music_gen_base_url
+        self.music_gen_model = music_gen_model
         self.vision_api_key = vision_api_key
         self.vision_model = vision_model
         self.vision_base_url = vision_base_url
@@ -313,6 +349,7 @@ class SkillManager:
         self.wechat_relay_key = wechat_relay_key
         self.fengniao_api_key = fengniao_api_key
         self.flyai_api_key = flyai_api_key
+        self.baidu_map_auth_token = baidu_map_auth_token
         self.mail163_address = mail163_address
         self.mail163_auth_code = mail163_auth_code
         self.mail163_smtp_host = mail163_smtp_host
@@ -481,6 +518,15 @@ class SkillManager:
                     cwd=str(self.cwd),
                     api_key=self.image_gen_api_key,
                     base_url=self.image_gen_base_url,
+                    default_model=self.image_gen_model,
+                    provider=self.image_gen_provider,
+                )
+            elif tool_name == "generate_music":
+                self._instances[tool_name] = cls(
+                    cwd=str(self.cwd),
+                    api_key=self.music_gen_api_key,
+                    base_url=self.music_gen_base_url,
+                    default_model=self.music_gen_model,
                 )
             elif tool_name == "sub_agent":
                 self._instances[tool_name] = cls(
@@ -570,6 +616,14 @@ class SkillManager:
                 self._instances[tool_name] = cls(
                     cwd=str(self.cwd),
                     api_key=self.flyai_api_key,
+                )
+            elif tool_name in (
+                "baidu_map_place", "baidu_map_direction", "baidu_map_geocoding",
+                "baidu_map_reverse_geocoding", "baidu_map_weather", "baidu_map_render",
+            ):
+                self._instances[tool_name] = cls(
+                    cwd=str(self.cwd),
+                    auth_token=self.baidu_map_auth_token,
                 )
             else:
                 self._instances[tool_name] = cls(cwd=str(self.cwd))

@@ -28,8 +28,9 @@ export default function QuestionnaireDisplay({ data, onSubmit }: Props) {
   const [answers, setAnswers] = useState<Record<string, string | string[]>>({})
   const [submitted, setSubmitted] = useState(false)
 
-  const questions = data.questions || []
+  const questions = Array.isArray(data.questions) ? data.questions : []
   const currentQuestion = questions[currentIndex]
+  const options = Array.isArray(currentQuestion?.options) ? currentQuestion.options.filter((option): option is string => typeof option === 'string') : []
   const isLast = currentIndex === questions.length - 1
 
   // 检查当前题目是否已填写
@@ -108,7 +109,7 @@ export default function QuestionnaireDisplay({ data, onSubmit }: Props) {
 
         {currentQuestion?.type === 'single_choice' && (
           <div className="questionnaire-options">
-            {(currentQuestion.options || []).map((opt, i) => {
+            {options.map((opt, i) => {
               const selected = answers[currentQuestion.id] === opt
               return (
                 <button
@@ -129,7 +130,7 @@ export default function QuestionnaireDisplay({ data, onSubmit }: Props) {
 
         {currentQuestion?.type === 'multi_choice' && (
           <div className="questionnaire-options">
-            {(currentQuestion.options || []).map((opt, i) => {
+            {options.map((opt, i) => {
               const selected = ((answers[currentQuestion.id] as string[]) || []).includes(opt)
               return (
                 <button

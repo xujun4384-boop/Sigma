@@ -153,7 +153,7 @@ function ApiTab({ config, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLL
   const [showKey, setShowKey] = useState(false)
   const [saved, setSaved] = useState(false)
   const [llmName, setLlmName] = useState('')
-  const [provider, setProvider] = useState<'generic' | 'deepseek' | 'kimi-code'>('generic')
+  const [provider, setProvider] = useState<'generic' | 'deepseek' | 'kimi-code' | 'minimax'>('generic')
   const [testingIds, setTestingIds] = useState<Record<string, 'testing' | 'success' | 'error'>>({})
   const [balances, setBalances] = useState<Record<string, { loading: boolean; data?: any; error?: string }>>({})
   const [view, setView] = useState<'list' | 'add' | 'edit'>('list')
@@ -207,6 +207,7 @@ function ApiTab({ config, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLL
       model: form.model,
       protocol: form.protocol,
       provider,
+      ...(provider === 'minimax' ? { thinking: 'enabled' as const, contextSize: 1_000_000, maxTokens: 32768, temperature: 1.0, topP: 0.95 } : {}),
     }
     onAddLLM(entry)
     backToList()
@@ -222,6 +223,7 @@ function ApiTab({ config, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLL
       model: form.model,
       protocol: form.protocol,
       provider,
+      ...(provider === 'minimax' ? { thinking: 'enabled' as const, contextSize: 1_000_000, maxTokens: 32768, temperature: 1.0, topP: 0.95 } : {}),
     }
     onUpdateLLM(entry)
     backToList()
@@ -433,6 +435,32 @@ function ApiTab({ config, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLL
                           <UsageBlock title="本周用量" detail={balances[entry.id].data?.usage} />
                           <UsageBlock title="频限明细" detail={balances[entry.id].data?.limits?.[0]?.detail} />
                         </div>
+                      ) : entry.provider === 'minimax' && balances[entry.id]?.data ? (
+                        <div className="usage-bars">
+                          {(() => {
+                            const list: any[] = Array.isArray(balances[entry.id].data?.model_remains) ? balances[entry.id].data.model_remains : []
+                            const pick = (pred: (m: any) => boolean) => list.find(pred)
+                            const row =
+                              pick(m => typeof m?.model_name === 'string' && /minimax-m/i.test(m.model_name)) ||
+                              pick(m => m?.model_name === 'general') ||
+                              list[0] ||
+                              null
+                            if (!row) return null
+                            const toDetail = (pct: any, ms: any) => {
+                              const p = Number(pct)
+                              const used = Number.isFinite(p) ? Math.max(0, Math.min(100, 100 - p)) : 0
+                              const remain = Number(ms)
+                              const resetTime = Number.isFinite(remain) ? new Date(Date.now() + remain).toISOString() : undefined
+                              return { limit: 100, used, resetTime }
+                            }
+                            return (
+                              <>
+                                <UsageBlock title="5小时窗口" detail={toDetail(row.current_interval_remaining_percent, row.remains_time)} />
+                                <UsageBlock title="本周用量" detail={toDetail(row.current_weekly_remaining_percent, row.weekly_remains_time)} />
+                              </>
+                            )
+                          })()}
+                        </div>
                       ) : balances[entry.id]?.data ? (
                         <>
                           <Wallet size={12} />
@@ -529,6 +557,7 @@ function ApiTab({ config, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLL
             <button className={provider === 'generic' ? 'active' : ''} onClick={() => setProvider('generic')}>{t("api.provider_generic")}</button>
             <button className={provider === 'deepseek' ? 'active' : ''} onClick={() => setProvider('deepseek')}>{t("api.provider_deepseek")}</button>
             <button className={provider === 'kimi-code' ? 'active' : ''} onClick={() => setProvider('kimi-code')}>{t("api.provider_kimi_code")}</button>
+            <button className={provider === 'minimax' ? 'active' : ''} onClick={() => setProvider('minimax')}>{t("api.provider_minimax")}</button>
           </div>
         </div>
 
@@ -572,427 +601,483 @@ function ApiTab({ config, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLL
 
 // ── Skill Keys Tab ──
 
+type SkillFieldType = 'text' | 'password' | 'toggle'
+
+interface SkillFieldDef {
+  key: keyof SkillKeysConfig
+  type: SkillFieldType
+  labelKey: string
+  options?: { value: string; label: string }[]
+  placeholder?: string | ((sk: SkillKeysConfig) => string)
+  hintKey?: string
+  visibleIf?: (sk: SkillKeysConfig) => boolean
+}
+
+interface SkillTestDef {
+  labelKey: string
+  endpoint: string
+  buildBody: (sk: SkillKeysConfig) => Record<string, unknown>
+}
+
+interface SkillDef {
+  id: string
+  titleKey: string
+  descKey: string
+  requiredKeys: (keyof SkillKeysConfig)[]
+  fields: SkillFieldDef[]
+  test?: SkillTestDef
+}
+
+const SKILL_DEFS: SkillDef[] = [
+  {
+    id: 'web_search',
+    titleKey: 'skill_keys.web_search',
+    descKey: 'skill_keys.web_search_desc',
+    requiredKeys: ['webSearchApiKey'],
+    fields: [
+      {
+        key: 'webSearchProvider',
+        type: 'toggle',
+        labelKey: 'skill_keys.search_provider',
+        options: [
+          { value: 'kimi', label: 'Kimi' },
+          { value: 'tavily', label: 'Tavily' },
+          { value: 'custom', label: 'Custom' },
+        ],
+      },
+      {
+        key: 'webSearchApiKey',
+        type: 'password',
+        labelKey: 'skill_keys.web_search_api_key',
+        placeholder: (sk) => (sk.webSearchProvider === 'kimi' ? 'sk-...' : sk.webSearchProvider === 'tavily' ? 'tvly-...' : 'Your API Key...'),
+      },
+      {
+        key: 'webSearchBaseUrl',
+        type: 'text',
+        labelKey: 'skill_keys.web_search_base_url',
+        placeholder: 'https://api.example.com/v1/search',
+        visibleIf: (sk) => sk.webSearchProvider === 'custom',
+      },
+    ],
+  },
+  {
+    id: 'image_search',
+    titleKey: 'skill_keys.image_search',
+    descKey: 'skill_keys.image_search_desc',
+    requiredKeys: ['tavilyApiKey'],
+    fields: [
+      { key: 'tavilyApiKey', type: 'password', labelKey: 'skill_keys.tavily_api_key', placeholder: 'tvly-...', hintKey: 'skill_keys.tavily_register' },
+    ],
+  },
+  {
+    id: 'image_gen',
+    titleKey: 'skill_keys.image_gen',
+    descKey: 'skill_keys.image_gen_desc',
+    requiredKeys: [],
+    fields: [
+      {
+        key: 'imageGenProvider',
+        type: 'toggle',
+        labelKey: 'skill_keys.image_gen_provider',
+        options: [
+          { value: 'ark', label: '火山 ARK' },
+          { value: 'minimax', label: 'MiniMax' },
+        ],
+      },
+      {
+        key: 'imageArkApiKey',
+        type: 'password',
+        labelKey: 'skill_keys.image_ark_api_key',
+        placeholder: 'ARK API key',
+        visibleIf: sk => (sk.imageGenProvider || 'ark') === 'ark',
+      },
+      {
+        key: 'imageArkBaseUrl',
+        type: 'text',
+        labelKey: 'skill_keys.image_ark_base_url',
+        placeholder: 'https://ark.cn-beijing.volces.com/api/v3',
+        visibleIf: sk => (sk.imageGenProvider || 'ark') === 'ark',
+      },
+      {
+        key: 'imageArkModel',
+        type: 'text',
+        labelKey: 'skill_keys.image_ark_model',
+        placeholder: 'doubao-seedream-4-5-251128',
+        visibleIf: sk => (sk.imageGenProvider || 'ark') === 'ark',
+      },
+      {
+        key: 'imageMinimaxApiKey',
+        type: 'password',
+        labelKey: 'skill_keys.image_minimax_api_key',
+        placeholder: 'MiniMax API key',
+        visibleIf: sk => sk.imageGenProvider === 'minimax',
+      },
+      {
+        key: 'imageMinimaxBaseUrl',
+        type: 'text',
+        labelKey: 'skill_keys.image_minimax_base_url',
+        placeholder: 'https://api.minimaxi.com/v1',
+        visibleIf: sk => sk.imageGenProvider === 'minimax',
+      },
+      {
+        key: 'imageMinimaxModel',
+        type: 'text',
+        labelKey: 'skill_keys.image_minimax_model',
+        placeholder: 'image-01',
+        visibleIf: sk => sk.imageGenProvider === 'minimax',
+      },
+    ],
+  },
+  {
+    id: 'music_generate',
+    titleKey: 'skill_keys.music_generate',
+    descKey: 'skill_keys.music_generate_desc',
+    requiredKeys: ['musicGenApiKey'],
+    fields: [
+      { key: 'musicGenApiKey', type: 'password', labelKey: 'skill_keys.music_gen_api_key', placeholder: 'MiniMax Token Plan subscription key' },
+      { key: 'musicGenBaseUrl', type: 'text', labelKey: 'skill_keys.music_gen_base_url', placeholder: 'https://api.minimaxi.com/v1', hintKey: 'skill_keys.music_gen_default' },
+      { key: 'musicGenModel', type: 'text', labelKey: 'skill_keys.music_gen_model', placeholder: 'music-3.0', hintKey: 'skill_keys.music_gen_model_hint' },
+    ],
+    test: {
+      labelKey: 'skill_keys.test_music',
+      endpoint: '/api/test-music',
+      buildBody: (sk) => ({
+        apiKey: sk.musicGenApiKey,
+        baseUrl: sk.musicGenBaseUrl,
+        model: sk.musicGenModel,
+      }),
+    },
+  },
+  {
+    id: 'vision_ocr',
+    titleKey: 'skill_keys.vision_ocr',
+    descKey: 'skill_keys.vision_desc',
+    requiredKeys: ['visionApiKey'],
+    fields: [
+      { key: 'visionApiKey', type: 'password', labelKey: 'skill_keys.vision_api_key', placeholder: 'Vision API Key (e.g. Kimi)...' },
+      { key: 'visionModel', type: 'text', labelKey: 'skill_keys.vision_model', placeholder: 'kimi-for-coding', hintKey: 'skill_keys.vision_model_hint' },
+      { key: 'visionBaseUrl', type: 'text', labelKey: 'skill_keys.vision_base_url', placeholder: 'https://api.moonshot.cn/anthropic', hintKey: 'skill_keys.vision_url_hint' },
+    ],
+    test: {
+      labelKey: 'skill_keys.test_vision',
+      endpoint: '/api/test-vision',
+      buildBody: (sk) => ({
+        apiKey: sk.visionApiKey || '',
+        model: sk.visionModel || 'kimi-for-coding',
+        baseUrl: sk.visionBaseUrl || 'https://api.moonshot.cn/anthropic',
+      }),
+    },
+  },
+  {
+    id: 'wechat',
+    titleKey: 'skill_keys.wechat',
+    descKey: 'skill_keys.wechat_desc',
+    requiredKeys: ['wechatAppId', 'wechatAppSecret'],
+    fields: [
+      { key: 'wechatAppId', type: 'text', labelKey: 'skill_keys.wechat_appid', placeholder: 'wx...' },
+      { key: 'wechatAppSecret', type: 'password', labelKey: 'skill_keys.wechat_appsecret', placeholder: 'Your AppSecret' },
+    ],
+  },
+  {
+    id: 'wechat_relay',
+    titleKey: 'skill_keys.wechat_relay',
+    descKey: 'skill_keys.wechat_relay_desc',
+    requiredKeys: ['wechatRelayUrl', 'wechatRelayKey'],
+    fields: [
+      { key: 'wechatRelayUrl', type: 'text', labelKey: 'skill_keys.wechat_relay_url', placeholder: 'http://8.159.156.138:8888' },
+      { key: 'wechatRelayKey', type: 'password', labelKey: 'skill_keys.wechat_relay_key', placeholder: 'Pre-shared key' },
+    ],
+  },
+  {
+    id: 'fengniao',
+    titleKey: 'skill_keys.fengniao',
+    descKey: 'skill_keys.fengniao_desc',
+    requiredKeys: ['fengniaoApiKey'],
+    fields: [
+      { key: 'fengniaoApiKey', type: 'password', labelKey: 'skill_keys.fengniao_api_key', placeholder: 'FN_API_KEY' },
+    ],
+  },
+  {
+    id: 'flyai',
+    titleKey: 'skill_keys.flyai',
+    descKey: 'skill_keys.flyai_desc',
+    requiredKeys: ['flyaiApiKey'],
+    fields: [
+      { key: 'flyaiApiKey', type: 'password', labelKey: 'skill_keys.flyai_api_key', placeholder: 'sk-...' },
+    ],
+  },
+  {
+    id: 'baidu_map',
+    titleKey: 'skill_keys.baidu_map',
+    descKey: 'skill_keys.baidu_map_desc',
+    requiredKeys: ['baiduMapAuthToken'],
+    fields: [
+      { key: 'baiduMapAuthToken', type: 'password', labelKey: 'skill_keys.baidu_map_auth_token', placeholder: 'sk-ap-...' },
+    ],
+  },
+  {
+    id: 'voice_chat',
+    titleKey: 'skill_keys.voice_chat',
+    descKey: 'skill_keys.voice_chat_desc',
+    requiredKeys: ['volcApiKey'],
+    fields: [
+      { key: 'volcApiKey', type: 'password', labelKey: 'skill_keys.volc_api_key', placeholder: '火山引擎 API Key' },
+    ],
+  },
+  {
+    id: 'voice_memory',
+    titleKey: 'skill_keys.voice_memory',
+    descKey: 'skill_keys.voice_memory_desc',
+    requiredKeys: [],
+    fields: [
+      { key: 'embedBaseUrl', type: 'text', labelKey: 'skill_keys.embed_base_url', placeholder: 'https://ark.cn-beijing.volces.com/api/v3' },
+      { key: 'embedApiKey', type: 'password', labelKey: 'skill_keys.embed_api_key', placeholder: '火山方舟 API Key' },
+      { key: 'embedModel', type: 'text', labelKey: 'skill_keys.embed_model', placeholder: 'doubao-embedding-large-text-240915' },
+      { key: 'voiceLlmBaseUrl', type: 'text', labelKey: 'skill_keys.voice_llm_base_url', placeholder: 'https://api.deepseek.com' },
+      { key: 'voiceLlmApiKey', type: 'password', labelKey: 'skill_keys.voice_llm_api_key', placeholder: 'DeepSeek API Key' },
+      { key: 'voiceLlmModel', type: 'text', labelKey: 'skill_keys.voice_llm_model', placeholder: 'deepseek-chat' },
+    ],
+  },
+  {
+    id: 'mail163',
+    titleKey: 'skill_keys.mail163',
+    descKey: 'skill_keys.mail163_desc',
+    requiredKeys: ['mail163Address', 'mail163AuthCode'],
+    fields: [
+      { key: 'mail163Address', type: 'text', labelKey: 'skill_keys.mail163_address', placeholder: 'yourname@163.com' },
+      { key: 'mail163AuthCode', type: 'password', labelKey: 'skill_keys.mail163_auth_code', placeholder: 'Client authorization code' },
+      { key: 'mail163SmtpHost', type: 'text', labelKey: 'skill_keys.mail163_smtp_host', placeholder: 'smtp.163.com' },
+      { key: 'mail163SmtpPort', type: 'text', labelKey: 'skill_keys.mail163_smtp_port', placeholder: '465' },
+      { key: 'mail163ImapHost', type: 'text', labelKey: 'skill_keys.mail163_imap_host', placeholder: 'imap.163.com' },
+      { key: 'mail163ImapPort', type: 'text', labelKey: 'skill_keys.mail163_imap_port', placeholder: '993' },
+    ],
+    test: {
+      labelKey: 'skill_keys.test_mail163',
+      endpoint: '/api/test-mail163',
+      buildBody: (sk) => ({
+        address: sk.mail163Address || '',
+        authCode: sk.mail163AuthCode || '',
+        smtpHost: sk.mail163SmtpHost || 'smtp.163.com',
+        smtpPort: sk.mail163SmtpPort || '465',
+        imapHost: sk.mail163ImapHost || 'imap.163.com',
+        imapPort: sk.mail163ImapPort || '993',
+      }),
+    },
+  },
+]
+
+function isSkillConfigured(sk: SkillKeysConfig | undefined, skill: SkillDef): boolean {
+  if (!sk) return false
+  return skill.requiredKeys.every(k => Boolean(sk[k]))
+}
+
+function normalizeImageGenConfig(config: KimiConfig): KimiConfig {
+  const current = (config.skillKeys || {}) as SkillKeysConfig & Record<string, string>
+  const provider = current.imageGenProvider || 'ark'
+  const legacyKey = current.imageGenApiKey || ''
+  const legacyBase = current.imageGenBaseUrl || ''
+  const legacyModel = current.imageGenModel || ''
+  return {
+    ...config,
+    skillKeys: {
+      ...current,
+      imageGenProvider: provider,
+      imageArkApiKey: current.imageArkApiKey || (provider === 'ark' ? legacyKey : ''),
+      imageArkBaseUrl: current.imageArkBaseUrl || (provider === 'ark' ? legacyBase : 'https://ark.cn-beijing.volces.com/api/v3'),
+      imageArkModel: current.imageArkModel || (provider === 'ark' ? legacyModel : 'doubao-seedream-4-5-251128'),
+      imageMinimaxApiKey: current.imageMinimaxApiKey || (provider === 'minimax' ? legacyKey : ''),
+      imageMinimaxBaseUrl: current.imageMinimaxBaseUrl || (provider === 'minimax' ? legacyBase : 'https://api.minimaxi.com/v1'),
+      imageMinimaxModel: current.imageMinimaxModel || (provider === 'minimax' ? legacyModel : 'image-01'),
+    } as SkillKeysConfig,
+  }
+}
+
 function SkillKeysTab({ config, onSave }: { config: KimiConfig; onSave: (c: KimiConfig) => void }) {
   const { t } = useTranslation()
-  const [form, setForm] = useState<KimiConfig>({ ...config })
+  const [form, setForm] = useState<KimiConfig>(() => normalizeImageGenConfig(config))
+  const [editingId, setEditingId] = useState<string | null>(null)
   const [saved, setSaved] = useState(false)
-  const [testing, setTesting] = useState(false)
-  const [testResult, setTestResult] = useState<{ success: boolean; error?: string } | null>(null)
-  const [showWsKey, setShowWsKey] = useState(false)
-  const [showTavilyKey, setShowTavilyKey] = useState(false)
-  const [showImgKey, setShowImgKey] = useState(false)
-  const [showVisionKey, setShowVisionKey] = useState(false)
-  const [showWechatKey, setShowWechatKey] = useState(false)
-  const [showRelayKey, setShowRelayKey] = useState(false)
-  const [showFengniaoKey, setShowFengniaoKey] = useState(false)
-  const [showFlyaiKey, setShowFlyaiKey] = useState(false)
-  const [showMail163Auth, setShowMail163Auth] = useState(false)
-  const [testingMail163, setTestingMail163] = useState(false)
-  const [mail163TestResult, setMail163TestResult] = useState<{ success: boolean; error?: string; detail?: string } | null>(null)
+  const [visibleSecrets, setVisibleSecrets] = useState<Record<string, boolean>>({})
+  const [testing, setTesting] = useState<Record<string, boolean>>({})
+  const [testResults, setTestResults] = useState<Record<string, { success: boolean; error?: string; detail?: string }>>({})
 
-  const updateSkillKeys = (patch: Partial<SkillKeysConfig>) => {
-    setForm(prev => ({ ...prev, skillKeys: { ...prev.skillKeys, ...patch } }))
+  const sk = (form.skillKeys || {}) as SkillKeysConfig
+
+  const setField = (key: keyof SkillKeysConfig, value: string) => {
+    setForm(prev => {
+      const skillKeys = { ...prev.skillKeys } as Record<string, string>
+      skillKeys[key] = value
+      return { ...prev, skillKeys: skillKeys as unknown as SkillKeysConfig }
+    })
     setSaved(false)
   }
+
+  const startEdit = (skill: SkillDef) => {
+    setForm(normalizeImageGenConfig(config))
+    setEditingId(skill.id)
+    setSaved(false)
+    setTestResults(prev => { const next = { ...prev }; delete next[skill.id]; return next })
+  }
+
+  const cancelEdit = () => setEditingId(null)
 
   const handleSave = () => {
     onSave(form)
     setSaved(true)
     setTimeout(() => setSaved(false), 2000)
-  }
+    setEditingId(null)
 
-  const handleTestVision = async () => {
-    setTesting(true)
-    setTestResult(null)
-    try {
-      const sk = form.skillKeys || {}
-      const baseUrl = await getBackendUrl()
-      const resp = await fetch(`${baseUrl}/api/test-vision`, {
+    // 同步语音/记忆配置到后端（供 voice_chat 读取）
+    const skNow = form.skillKeys || ({} as SkillKeysConfig)
+    getBackendUrl().then((baseUrl) => {
+      fetch(`${baseUrl}/api/voice/config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          apiKey: sk.visionApiKey || '',
-          model: sk.visionModel || 'kimi-for-coding',
-          baseUrl: sk.visionBaseUrl || 'https://api.moonshot.cn/anthropic',
+          volcApiKey: skNow.volcApiKey || '',
+          embedBaseUrl: skNow.embedBaseUrl || '',
+          embedApiKey: skNow.embedApiKey || '',
+          embedModel: skNow.embedModel || '',
+          voiceLlmBaseUrl: skNow.voiceLlmBaseUrl || '',
+          voiceLlmApiKey: skNow.voiceLlmApiKey || '',
+          voiceLlmModel: skNow.voiceLlmModel || '',
         }),
+      }).catch(() => { /* 后端未启动时静默 */ })
+    })
+  }
+
+  const handleTest = async (skill: SkillDef) => {
+    if (!skill.test) return
+    setTesting(prev => ({ ...prev, [skill.id]: true }))
+    setTestResults(prev => { const next = { ...prev }; delete next[skill.id]; return next })
+    try {
+      const baseUrl = await getBackendUrl()
+      const resp = await fetch(`${baseUrl}${skill.test.endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(skill.test.buildBody(sk)),
       })
       const data = await resp.json()
-      setTestResult(data)
+      setTestResults(prev => ({ ...prev, [skill.id]: data }))
     } catch (e: any) {
-      setTestResult({ success: false, error: e.message || 'Network error' })
+      setTestResults(prev => ({ ...prev, [skill.id]: { success: false, error: e.message || 'Network error' } }))
     } finally {
-      setTesting(false)
+      setTesting(prev => ({ ...prev, [skill.id]: false }))
     }
   }
 
-  const handleTestMail163 = async () => {
-    setTestingMail163(true)
-    setMail163TestResult(null)
-    try {
-      const sk = form.skillKeys || {}
-      const baseUrl = await getBackendUrl()
-      const resp = await fetch(`${baseUrl}/api/test-mail163`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          address: sk.mail163Address || '',
-          authCode: sk.mail163AuthCode || '',
-          smtpHost: sk.mail163SmtpHost || 'smtp.163.com',
-          smtpPort: sk.mail163SmtpPort || '465',
-          imapHost: sk.mail163ImapHost || 'imap.163.com',
-          imapPort: sk.mail163ImapPort || '993',
-        }),
-      })
-      const data = await resp.json()
-      setMail163TestResult(data)
-    } catch (e: any) {
-      setMail163TestResult({ success: false, error: e.message || 'Network error' })
-    } finally {
-      setTestingMail163(false)
-    }
+  const editingSkill = SKILL_DEFS.find(s => s.id === editingId)
+
+  if (editingSkill) {
+    return (
+      <div className="tab-content">
+        <div className="skill-key-edit-header">
+          <button className="llm-back-btn" onClick={cancelEdit} title={t("skill_keys.back")}>
+            <ChevronLeft size={16} />
+          </button>
+          <div className="skill-key-edit-title">
+            <h3>{t(editingSkill.titleKey)}</h3>
+            <p>{t(editingSkill.descKey)}</p>
+          </div>
+        </div>
+
+        {editingSkill.fields.map(field => {
+          if (field.visibleIf && !field.visibleIf(sk)) return null
+          const value = sk[field.key] as string
+          const placeholder = typeof field.placeholder === 'function' ? field.placeholder(sk) : field.placeholder
+
+          return (
+            <div className="config-field" key={field.key}>
+              <label>{t(field.labelKey)}</label>
+
+              {field.type === 'toggle' ? (
+                <div className="toggle-group">
+                  {(field.options || []).map(opt => (
+                    <button
+                      key={opt.value}
+                      className={value === opt.value ? 'active' : ''}
+                      onClick={() => setField(field.key, opt.value)}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              ) : field.type === 'password' ? (
+                <div className="key-row">
+                  <input
+                    type={visibleSecrets[field.key] ? 'text' : 'password'}
+                    value={value}
+                    onChange={e => setField(field.key, e.target.value)}
+                    placeholder={placeholder}
+                  />
+                  <button onClick={() => setVisibleSecrets(prev => ({ ...prev, [field.key]: !prev[field.key] }))}>
+                    {visibleSecrets[field.key] ? <EyeOff size={14} /> : <Eye size={14} />}
+                  </button>
+                </div>
+              ) : (
+                <input
+                  type="text"
+                  value={value}
+                  onChange={e => setField(field.key, e.target.value)}
+                  placeholder={placeholder}
+                />
+              )}
+
+              {field.hintKey && <span className="field-hint">{t(field.hintKey)}</span>}
+            </div>
+          )
+        })}
+
+        {editingSkill.test && (
+          <div className="config-field">
+            <button className="test-btn" onClick={() => handleTest(editingSkill)} disabled={testing[editingSkill.id]}>
+              {testing[editingSkill.id] ? t("api.testing") : t(editingSkill.test.labelKey)}
+            </button>
+            {testResults[editingSkill.id] && (
+              <span className={`test-result ${testResults[editingSkill.id].success ? 'success' : 'fail'}`}>
+                {testResults[editingSkill.id].success
+                  ? (testResults[editingSkill.id].detail || 'OK')
+                  : `Failed: ${testResults[editingSkill.id].error || 'Unknown error'}`}
+              </span>
+            )}
+          </div>
+        )}
+
+        <div className="skill-key-edit-actions">
+          <button className="save-btn" onClick={handleSave}>
+            {saved ? t("settings.saved") : t("settings.save")}
+          </button>
+          <button className="skill-key-cancel" onClick={cancelEdit}>
+            {t("api.cancel")}
+          </button>
+        </div>
+      </div>
+    )
   }
 
   return (
     <div className="tab-content">
-      {/* ── Web Search ── */}
-      <div className="config-section">
-        <h3>{t("skill_keys.web_search")}</h3>
-        <p className="section-desc">{t("skill_keys.web_search_desc")}</p>
+      <div className="skill-key-list">
+        {SKILL_DEFS.map(skill => {
+          const configured = isSkillConfigured(config.skillKeys, skill)
+          return (
+            <div key={skill.id} className="skill-key-card">
+              <div className="skill-key-card-info">
+                <div className="skill-key-card-header">
+                  <span className="skill-key-card-name">{t(skill.titleKey)}</span>
+                  <span className={`skill-key-badge ${configured ? 'configured' : ''}`}>
+                    {configured ? t("skill_keys.configured") : t("skill_keys.not_configured")}
+                  </span>
+                </div>
+                <p className="skill-key-card-desc">{t(skill.descKey)}</p>
+              </div>
+              <button className="skill-key-card-edit" onClick={() => startEdit(skill)} title={t("api.edit")}>
+                <Pencil size={14} />
+              </button>
+            </div>
+          )
+        })}
       </div>
-
-      <div className="config-field">
-        <label>{t("skill_keys.search_provider")}</label>
-        <div className="toggle-group">
-          <button
-            className={(form.skillKeys?.webSearchProvider || 'kimi') === 'kimi' ? 'active' : ''}
-            onClick={() => updateSkillKeys({ webSearchProvider: 'kimi' })}
-          >Kimi</button>
-          <button
-            className={(form.skillKeys?.webSearchProvider || 'kimi') === 'tavily' ? 'active' : ''}
-            onClick={() => updateSkillKeys({ webSearchProvider: 'tavily' })}
-          >Tavily</button>
-          <button
-            className={(form.skillKeys?.webSearchProvider || 'kimi') === 'custom' ? 'active' : ''}
-            onClick={() => updateSkillKeys({ webSearchProvider: 'custom' })}
-          >Custom</button>
-        </div>
-      </div>
-
-      <div className="config-field">
-        <label>{t("skill_keys.web_search_api_key")}</label>
-        <div className="key-row">
-          <input
-            type={showWsKey ? 'text' : 'password'}
-            value={form.skillKeys?.webSearchApiKey || ''}
-            onChange={e => updateSkillKeys({ webSearchApiKey: e.target.value })}
-            placeholder={
-              (form.skillKeys?.webSearchProvider || 'kimi') === 'kimi' ? 'sk-...' :
-              (form.skillKeys?.webSearchProvider || 'kimi') === 'tavily' ? 'tvly-...' :
-              'Your API Key...'
-            }
-          />
-          <button onClick={() => setShowWsKey(v => !v)}>{showWsKey ? <EyeOff size={14} /> : <Eye size={14} />}</button>
-        </div>
-        <span className="field-hint">
-          Kimi: <a href="https://platform.kimi.com" target="_blank" rel="noopener">platform.kimi.com</a>
-          {' | '}Tavily: <a href="https://tavily.com" target="_blank" rel="noopener">tavily.com</a>
-        </span>
-      </div>
-
-      {(form.skillKeys?.webSearchProvider || 'kimi') === 'custom' && (
-        <div className="config-field">
-          <label>{t("skill_keys.web_search_base_url")}</label>
-          <input
-            type="text"
-            value={form.skillKeys?.webSearchBaseUrl || ''}
-            onChange={e => updateSkillKeys({ webSearchBaseUrl: e.target.value })}
-            placeholder="https://api.example.com/v1/search"
-          />
-        </div>
-      )}
-
-      {/* ── Image Search ── */}
-      <div className="config-section" style={{ marginTop: 20 }}>
-        <h3>{t("skill_keys.image_search")}</h3>
-        <p className="section-desc">{t("skill_keys.image_search_desc")}</p>
-      </div>
-
-      <div className="config-field">
-        <label>{t("skill_keys.tavily_api_key")}</label>
-        <div className="key-row">
-          <input
-            type={showTavilyKey ? 'text' : 'password'}
-            value={form.skillKeys?.tavilyApiKey || ''}
-            onChange={e => updateSkillKeys({ tavilyApiKey: e.target.value })}
-            placeholder="tvly-..."
-          />
-          <button onClick={() => setShowTavilyKey(v => !v)}>{showTavilyKey ? <EyeOff size={14} /> : <Eye size={14} />}</button>
-        </div>
-        <span className="field-hint">
-          {t("skill_keys.tavily_register")}
-        </span>
-      </div>
-
-      {/* ── Image Generation ── */}
-      <div className="config-section" style={{ marginTop: 20 }}>
-        <h3>{t("skill_keys.image_gen")}</h3>
-        <p className="section-desc">{t("skill_keys.image_gen_desc")}</p>
-      </div>
-
-      <div className="config-field">
-        <label>{t("skill_keys.image_gen_api_key")}</label>
-        <div className="key-row">
-          <input
-            type={showImgKey ? 'text' : 'password'}
-            value={form.skillKeys?.imageGenApiKey || ''}
-            onChange={e => updateSkillKeys({ imageGenApiKey: e.target.value })}
-            placeholder={t("skill_keys.image_gen_api_key_placeholder")}
-          />
-          <button onClick={() => setShowImgKey(v => !v)}>{showImgKey ? <EyeOff size={14} /> : <Eye size={14} />}</button>
-        </div>
-      </div>
-
-      <div className="config-field">
-        <label>{t("skill_keys.image_gen_base_url")}</label>
-        <input
-          type="text"
-          value={form.skillKeys?.imageGenBaseUrl || ''}
-          onChange={e => updateSkillKeys({ imageGenBaseUrl: e.target.value })}
-          placeholder="https://ark.cn-beijing.volces.com/api/v3"
-        />
-        <span className="field-hint">{t("skill_keys.image_gen_default")}</span>
-      </div>
-
-      {/* ── Vision (PDF OCR) ── */}
-      <div className="config-section" style={{ marginTop: 20 }}>
-        <h3>{t("skill_keys.vision_ocr")}</h3>
-        <p className="section-desc">
-          {t("skill_keys.vision_desc")}
-        </p>
-      </div>
-
-      <div className="config-field">
-        <label>{t("skill_keys.vision_api_key")}</label>
-        <div className="key-row">
-          <input
-            type={showVisionKey ? 'text' : 'password'}
-            value={form.skillKeys?.visionApiKey || ''}
-            onChange={e => updateSkillKeys({ visionApiKey: e.target.value })}
-            placeholder="支持视觉的 API Key（如 Kimi）..."
-          />
-          <button onClick={() => setShowVisionKey(v => !v)}>{showVisionKey ? <EyeOff size={14} /> : <Eye size={14} />}</button>
-        </div>
-      </div>
-
-      <div className="config-field">
-        <label>{t("skill_keys.vision_model")}</label>
-        <input
-          type="text"
-          value={form.skillKeys?.visionModel || ''}
-          onChange={e => updateSkillKeys({ visionModel: e.target.value })}
-          placeholder="kimi-for-coding"
-        />
-        <span className="field-hint">{t("skill_keys.vision_model_hint")}</span>
-      </div>
-
-      <div className="config-field">
-        <label>{t("skill_keys.vision_base_url")}</label>
-        <input
-          type="text"
-          value={form.skillKeys?.visionBaseUrl || ''}
-          onChange={e => updateSkillKeys({ visionBaseUrl: e.target.value })}
-          placeholder="https://api.moonshot.cn/anthropic"
-        />
-        <span className="field-hint">{t("skill_keys.vision_url_hint")}</span>
-      </div>
-
-      <div className="config-field">
-        <button className="test-btn" onClick={handleTestVision} disabled={testing}>
-          {testing ? t("api.testing") : t("skill_keys.test_vision")}
-        </button>
-        {testResult && (
-          <span className={`test-result ${testResult.success ? 'success' : 'fail'}`}>
-            {testResult.success ? 'OK' : `Failed: ${testResult.error}`}
-          </span>
-        )}
-      </div>
-
-      <div className="config-section">
-        <h3>{t("skill_keys.wechat")}</h3>
-        <p className="section-desc">{t("skill_keys.wechat_desc")}</p>
-      </div>
-
-      <div className="config-field">
-        <label>{t("skill_keys.wechat_appid")}</label>
-        <input
-          type="text"
-          value={form.skillKeys?.wechatAppId || ''}
-          onChange={e => updateSkillKeys({ wechatAppId: e.target.value })}
-          placeholder={t("skill_keys.wechat_appid_placeholder")}
-        />
-      </div>
-
-      <div className="config-field">
-        <label>{t("skill_keys.wechat_appsecret")}</label>
-        <div className="key-row">
-          <input
-            type={showWechatKey ? 'text' : 'password'}
-            value={form.skillKeys?.wechatAppSecret || ''}
-            onChange={e => updateSkillKeys({ wechatAppSecret: e.target.value })}
-            placeholder={t("skill_keys.wechat_appsecret_placeholder")}
-          />
-          <button onClick={() => setShowWechatKey(v => !v)}>{showWechatKey ? <EyeOff size={14} /> : <Eye size={14} />}</button>
-        </div>
-      </div>
-
-      <div className="config-section">
-        <h3>{t("skill_keys.wechat_relay")}</h3>
-        <p className="section-desc">{t("skill_keys.wechat_relay_desc")}</p>
-      </div>
-
-      <div className="config-field">
-        <label>{t("skill_keys.wechat_relay_url")}</label>
-        <input
-          type="text"
-          value={form.skillKeys?.wechatRelayUrl || ''}
-          onChange={e => updateSkillKeys({ wechatRelayUrl: e.target.value })}
-          placeholder={t("skill_keys.wechat_relay_url_placeholder")}
-        />
-      </div>
-
-      <div className="config-field">
-        <label>{t("skill_keys.wechat_relay_key")}</label>
-        <div className="key-row">
-          <input
-            type={showRelayKey ? 'text' : 'password'}
-            value={form.skillKeys?.wechatRelayKey || ''}
-            onChange={e => updateSkillKeys({ wechatRelayKey: e.target.value })}
-            placeholder={t("skill_keys.wechat_relay_key_placeholder")}
-          />
-          <button onClick={() => setShowRelayKey(v => !v)}>{showRelayKey ? <EyeOff size={14} /> : <Eye size={14} />}</button>
-        </div>
-      </div>
-
-      <div className="config-section">
-        <h3>{t("skill_keys.fengniao")}</h3>
-        <p className="section-desc">{t("skill_keys.fengniao_desc")}</p>
-      </div>
-
-      <div className="config-field">
-        <label>{t("skill_keys.fengniao_api_key")}</label>
-        <div className="key-row">
-          <input
-            type={showFengniaoKey ? 'text' : 'password'}
-            value={form.skillKeys?.fengniaoApiKey || ''}
-            onChange={e => updateSkillKeys({ fengniaoApiKey: e.target.value })}
-            placeholder="FN_API_KEY"
-          />
-          <button onClick={() => setShowFengniaoKey(v => !v)}>{showFengniaoKey ? <EyeOff size={14} /> : <Eye size={14} />}</button>
-        </div>
-      </div>
-
-      <div className="config-section">
-        <h3>{t("skill_keys.flyai")}</h3>
-        <p className="section-desc">{t("skill_keys.flyai_desc")}</p>
-      </div>
-
-      <div className="config-field">
-        <label>{t("skill_keys.flyai_api_key")}</label>
-        <div className="key-row">
-          <input
-            type={showFlyaiKey ? 'text' : 'password'}
-            value={form.skillKeys?.flyaiApiKey || ''}
-            onChange={e => updateSkillKeys({ flyaiApiKey: e.target.value })}
-            placeholder="sk-..."
-          />
-          <button onClick={() => setShowFlyaiKey(v => !v)}>{showFlyaiKey ? <EyeOff size={14} /> : <Eye size={14} />}</button>
-        </div>
-      </div>
-
-      <div className="config-section">
-        <h3>{t("skill_keys.mail163")}</h3>
-        <p className="section-desc">{t("skill_keys.mail163_desc")}</p>
-      </div>
-
-      <div className="config-field">
-        <label>{t("skill_keys.mail163_address")}</label>
-        <input
-          type="text"
-          value={form.skillKeys?.mail163Address || ''}
-          onChange={e => updateSkillKeys({ mail163Address: e.target.value })}
-          placeholder={t("skill_keys.mail163_address_placeholder")}
-        />
-      </div>
-
-      <div className="config-field">
-        <label>{t("skill_keys.mail163_auth_code")}</label>
-        <div className="key-row">
-          <input
-            type={showMail163Auth ? 'text' : 'password'}
-            value={form.skillKeys?.mail163AuthCode || ''}
-            onChange={e => updateSkillKeys({ mail163AuthCode: e.target.value })}
-            placeholder={t("skill_keys.mail163_auth_code_placeholder")}
-          />
-          <button onClick={() => setShowMail163Auth(v => !v)}>{showMail163Auth ? <EyeOff size={14} /> : <Eye size={14} />}</button>
-        </div>
-      </div>
-
-      <div className="config-field">
-        <label>{t("skill_keys.mail163_smtp_host")}</label>
-        <input
-          type="text"
-          value={form.skillKeys?.mail163SmtpHost || ''}
-          onChange={e => updateSkillKeys({ mail163SmtpHost: e.target.value })}
-          placeholder="smtp.163.com"
-        />
-      </div>
-
-      <div className="config-field">
-        <label>{t("skill_keys.mail163_smtp_port")}</label>
-        <input
-          type="text"
-          value={form.skillKeys?.mail163SmtpPort || ''}
-          onChange={e => updateSkillKeys({ mail163SmtpPort: e.target.value })}
-          placeholder="465"
-        />
-      </div>
-
-      <div className="config-field">
-        <label>{t("skill_keys.mail163_imap_host")}</label>
-        <input
-          type="text"
-          value={form.skillKeys?.mail163ImapHost || ''}
-          onChange={e => updateSkillKeys({ mail163ImapHost: e.target.value })}
-          placeholder="imap.163.com"
-        />
-      </div>
-
-      <div className="config-field">
-        <label>{t("skill_keys.mail163_imap_port")}</label>
-        <input
-          type="text"
-          value={form.skillKeys?.mail163ImapPort || ''}
-          onChange={e => updateSkillKeys({ mail163ImapPort: e.target.value })}
-          placeholder="993"
-        />
-      </div>
-
-      <div className="config-field">
-        <button className="test-btn" onClick={handleTestMail163} disabled={testingMail163}>
-          {testingMail163 ? t("api.testing") : t("skill_keys.test_mail163")}
-        </button>
-        {mail163TestResult && (
-          <span className={`test-result ${mail163TestResult.success ? 'success' : 'fail'}`}>
-            {mail163TestResult.success
-              ? (mail163TestResult.detail || 'OK')
-              : `Failed: ${mail163TestResult.error || '未知错误'}`}
-          </span>
-        )}
-      </div>
-
-      <button className="save-btn" onClick={handleSave}>
-        {saved ? t("settings.saved") : t("settings.save")}
-      </button>
     </div>
   )
 }

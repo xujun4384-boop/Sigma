@@ -420,6 +420,88 @@
   color: #555;
 }
 
+/* === 可编辑文件视图 === */
+
+.file-editor-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 14px;
+  background: #1e1e1e;
+  border-bottom: 1px solid #333;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.file-editor-toolbar .preview-code-lang,
+.file-editor-toolbar .preview-code-lines {
+  color: #858585;
+}
+
+.file-editor-actions {
+  display: flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.file-editor-btn {
+  padding: 3px 10px;
+  border: 1px solid #555;
+  border-radius: 4px;
+  background: transparent;
+  color: #c8c8c8;
+  font-size: 11px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.file-editor-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+}
+
+.file-editor-btn.primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+}
+
+.file-editor-btn.primary:hover {
+  opacity: 0.9;
+}
+
+.file-editor-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.file-editor-error {
+  color: #ef5350;
+  font-size: 11px;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-editor-codemirror {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.file-editor-codemirror .cm-editor {
+  height: 100%;
+  font-size: 13px;
+}
+
+.file-editor-codemirror .cm-scroller {
+  font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+  line-height: 1.6;
+}
+
 .preview-code-viewer {
   flex: 1;
   display: flex;
@@ -459,6 +541,7 @@
   font-size: 13px;
   line-height: 22px;
   background: #1e1e1e;
+  color: #d4d4d4;
   white-space: pre;
   tab-size: 4;
 }

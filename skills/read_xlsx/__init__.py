@@ -12,21 +12,25 @@ from skills.base import BaseTool, ToolParameter, ToolResult
 
 class ReadXlsxTool(BaseTool):
     name = "read_xlsx"
+    # 每个工作表默认最多返回的行数，超限自动截断并提示续读
+    DEFAULT_ROWS_PER_SHEET = 500
     description = (
         "读取 Excel (.xlsx) 文件内容。列出所有工作表名称，返回指定工作表的数据和结构信息。"
-        "data_only=True 可读取公式计算后的值。"
+        "data_only=True 可读取公式计算后的值。单表超过 500 行会自动截断，用 offset/limit 续读剩余行。"
     )
     parameters = [
         ToolParameter("file_path", "string", "Excel 文件路径（绝对路径或相对于项目根目录的路径）"),
         ToolParameter("sheet_name", "string", "指定读取的工作表名称（可选，不指定则读取全部工作表）", required=False),
         ToolParameter("data_only", "boolean", "是否只读取公式计算后的值（默认 True）", required=False, default=True),
+        ToolParameter("offset", "integer", "起始行索引（0-based）。仅在结果被截断后用于续读剩余行，不要主动设置", required=False, default=0),
+        ToolParameter("limit", "integer", "最多读取行数。仅在收到 [TRUNCATED] 信号后用于继续读取，不要预先设置", required=False, default=0),
     ]
 
     def __init__(self, cwd: str = "."):
         super().__init__(cwd)
 
     def execute(self, file_path: str, sheet_name: str = None,
-                data_only: bool = True, **kwargs) -> ToolResult:
+                data_only: bool = True, offset: int = 0, limit: int = 0, **kwargs) -> ToolResult:
         full_path = self._resolve_path(file_path)
         if not os.path.exists(full_path):
             return ToolResult.fail(f"文件不存在: {file_path}")
@@ -69,12 +73,22 @@ class ReadXlsxTool(BaseTool):
             # 格式化所有工作表数据到 content
             lines = [f"读取完成：{len(sheets_data)} 个工作表\n"]
             for sname, sdata in sheets_data.items():
-                lines.append(f"── 工作表: {sname} ({sdata['row_count']} 行 x {sdata['column_count']} 列) ──")
-                for i, row in enumerate(sdata["data"]):
-                    lines.append(" | ".join(row))
-                    if i >= 500:  # 每表最多 500 行
-                        lines.append(f"... 还有 {sdata['row_count'] - 501} 行未显示")
-                        break
+                total_rows = sdata["row_count"]
+                start = max(0, offset)
+                end = start + (limit if limit > 0 else self.DEFAULT_ROWS_PER_SHEET)
+                end = min(end, total_rows)
+
+                lines.append(f"── 工作表: {sname} ({total_rows} 行 x {sdata['column_count']} 列) ──")
+                if start >= total_rows:
+                    lines.append(f"[提示] offset={start} 已超出该表范围，共 {total_rows} 行")
+                else:
+                    for row in sdata["data"][start:end]:
+                        lines.append(" | ".join(row))
+                    if end < total_rows:
+                        lines.append(
+                            f"[TRUNCATED] 仅显示第 {start + 1}-{end} 行，"
+                            f"还有 {total_rows - end} 行未显示。如需继续，请用 offset={end}。"
+                        )
                 lines.append("")
 
             return ToolResult.ok(

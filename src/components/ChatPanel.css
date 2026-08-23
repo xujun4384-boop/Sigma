@@ -198,6 +198,31 @@
 
 /* === User Message === */
 
+.user-message {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  align-self: flex-end;
+  max-width: 80%;
+}
+
+.user-message .message.user {
+  align-self: auto;
+  max-width: 100%;
+}
+
+.user-message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+}
+
+.user-file-chip {
+  cursor: default;
+}
+
 .message.user {
   align-self: flex-end;
   background: var(--accent-dim);
@@ -389,6 +414,29 @@
 
 .tool-call-header:hover {
   background: var(--overlay-subtle);
+}
+
+/* 工具运行中实时进度日志 */
+.tool-call-progress-log {
+  padding: 4px 10px 8px 34px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-secondary);
+  font-family: monospace;
+  max-height: 120px;
+  overflow-y: auto;
+}
+
+.tool-progress-line {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  animation: fadeIn 0.2s ease-in;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-2px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .tool-call-icon {
@@ -652,6 +700,32 @@
   color: var(--text-muted);
   white-space: nowrap;
   flex-shrink: 0;
+}
+
+.chat-input-area {
+  position: relative;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.chat-input-area.drop-active {
+  background: rgba(79, 195, 247, 0.07);
+  border-top: 1px solid rgba(79, 195, 247, 0.45);
+}
+
+.chat-input-area.drop-active::before {
+  content: '释放以添加文件';
+  position: absolute;
+  left: 50%;
+  top: 8px;
+  z-index: 2;
+  transform: translateX(-50%);
+  padding: 4px 10px;
+  border: 1px solid rgba(79, 195, 247, 0.35);
+  border-radius: 999px;
+  background: var(--bg-secondary);
+  color: var(--accent);
+  font-size: 11px;
+  pointer-events: none;
 }
 
 .chat-input-working {

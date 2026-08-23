@@ -2,7 +2,7 @@
 video_custom skill - 自定义竖版视频生成
 
 与 video_auto 的区别:
-  - video_auto: 新闻全自动（搜图/生图/解析脚本），LLM 只需给原文
+  - video_auto: 新闻全自动（生图/解析脚本），LLM 只需给原文
   - video_custom: 完全自定义（LLM 自己准备图片和场景），不做任何自动配图
 
 复用 video_auto/scripts/video_short.py 的渲染引擎，固定竖版 9:16 布局:
@@ -35,7 +35,7 @@ class VideoCustomTool(BaseTool):
     description = (
         "自定义竖版（9:16）视频生成。LLM 自行准备场景图片（本地文件路径），"
         "指定标题、副标题、每个场景的文案/时长/图片/转场动效，以及整体视觉样式。"
-        "不做任何自动搜图或生图，完全由 LLM 控制素材和内容。"
+        "不做任何自动配图，完全由 LLM 控制素材和内容。"
         "适用于：产品展示、品牌宣传、活动回顾、教程演示等非新闻类竖版短视频。"
     )
     parameters = [
@@ -112,10 +112,11 @@ class VideoCustomTool(BaseTool):
         if missing_images:
             return ToolResult.fail(
                 f"以下场景缺少图片路径: [{', '.join(missing_images)}]。"
-                f"请先准备图片（搜图/生图/本地文件），再调用 video_custom。"
+                f"请先准备图片（生图/本地文件），再调用 video_custom。"
             )
 
         # 校验图片文件存在
+        self._emit_progress(f"正在校验 {len(parsed_scenes)} 个场景素材...")
         for i, s in enumerate(parsed_scenes):
             img_path = Path(s["image"])
             if not img_path.is_absolute():
@@ -134,6 +135,7 @@ class VideoCustomTool(BaseTool):
                     style_overrides[k] = v
 
         # 调用渲染引擎
+        self._emit_progress(f"正在渲染视频 ({len(parsed_scenes)} 个场景, {width}x{height})...")
         from skills.video_auto.scripts.video_short import render_news_video
 
         try:

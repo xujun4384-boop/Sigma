@@ -169,6 +169,7 @@ class SandboxTool(BaseTool):
     # ── Python ──
 
     def _run_python(self, code: str) -> ToolResult:
+        self._emit_progress("正在执行 Python 代码...")
         cwd = str(self.cwd)
         stdout = io.StringIO()
 
@@ -205,6 +206,7 @@ class SandboxTool(BaseTool):
     # ── Bash ──
 
     def _run_bash(self, code: str) -> ToolResult:
+        self._emit_progress(f"正在执行命令: {code[:80]}{'...' if len(code) > 80 else ''}")
         try:
             process = subprocess.Popen(
                 code,

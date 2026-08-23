@@ -11,9 +11,9 @@ interface Props {
 
 export default function Onboarding({ onComplete }: Props) {
   const { t } = useTranslation()
-  const [baseUrl, setBaseUrl] = useState('https://api.kimi.com/coding')
+  const [baseUrl, setBaseUrl] = useState('')
   const [apiKey, setApiKey] = useState('')
-  const [model, setModel] = useState('kimi-for-coding')
+  const [model, setModel] = useState('')
   const [protocol, setProtocol] = useState<'anthropic' | 'openai'>('anthropic')
   const [showKey, setShowKey] = useState(false)
   const [testing, setTesting] = useState(false)

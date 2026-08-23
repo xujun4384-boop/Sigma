@@ -65,6 +65,8 @@ class BatchReadTool(BaseTool):
         if not valid_paths:
             return ToolResult.fail("没有有效的文件路径")
 
+        self._emit_progress(f"准备读取 {len(valid_paths)} 个文件...")
+
         # 根据 include_content 构建不同的 prompt
         if include_content:
             read_prompt = (
@@ -98,6 +100,8 @@ class BatchReadTool(BaseTool):
                 "allowed_tools": ["read", "read_docx", "read_pdf", "read_xlsx", "read_image", "read_pptx"],
             })
 
+        self._emit_progress(f"已创建 {len(tasks)} 个并行读取任务，正在分析...")
+
         # 通过 SkillManager 调用 sub_agent
         manager = self._skill_manager
         if not manager:
@@ -107,9 +111,33 @@ class BatchReadTool(BaseTool):
         if not sub_agent_inst:
             sub_agent_inst = manager._get_instance("sub_agent")
 
-        # 转发进度回调
+        # 转发进度回调：sub_agent 的事件桥接为 tool_progress，在 batch_read 卡片中显示
         if self._on_progress:
-            sub_agent_inst.set_progress_callback(self._on_progress)
+            original_cb = self._on_progress
+
+            def _bridge_progress(event):
+                # 桥接 sub_agent 事件为 batch_read 的 tool_progress
+                etype = event.get("type", "")
+                desc = event.get("description", "")
+                if etype == "subagent_start":
+                    original_cb({"type": "tool_progress", "tool_name": "batch_read",
+                                 "content": f"开始读取: {desc}"})
+                elif etype == "subagent_progress":
+                    turn = event.get("turn", 0)
+                    status = event.get("status", "")
+                    original_cb({"type": "tool_progress", "tool_name": "batch_read",
+                                 "content": f"[{desc}] 第{turn}轮 {status}..."})
+                elif etype == "subagent_result":
+                    success = event.get("success", False)
+                    status = "✓" if success else "✗"
+                    original_cb({"type": "tool_progress", "tool_name": "batch_read",
+                                 "content": f"{status} {desc}"})
+                # 其他事件透传
+                else:
+                    original_cb(event)
+
+            sub_agent_inst.set_progress_callback(_bridge_progress)
 
         result = sub_agent_inst.execute(tasks=tasks)
+        self._emit_progress(f"全部 {len(valid_paths)} 个文件读取完成")
         return result

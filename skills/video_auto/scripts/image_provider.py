@@ -3,16 +3,13 @@ image_provider - 场景图片智能提供模块
 
 策略层级（从快到慢、从省到费）:
   1. 图片池匹配 —— 扫描 images/ 下已有图片，按关键词匹配复用
-  2. 搜索配图 —— 调用 search_image 工具
-  3. AI 生成 —— 调用 generate_image 工具
+  2. AI 生成 —— 调用 generate_image 工具
 
 图片命名: {index:02d}_{描述关键词}.jpg，便于人工和 LLM 识别图片内容。
 
 决策逻辑:
-  - auto: 根据文案实体密度自动决策（具体→搜索，抽象→AI生成）
-  - search: 仅搜索配图
-  - generate: 仅 AI 生成
-  - mixed: 先搜索，失败则 AI 生成
+  - auto: 自动使用 AI 生成
+  - generate: AI 生成
 """
 import os
 import re
@@ -160,34 +157,6 @@ def _match_scene_to_pool(
     return None
 
 
-# ─── 来源决策 ───
-
-def _compute_concreteness_score(text: str) -> float:
-    """计算文本的"具体性"分数 (0-1)。"""
-    if not text:
-        return 0.0
-    score = 0.0
-    for pattern in _ENTITY_PATTERNS:
-        matches = re.findall(pattern, text)
-        score += len(matches) * 0.15
-    digit_count = len(re.findall(r'\d+', text))
-    score += min(digit_count * 0.02, 0.2)
-    if len(text) > 200:
-        score *= 0.8
-    return min(score, 1.0)
-
-
-def _decide_image_source(scene_text: str, strategy: str) -> str:
-    """根据文案内容和策略决定图片来源: "search" | "generate" """
-    strategy = strategy.lower()
-    if strategy == "search":
-        return "search"
-    if strategy == "generate":
-        return "generate"
-    concreteness = _compute_concreteness_score(scene_text)
-    return "search" if concreteness >= 0.15 else "generate"
-
-
 # ─── 主入口 ───
 
 def provide_images_for_scenes(
@@ -201,11 +170,11 @@ def provide_images_for_scenes(
     """
     为每个场景智能准备配图。
 
-    优先级: 图片池匹配 → 搜索配图 → AI 生成
+    优先级: 图片池匹配 → AI 生成
 
     参数:
         scenes: [{"text": str, "duration": float}, ...]
-        image_source: 图片来源策略 (auto|search|generate|mixed)
+        image_source: 图片来源策略（保留参数以兼容旧调用，当前统一使用 AI 生成）
         image_style: AI 生成图片的风格前缀
         work_dir: 工作目录基路径
         project: 项目名（用作子目录）
@@ -236,28 +205,9 @@ def provide_images_for_scenes(
             image_paths.append(matched)
             continue
 
-        # ── 第2步: 搜索 / 生成 ──
-        source = _decide_image_source(text, image_source)
+        # ── 第2步: AI 生成 ──
         target_name = f"{i:02d}_{keyword}"
         final_path = None
-
-        # 搜索配图
-        if source == "search":
-            search_query = text[:80] if len(text) > 80 else text
-            try:
-                result = skill_manager.dispatch(
-                    "search_image",
-                    query=search_query,
-                    save_dir=save_dir,
-                    max_results=3,
-                )
-                if result.success and result.details.get("images"):
-                    images = result.details["images"]
-                    if images:
-                        raw_path = images[0].get("filepath", "")
-                        final_path = _rename_to_descriptive(raw_path, save_dir, target_name)
-            except Exception:
-                pass
 
         # AI 生成
         if not final_path:

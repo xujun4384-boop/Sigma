@@ -6,12 +6,13 @@ import PreviewPanel from './components/PreviewPanel'
 import Sidebar, { loadSystemSettings } from './components/Sidebar'
 import ScanningOverlay from './components/ScanningOverlay'
 import Onboarding from './components/Onboarding'
+import VoiceChatModal from './components/VoiceChatModal'
 import { I18nProvider, getSavedLanguage, saveLanguage } from './i18n/I18nContext'
 import type { Lang } from './i18n/translations'
 import type { KimiConfig, LLMEntry, FolderTreeItem } from './types/electron'
 import { getBackendUrl } from './utils/config'
 import { loadAgents, syncAgentsToBackend } from './utils/agentStore'
-import { PanelRightOpen } from 'lucide-react'
+import { PanelRightOpen, Phone } from 'lucide-react'
 import './App.css'
 
 export type ThemeMode = 'dark' | 'light' | 'auto'
@@ -25,10 +26,10 @@ export interface FileDiffState {
 }
 
 const DEFAULT_KIMI_CONFIG: KimiConfig = {
-  baseUrl: 'https://api.kimi.com/coding',
+  baseUrl: '',
   apiKey: '',
   apiKey2: '',
-  model: 'kimi-for-coding',
+  model: '',
   protocol: 'anthropic',
   activeApiKey: 'key2',
   llms: [],
@@ -37,6 +38,7 @@ const DEFAULT_KIMI_CONFIG: KimiConfig = {
       tavilyApiKey: '',
       imageGenApiKey: '',
       imageGenBaseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+      imageGenModel: 'doubao-seedream-4-5-251128',
       webSearchProvider: 'kimi',
       webSearchApiKey: '',
       webSearchBaseUrl: '',
@@ -49,6 +51,14 @@ const DEFAULT_KIMI_CONFIG: KimiConfig = {
       wechatRelayKey: '',
       fengniaoApiKey: '',
       flyaiApiKey: '',
+      baiduMapAuthToken: '',
+      volcApiKey: '',
+      embedBaseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+      embedApiKey: '',
+      embedModel: 'doubao-embedding-large-text-240915',
+      voiceLlmBaseUrl: 'https://api.deepseek.com',
+      voiceLlmApiKey: '',
+      voiceLlmModel: 'deepseek-chat',
       mail163Address: '',
       mail163AuthCode: '',
       mail163SmtpHost: 'smtp.163.com',
@@ -99,6 +109,7 @@ export default function App() {
   const [fileDiffQueue, setFileDiffQueue] = useState<FileDiffState[]>([])
   const [canvasPatch, setCanvasPatch] = useState<{ canvasName: string; operation: 'add' | 'replace'; elements: any[] } | null>(null)
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([])
+  const [voiceOpen, setVoiceOpen] = useState(false)
 
   // 项目扫描状态
   const [scanningPhase, setScanningPhase] = useState<'init' | 'scanning' | 'analyzing' | 'done' | null>(null)
@@ -230,6 +241,7 @@ export default function App() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             llms: config.llms,
+            skillKeys: config.skillKeys,
             vision: {
               apiKey: config.skillKeys.visionApiKey,
               model: config.skillKeys.visionModel,
@@ -258,7 +270,7 @@ export default function App() {
     setTimeout(doSync, 500)
 
     return () => { cancelled = true }
-  }, [config.llms, config.skillKeys.visionApiKey, config.skillKeys.visionModel, config.skillKeys.visionBaseUrl, systemSettings.maxIterations])
+  }, [config.llms, config.skillKeys, systemSettings.maxIterations])
 
   const handleSaveConfig = useCallback((c: KimiConfig) => {
     setConfig(c)
@@ -319,8 +331,10 @@ export default function App() {
     setTerminalTabs(prev => prev.filter(t => t.id !== id))
   }, [])
 
-  const handleFileModificationStart = useCallback(({ filePath, fileName, fileType }: { filePath: string; fileName: string; fileType: string }) => {
-    setSelectedFile({ path: filePath, name: fileName, type: fileType } as FolderTreeItem)
+  const handleFileModificationStart = useCallback(({ filePath }: { filePath: string; fileName: string; fileType: string }) => {
+    // 仅标记「修改中」状态，不在此处打开预览。
+    // 避免 mtime 变化但无实际内容 diff 的文件（如 pdf/pptx 等非 diff 类型）被误报为文件变更而弹出无关页面。
+    // 真正的文件打开由 handleFileDiffUpdate（携带 diff 数据）触发。
     setFileDiffQueue(prev => {
       const idx = prev.findIndex(d => d.filePath === filePath)
       if (idx >= 0) {
@@ -486,6 +500,17 @@ export default function App() {
 
           {scanningPhase && (
             <ScanningOverlay visible={true} phase={scanningPhase} />
+          )}
+
+          <button className="voice-fab" onClick={() => setVoiceOpen(true)} title="语音通话">
+            <Phone size={20} />
+          </button>
+
+          {voiceOpen && (
+            <VoiceChatModal
+              apiKey={config.skillKeys.volcApiKey}
+              onClose={() => setVoiceOpen(false)}
+            />
           )}
         </>
       )}

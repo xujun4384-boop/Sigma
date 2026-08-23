@@ -895,3 +895,144 @@
   appearance: none;
   -webkit-appearance: none;
 }
+
+/* === Skill Keys List === */
+
+.skill-key-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.skill-key-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--overlay-subtle);
+  transition: all 0.15s;
+}
+
+.skill-key-card:hover {
+  background: var(--overlay-hover);
+  border-color: var(--overlay-active);
+}
+
+.skill-key-card-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.skill-key-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.skill-key-card-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.skill-key-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--overlay-medium);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.skill-key-badge.configured {
+  background: rgba(76, 175, 80, 0.15);
+  color: #4caf50;
+}
+
+.skill-key-card-desc {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.skill-key-card-edit {
+  width: 26px;
+  height: 26px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+
+.skill-key-card-edit:hover {
+  background: rgba(79, 195, 247, 0.15);
+  color: var(--accent);
+}
+
+/* === Skill Key Edit Form === */
+
+.skill-key-edit-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.skill-key-edit-title {
+  flex: 1;
+  min-width: 0;
+}
+
+.skill-key-edit-title h3 {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.skill-key-edit-title p {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.skill-key-edit-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.skill-key-edit-actions .save-btn {
+  flex: 1;
+}
+
+.skill-key-cancel {
+  padding: 0 16px;
+  height: 40px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--overlay-subtle);
+  color: var(--text-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+  flex-shrink: 0;
+}
+
+.skill-key-cancel:hover {
+  background: var(--overlay-hover);
+  color: var(--text-primary);
+}

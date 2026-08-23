@@ -4,6 +4,24 @@ import remarkGfm from 'remark-gfm'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/vs2015.css'
 import { X, ChevronLeft, ChevronRight, Terminal, FileCode, PenTool, Monitor } from 'lucide-react'
+import CodeMirror from '@uiw/react-codemirror'
+import { javascript } from '@codemirror/lang-javascript'
+import { python } from '@codemirror/lang-python'
+import { json } from '@codemirror/lang-json'
+import { html } from '@codemirror/lang-html'
+import { css } from '@codemirror/lang-css'
+import { markdown } from '@codemirror/lang-markdown'
+import { xml } from '@codemirror/lang-xml'
+import { java } from '@codemirror/lang-java'
+import { cpp } from '@codemirror/lang-cpp'
+import { rust } from '@codemirror/lang-rust'
+import { go } from '@codemirror/lang-go'
+import { StreamLanguage } from '@codemirror/language'
+import { yaml } from '@codemirror/legacy-modes/mode/yaml'
+import { shell } from '@codemirror/legacy-modes/mode/shell'
+import { powerShell } from '@codemirror/legacy-modes/mode/powershell'
+import { properties } from '@codemirror/legacy-modes/mode/properties'
+import { toml } from '@codemirror/legacy-modes/mode/toml'
 import type { FolderTreeItem } from '../types/electron'
 import type { FileDiffState } from '../App'
 import type { TerminalTab } from './ChatPanel'
@@ -34,6 +52,38 @@ const LANG_MAP: Record<string, string> = {
   java: 'java', cpp: 'cpp', c: 'c', csharp: 'csharp', go: 'go', rust: 'rust',
   html: 'xml', css: 'css', json: 'json', xml: 'xml', yaml: 'yaml',
   shell: 'bash', powershell: 'powershell', ini: 'ini', toml: 'ini', text: 'plaintext',
+}
+
+// 支持在展示区直接编辑的纯文本文件类型
+const EDITABLE_TYPES = new Set([
+  'text', 'markdown', 'json', 'python', 'javascript', 'typescript',
+  'java', 'cpp', 'c', 'csharp', 'go', 'rust', 'html', 'css',
+  'xml', 'yaml', 'shell', 'powershell', 'batch', 'ini', 'toml',
+])
+
+// 根据文件类型返回 CodeMirror 语言扩展（用于编辑器语法高亮）
+function getCodeMirrorLanguage(type: string): any {
+  switch (type) {
+    case 'python': return python()
+    case 'javascript': return javascript()
+    case 'typescript': return javascript({ typescript: true })
+    case 'json': return json()
+    case 'html': return html()
+    case 'css': return css()
+    case 'markdown': return markdown()
+    case 'xml': return xml()
+    case 'java': return java()
+    case 'cpp':
+    case 'c': return cpp()
+    case 'rust': return rust()
+    case 'go': return go()
+    case 'yaml': return StreamLanguage.define(yaml)
+    case 'shell': return StreamLanguage.define(shell)
+    case 'powershell': return StreamLanguage.define(powerShell)
+    case 'ini': return StreamLanguage.define(properties)
+    case 'toml': return StreamLanguage.define(toml)
+    default: return []
+  }
 }
 
 export default function PreviewPanel({ file, fileDiffState, fileDiffQueueLength, onAcknowledgeDiff, onAcknowledgeAllDiffs, terminalTabs, onCloseTerminal, canvasPatch, onCanvasPatchApplied }: Props) {
@@ -221,7 +271,7 @@ export default function PreviewPanel({ file, fileDiffState, fileDiffQueueLength,
               </div>
             ))}
           </div>
-          {activeTab && <TabContent tab={activeTab} pptxCache={pptxCacheRef} />}
+          {activeTab && <TabContent key={activeTab.path} tab={activeTab} pptxCache={pptxCacheRef} />}
         </>
       )}
 
@@ -367,7 +417,14 @@ function TabContent({ tab, pptxCache }: { tab: Tab; pptxCache: { current: Map<st
         const data = result.data || ''
 
         if (tab.type === 'pdf') {
-          setState(s => ({ ...s, loading: false, pdfData: `data:application/pdf;base64,${data}` }))
+          // PDF 通过 sigma-file:// 协议加载，避免大文件 base64 data URL 超过 Chromium URL 长度限制导致 iframe 静默失败
+          const urlResult = await window.electronAPI.getFileUrl(tab.path)
+          if (cancelled) return
+          if (urlResult.success && urlResult.data) {
+            setState(s => ({ ...s, loading: false, pdfData: urlResult.data! }))
+          } else {
+            setState(s => ({ ...s, loading: false, error: urlResult.error || 'Failed to load PDF' }))
+          }
         } else if (tab.type === 'docx') {
           await renderDocx(data, cancelled, setState)
         } else if (tab.type === 'xlsx') {
@@ -405,6 +462,11 @@ function TabContent({ tab, pptxCache }: { tab: Tab; pptxCache: { current: Map<st
 
   if (state.loading) return <div className="preview-loading">{t("preview.loading")} {tab.name}...</div>
   if (state.error) return <div className="preview-error">{state.error}</div>
+
+  // 可编辑类型（txt/代码/md/json）统一走编辑器视图
+  if (EDITABLE_TYPES.has(tab.type)) {
+    return <EditableFileView tab={tab} content={state.content} />
+  }
 
   // PDF
   if (tab.type === 'pdf' && state.pdfData) {
@@ -512,6 +574,116 @@ function TabContent({ tab, pptxCache }: { tab: Tab; pptxCache: { current: Map<st
   return (
     <div className="preview-content">
       <pre className="preview-code">{state.content}</pre>
+    </div>
+  )
+}
+
+// ── 可编辑文本文件视图（txt / 代码 / md / json）──
+
+function EditableFileView({ tab, content }: { tab: Tab; content: string }) {
+  const { t } = useTranslation()
+  const [currentContent, setCurrentContent] = useState(content)
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [saveError, setSaveError] = useState('')
+
+  const lines = currentContent.split('\n')
+  const lang = LANG_MAP[tab.type] || 'plaintext'
+
+  const startEdit = () => {
+    setValue(currentContent)
+    setSaveError('')
+    setEditing(true)
+  }
+
+  const cancelEdit = () => {
+    setEditing(false)
+    setValue('')
+    setSaveError('')
+  }
+
+  const saveEdit = async () => {
+    if (saving) return
+    setSaving(true)
+    setSaveError('')
+    try {
+      const result = await window.electronAPI.writeFile(tab.path, value)
+      if (result.success) {
+        setCurrentContent(value)
+        setEditing(false)
+      } else {
+        setSaveError(result.error || t('preview.save_failed'))
+      }
+    } catch (e: any) {
+      setSaveError(e?.message || t('preview.save_failed'))
+    }
+    setSaving(false)
+  }
+
+  if (editing) {
+    return (
+      <div className="preview-content">
+        <div className="file-editor-toolbar">
+          <span className="preview-code-lang">{lang}</span>
+          {saveError && <span className="file-editor-error">{saveError}</span>}
+          <div className="file-editor-actions">
+            <button className="file-editor-btn" onClick={cancelEdit} disabled={saving}>{t('preview.cancel')}</button>
+            <button className="file-editor-btn primary" onClick={saveEdit} disabled={saving}>{saving ? t('preview.saving') : t('preview.save')}</button>
+          </div>
+        </div>
+        <div className="file-editor-codemirror">
+          <CodeMirror
+            value={value}
+            height="100%"
+            theme="dark"
+            extensions={[getCodeMirrorLanguage(tab.type)]}
+            onChange={v => setValue(v)}
+            autoFocus
+          />
+        </div>
+      </div>
+    )
+  }
+
+  // 预览模式
+  const isMarkdown = tab.type === 'markdown'
+  const isCode = tab.type !== 'text' && tab.type !== 'markdown'
+
+  return (
+    <div className="preview-content">
+      <div className="file-editor-toolbar">
+        <span className="preview-code-lang">{lang}</span>
+        <span className="preview-code-lines">{lines.length} {t('preview.lines')}</span>
+        <div className="file-editor-actions">
+          <button className="file-editor-btn" onClick={startEdit}>{t('preview.edit')}</button>
+        </div>
+      </div>
+      {isMarkdown ? (
+        <div className="preview-markdown">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{currentContent}</ReactMarkdown>
+        </div>
+      ) : isCode ? (
+        <CodePreview lang={lang} content={currentContent} lines={lines} />
+      ) : (
+        <pre className="preview-code">{currentContent}</pre>
+      )}
+    </div>
+  )
+}
+
+function CodePreview({ lang, content, lines }: { lang: string; content: string; lines: string[] }) {
+  const highlighted = (lang && hljs.getLanguage(lang))
+    ? hljs.highlight(content, { language: lang }).value
+    : hljs.highlightAuto(content).value
+  return (
+    <div className="preview-code-viewer">
+      <div className="code-gutter">
+        {lines.map((_, i) => <div key={i} className="code-gutter-line">{i + 1}</div>)}
+      </div>
+      <div className="code-body">
+        <pre className="code-highlighted" dangerouslySetInnerHTML={{ __html: highlighted }} />
+      </div>
     </div>
   )
 }

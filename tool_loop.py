@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import httpx
 from skills.manager import SkillManager, ALL_SKILLS
+from skills.project_memory import _get_overview_path, _get_history_path
 from skills.todo_manager import TodoManager
 from custom_agent_manager import custom_agent_manager, is_agent_tool
 from context_manager import (
@@ -67,6 +68,68 @@ def resolve_questionnaire(session_id: str, answers: list[dict]) -> bool:
     return False
 
 
+def _questionnaire_text(value, field: str) -> str | None:
+    """将 LLM 输出的文本值规范为前端可直接渲染的字符串。"""
+    if isinstance(value, str):
+        value = value.strip()
+        return value or None
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return str(value)
+    if isinstance(value, dict):
+        for key in ("label", "text", "value"):
+            text = _questionnaire_text(value.get(key), field)
+            if text:
+                return text
+    return None
+
+
+def _questionnaire_options(value) -> list[str] | None:
+    """从直接数组或常见集合容器中提取选择项，并规范为字符串数组。"""
+    if isinstance(value, dict):
+        for key in ("items", "item", "options"):
+            if key in value:
+                return _questionnaire_options(value[key])
+        return None
+    if not isinstance(value, list):
+        return None
+    if len(value) == 1 and isinstance(value[0], list):
+        value = value[0]
+    options = [_questionnaire_text(option, "option") for option in value]
+    return options if options and all(option is not None for option in options) else None
+
+
+def _normalize_questionnaire(tool_input) -> tuple[dict | None, str | None]:
+    """将不同模型的 ask_user 参数收敛为固定的前端问卷契约。"""
+    if not isinstance(tool_input, dict):
+        return None, "工具输入必须是对象"
+
+    title = _questionnaire_text(tool_input.get("title"), "title") or "请回答以下问题"
+    raw_questions = tool_input.get("questions")
+    if not isinstance(raw_questions, list) or not raw_questions:
+        return None, "questions 必须是非空数组"
+
+    questions = []
+    valid_types = {"single_choice", "multi_choice", "open"}
+    for index, raw_question in enumerate(raw_questions, start=1):
+        if not isinstance(raw_question, dict):
+            return None, f"questions[{index}] 必须是对象"
+        question_id = _questionnaire_text(raw_question.get("id"), "id")
+        text = _questionnaire_text(raw_question.get("text"), "text")
+        question_type = _questionnaire_text(raw_question.get("type"), "type")
+        if not question_id or not text or question_type not in valid_types:
+            return None, f"questions[{index}] 缺少有效的 id、text 或 type"
+
+        question = {"id": question_id, "text": text, "type": question_type, "required": raw_question.get("required") is not False}
+        if question_type != "open":
+            options = _questionnaire_options(raw_question.get("options"))
+            if options is None:
+                return None, f"questions[{index}].options 必须是可提取为字符串数组的集合"
+            question["options"] = options
+        questions.append(question)
+
+    return {"title": title, "questions": questions}, None
+
+
 # 语言指令映射：根据前端语言设置注入，统一 LLM 的思考、工具调用与回复语言
 _LANGUAGE_INSTRUCTIONS: dict[str, str] = {
     "zh": (
@@ -99,12 +162,14 @@ class ToolLoop:
         tool_timeout: int = 300,
         protocol: str = "anthropic",
         language: str = "zh",
+        llm_params: dict | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.protocol = protocol
         self.language = language
+        self.llm_params = llm_params or {}
         self.skill_manager = skill_manager
         self.max_iterations = max_iterations
         self.todo_manager = todo_manager
@@ -196,6 +261,8 @@ class ToolLoop:
             "- 无法判断目标属于哪一类时，先向用户澄清，或分别检查两个明确目录后说明结果。\n\n"
         )
 
+        prompt += self._build_memory_hint()
+
         if headers:
             prompt += "可用技能：\n\n"
             for skill_name, header in headers.items():
@@ -232,6 +299,55 @@ class ToolLoop:
         )
 
         return prompt
+
+    def _build_memory_hint(self) -> str:
+        """构建轻量的"记忆存在性提示"，只告知有历史记忆可查，不注入正文。
+
+        设计原则：不把记忆内容塞进 system prompt（省 token、不分心），
+        仅用一句话提示 LLM"该项目存在历史任务记忆"，由 LLM 按需调用 memory_read。
+        仅当记忆文件存在且 memory_read 工具可用时才注入，否则返回空串。
+        """
+        try:
+            # memory_read 工具不可用时（如未启用 project_memory skill），不提示
+            if not self.skill_manager or "memory_read" not in self.skill_manager.get_all_tool_names():
+                return ""
+            if not self.project_root:
+                return ""
+
+            working_dir = str(self.project_root)
+            history_path = _get_history_path(working_dir)
+            overview_path = _get_overview_path(working_dir)
+            has_history = history_path.exists() and history_path.stat().st_size > 0
+            has_overview = overview_path.exists() and overview_path.stat().st_size > 0
+            if not (has_history or has_overview):
+                return ""
+
+            # 统计历史任务条数（以 "- [" 开头的行），仅用于提示量级，不注入内容
+            task_count = 0
+            if has_history:
+                try:
+                    task_count = sum(
+                        1 for line in history_path.read_text(encoding="utf-8").splitlines()
+                        if line.strip().startswith("- [")
+                    )
+                except (OSError, UnicodeDecodeError):
+                    task_count = 0
+
+            parts = []
+            if has_history:
+                parts.append(f"{task_count} 条历史任务记录" if task_count else "历史任务记录")
+            if has_overview:
+                parts.append("项目结构概览")
+
+            summary = "、".join(parts)
+            return (
+                "## 项目记忆（按需调用）\n\n"
+                f"该项目已有 {summary}。"
+                "当当前任务与项目历史相关（如延续之前的工作、需了解项目结构或过往修改）时，"
+                "可调用 memory_read 读取后再继续；无关时无需调用。\n\n"
+            )
+        except Exception:
+            return ""
 
     async def run(self, user_message: str, queue: asyncio.Queue,
                   existing_messages: list[dict] | None = None,
@@ -281,7 +397,7 @@ class ToolLoop:
             self._check_background_tasks(messages, queue)
 
             # ── 上下文压缩 ──
-            compact_res = await compact_if_needed(messages, self.model, self.base_url, self.api_key, self.system_prompt, self.protocol)
+            compact_res = await compact_if_needed(messages, self.model, self.base_url, self.api_key, self.system_prompt, self.protocol, self.llm_params.get("context_size"))
             if compact_res:
                 self._apply_compaction(compact_res, messages, queue)
                 log.info(f"[Compact] Round {iteration}: compressed to {len(messages)} messages")
@@ -348,8 +464,42 @@ class ToolLoop:
             # ── 处理 ask_user ──
             for tc in ask_user_calls:
                 tc_input = tc.get("input", {})
-                title = tc_input.get("title", "请回答以下问题")
-                questions = tc_input.get("questions", [])
+                # #region debug-point A:ask-user-input
+                asyncio.create_task(httpx.AsyncClient(timeout=0.5).post("http://127.0.0.1:7777/event", json={"sessionId": "ask-user-chatbar", "runId": "pre-fix", "hypothesisId": "A", "location": "tool_loop.py:ask_user", "msg": "[DEBUG] 收到 ask_user 原始输入", "data": {"input_type": type(tc_input).__name__, "questions_type": type(tc_input.get("questions")).__name__ if isinstance(tc_input, dict) else None, "questions": [{"keys": sorted(question.keys()) if isinstance(question, dict) else [], "id_type": type(question.get("id")).__name__ if isinstance(question, dict) else None, "text_type": type(question.get("text")).__name__ if isinstance(question, dict) else None, "type_type": type(question.get("type")).__name__ if isinstance(question, dict) else None, "options_type": type(question.get("options")).__name__ if isinstance(question, dict) else None, "option_item_types": [type(option).__name__ for option in question.get("options", [])] if isinstance(question, dict) and isinstance(question.get("options"), list) else []} for question in tc_input.get("questions", [])] if isinstance(tc_input, dict) and isinstance(tc_input.get("questions"), list) else []}}))
+                # #endregion
+                normalized_questionnaire, validation_error = _normalize_questionnaire(tc_input)
+                if validation_error:
+                    result_content = json.dumps({
+                        "error": "ask_user 参数不符合问卷契约",
+                        "details": validation_error,
+                        "expected": {
+                            "title": "string",
+                            "questions": [{
+                                "id": "string",
+                                "text": "string",
+                                "type": "single_choice|multi_choice|open",
+                                "options": "string[]（选择题必填）",
+                                "required": "boolean",
+                            }],
+                        },
+                    }, ensure_ascii=False)
+                    log.warning(f"[AskUser] 参数校验失败: {validation_error}")
+                    all_results.append({"id": tc["id"], "name": "ask_user", "content": result_content})
+                    await queue.put({
+                        "type": "tool_start",
+                        "tool_name": "ask_user",
+                        "tool_input": {"validation_error": validation_error},
+                    })
+                    await queue.put({
+                        "type": "tool_result",
+                        "tool_name": "ask_user",
+                        "success": False,
+                        "content": result_content,
+                    })
+                    continue
+
+                title = normalized_questionnaire["title"]
+                questions = normalized_questionnaire["questions"]
 
                 request_id = uuid.uuid4().hex[:12]
                 # 先发 tool_start 事件，让前端显示 ask_user 调用
@@ -864,14 +1014,14 @@ class ToolLoop:
         }
         payload = {
             "model": self.model,
-            "max_tokens": 16384,
+            "max_tokens": self.llm_params.get("max_tokens") or (32768 if self.llm_params.get("provider") == "minimax" else 16384),
             "stream": True,
             "system": self.system_prompt,
             "messages": messages,
         }
         if tools:
             payload["tools"] = tools
-        apply_model_specific_params(payload, self.model, self.protocol)
+        apply_model_specific_params(payload, self.model, self.protocol, self.llm_params)
 
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
@@ -934,12 +1084,11 @@ class ToolLoop:
                                 had_text = True
                                 await queue.put({"type": "text", "content": text, "contentType": "text"})
                             elif delta_type == "thinking_delta":
-                                # Kimi 等厂商把普通文本也走 thinking_delta，统一当作 text 处理
+                                # 思考过程单独标记为 thinking：主界面折叠显示，语音场景排除
                                 text = delta.get("thinking", "")
                                 block["text"] += text
-                                text_buf.append(text)
-                                had_text = True
-                                await queue.put({"type": "text", "content": text, "contentType": "text"})
+                                thinking_buf.append(text)
+                                await queue.put({"type": "text", "content": text, "contentType": "thinking"})
                             elif delta_type == "input_json_delta":
                                 block["input_json"] += delta.get("partial_json", "")
                                 # canvas_update 流式解析：实时提取 elements 数组中的完整对象
@@ -1046,13 +1195,13 @@ class ToolLoop:
         }
         payload: dict = {
             "model": self.model,
-            "max_tokens": 16384,
+            "max_tokens": self.llm_params.get("max_tokens") or (32768 if self.llm_params.get("provider") == "minimax" else 16384),
             "stream": True,
             "messages": self._convert_to_openai_messages(messages),
         }
         if tools:
             payload["tools"] = tools
-        apply_model_specific_params(payload, self.model, self.protocol)
+        apply_model_specific_params(payload, self.model, self.protocol, self.llm_params)
 
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
@@ -1085,6 +1234,10 @@ class ToolLoop:
                         if not choices:
                             continue
                         delta = choices[0].get("delta", {})
+
+                        reasoning = delta.get("reasoning_content") or delta.get("reasoning")
+                        if reasoning:
+                            await queue.put({"type": "text", "content": reasoning, "contentType": "thinking"})
 
                         # 文本
                         if "content" in delta and delta["content"]:
@@ -1211,17 +1364,19 @@ class ToolLoop:
         log.debug(f"[Tool Start] {tool_name} input={json.dumps(tool_input, ensure_ascii=False)[:200]}")
 
         try:
-            # 支持画布工具的增量 SSE 推送
-            if tool_name in ("sub_agent", "batch_read", "canvas_update"):
+            # ── 通用进度回调：所有工具都支持实时进度推送 ──
+            def _on_progress(event):
+                try:
+                    queue.put_nowait(event)
+                except asyncio.QueueFull:
+                    pass
+
+            # Agent 工具不走 SkillManager，跳过进度回调设置
+            inst = None
+            if not is_agent_tool(tool_name):
                 inst = self.skill_manager._get_instance(tool_name)
-
-                def _on_progress(event):
-                    try:
-                        queue.put_nowait(event)
-                    except asyncio.QueueFull:
-                        pass
-
-                inst.set_progress_callback(_on_progress)
+                if inst:
+                    inst.set_progress_callback(_on_progress)
 
             # ── 文件修改 diff: 执行前保存快照 ──
             if tool_name in ("sandbox_run", "write"):
@@ -1282,10 +1437,8 @@ class ToolLoop:
                     })()
 
             # 执行完清空进度回调
-            if tool_name in ("sub_agent", "batch_read", "canvas_update"):
-                inst = self.skill_manager._instances.get(tool_name)
-                if inst:
-                    inst.set_progress_callback(None)
+            if inst:
+                inst.set_progress_callback(None)
 
             # ── 文件修改 diff 追踪（执行后检测变化）──
             if tool_name in ("sandbox_run", "write") and getattr(result, "success", False):
@@ -1320,84 +1473,32 @@ class ToolLoop:
         self, tool_call: dict, tool_name: str, tool_input: dict,
         executor_future, timeout: int, queue: asyncio.Queue,
     ):
-        """工具超时时弹出选择框，根据用户选择处理。"""
-        request_id = uuid.uuid4().hex[:12]
+        """工具超时后直接转入后台运行，不再询问用户。"""
+        log.info(f"[Tool Timeout] {tool_name} 超时 {timeout}s，自动转入后台")
 
+        # 推送 SSE 事件通知前端该工具已转入后台
         await queue.put({
-            "type": "tool_timeout",
-            "request_id": request_id,
+            "type": "tool_progress",
+            "tool_name": tool_name,
+            "content": f"⏱ 执行超过 {timeout}s，已转入后台继续运行...",
+        })
+
+        bg_id = uuid.uuid4().hex[:8]
+        self._background_futures[bg_id] = {
+            "future": executor_future,
             "tool_name": tool_name,
             "tool_input": tool_input,
-            "elapsed_seconds": timeout,
-            "options": [
-                {"value": "wait", "label": "继续等待", "description": f"再等待 {timeout} 秒"},
-                {"value": "background", "label": "后台运行", "description": "让任务在后台继续，LLM 先进入下一轮"},
-                {"value": "cancel", "label": "取消", "description": "终止该工具的执行"},
-            ],
-            "tool_use_id": tool_call["id"],
-        })
-        log.info(f"[Tool Timeout] {tool_name} 超时 {timeout}s, request_id={request_id}")
-
-        # 阻塞等待用户选择（15 秒无人应答则自动转入后台）
-        answer_future: asyncio.Future = asyncio.Future()
-        _pending_tool_timeouts[request_id] = answer_future
-        try:
-            choice = await asyncio.wait_for(answer_future, timeout=15)
-        except asyncio.TimeoutError:
-            choice = "background"
-            log.info(f"[Tool Timeout] {tool_name} 15s 无人应答，自动转入后台")
-        finally:
-            _pending_tool_timeouts.pop(request_id, None)
-
-        log.info(f"[Tool Timeout] {tool_name} 用户选择: {choice}")
-
-        if choice == "wait":
-            # 继续等待，双倍超时：用 shield 防止取消状态传播导致 CancelledError 穿出
-            try:
-                wrapped = asyncio.wrap_future(executor_future)
-                raw = await asyncio.wait_for(
-                    asyncio.shield(wrapped),
-                    timeout=timeout * 2,
-                )
-                return raw
-            except asyncio.TimeoutError:
-                return type("R", (), {
-                    "success": False,
-                    "content": f"工具 {tool_name} 再次超时 ({timeout * 2}s)，已放弃等待。",
-                    "truncated": False,
-                })()
-            except BaseException as e:
-                # 兜底：任何异常都转为 ToolResult 返回，不让 CancelledError 穿透到 LLM 循环
-                return type("R", (), {
-                    "success": False,
-                    "content": f"工具 {tool_name} 等待过程异常: {e}",
-                    "truncated": False,
-                })()
-
-        elif choice == "background":
-            bg_id = uuid.uuid4().hex[:8]
-            self._background_futures[bg_id] = {
-                "future": executor_future,
-                "tool_name": tool_name,
-                "tool_input": tool_input,
-                "started_at": time.time(),
-            }
-            return type("R", (), {
-                "success": True,
-                "content": (
-                    f"[后台运行中] 任务ID: {bg_id}\n"
-                    f"工具 {tool_name} 正在后台执行中，完成后结果将自动汇报。\n"
-                    f"你可以继续处理其他任务。"
-                ),
-                "truncated": False,
-            })()
-
-        else:  # cancel
-            return type("R", (), {
-                "success": False,
-                "content": f"[已取消] 用户取消了工具 {tool_name} 的执行。",
-                "truncated": False,
-            })()
+            "started_at": time.time(),
+        }
+        return type("R", (), {
+            "success": True,
+            "content": (
+                f"[后台运行中] 任务ID: {bg_id}\n"
+                f"工具 {tool_name} 执行超过 {timeout}s，已自动转入后台运行。\n"
+                f"完成后结果将自动注入对话，你可以继续处理其他任务。"
+            ),
+            "truncated": False,
+        })()
 
     def _check_background_tasks(self, messages: list, queue: asyncio.Queue):
         """检查后台任务完成情况，将结果注入消息列表。"""

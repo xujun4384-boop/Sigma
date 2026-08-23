@@ -24,7 +24,7 @@ MODEL_CONTEXT_SIZES: dict[str, int] = {
 }
 DEFAULT_CONTEXT_SIZE = 200_000
 
-# 需要强制开启 thinking 的模型配置（Anthropic 协议格式）
+# 模型上下文窗口和显式推理模式由每个 LLM 配置传入；表内保留旧模型默认值。
 MODEL_THINKING_CONFIGS: dict[str, dict] = {
     "k3": {"type": "enabled", "effort": "max", "budget_tokens": 16000},
 }
@@ -51,28 +51,40 @@ def estimate_tokens(msgs: list[dict]) -> int:
     return int(chars / CHARS_PER_TOKEN)
 
 
-def get_context_size(model: str) -> int:
-    """获取模型上下文窗口大小"""
+def get_context_size(model: str, configured_size: int | None = None) -> int:
+    """获取模型上下文窗口大小（优先使用显式配置的窗口）。"""
+    if configured_size:
+        return int(configured_size)
     return MODEL_CONTEXT_SIZES.get(model, DEFAULT_CONTEXT_SIZE)
 
 
-def get_compact_threshold(model: str) -> int:
+def get_compact_threshold(model: str, configured_size: int | None = None) -> int:
     """获取触发压缩的 token 阈值"""
-    return int(get_context_size(model) * COMPACT_THRESHOLD)
+    return int(get_context_size(model, configured_size) * COMPACT_THRESHOLD)
 
 
-def apply_model_specific_params(payload: dict, model: str, protocol: str) -> dict:
-    """
-    根据模型特性注入额外参数（如 K3 强制 thinking）。
-    仅在配置表中命中的模型才会被修改，不影响其他模型。
-    """
+def apply_model_specific_params(payload: dict, model: str, protocol: str, llm_params: dict | None = None) -> dict:
+    """Inject explicitly configured model capabilities without guessing by model name."""
+    params = llm_params or {}
+    if params.get("provider") == "minimax":
+        if protocol == "openai":
+            payload["reasoning_split"] = params.get("reasoning_split", True)
+        elif params.get("thinking"):
+            payload["thinking"] = {"type": params["thinking"]}
+        if params.get("temperature") is not None:
+            payload["temperature"] = params["temperature"]
+        if params.get("top_p") is not None:
+            payload["top_p"] = params["top_p"]
+        if params.get("max_tokens") is not None:
+            payload["max_tokens"] = params["max_tokens"]
+        return payload
+
     cfg = MODEL_THINKING_CONFIGS.get(model)
     if not cfg:
         return payload
 
     if protocol == "anthropic":
         payload["thinking"] = cfg.copy()
-        # Anthropic 要求 max_tokens 必须大于 thinking budget
         min_tokens = cfg["budget_tokens"] + THINKING_OUTPUT_PAD
         payload["max_tokens"] = max(payload.get("max_tokens", 0), min_tokens)
     elif protocol == "openai":
@@ -90,10 +102,11 @@ class ContextTracker:
     - 支持持久化到 session 文件
     """
 
-    def __init__(self, model: str = ""):
+    def __init__(self, model: str = "", context_size: int | None = None):
         self.model = model
+        self._configured_context_size = context_size
         self.current_tokens: int = 0
-        self.max_tokens: int = get_context_size(model)
+        self.max_tokens: int = get_context_size(model, context_size)
 
     @property
     def usage_ratio(self) -> float:
@@ -117,7 +130,7 @@ class ContextTracker:
     def set_model(self, model: str):
         """切换模型时更新上下文窗口大小"""
         self.model = model
-        self.max_tokens = get_context_size(model)
+        self.max_tokens = get_context_size(model, self._configured_context_size)
 
     def to_dict(self) -> dict:
         return {
@@ -185,6 +198,7 @@ async def compact_if_needed(
     api_key: str,
     system_prompt: str = "",
     protocol: str = "anthropic",
+    context_size: int | None = None,
 ) -> CompactResult | None:
     """
     若上下文 token 超限，则用 LLM 对早期轮次生成摘要。
@@ -192,7 +206,7 @@ async def compact_if_needed(
     system_prompt 计入 token 判断，防止实际用量超出阈值。
     protocol: "anthropic" 或 "openai"，决定 API 调用方式。
     """
-    threshold = get_compact_threshold(model)
+    threshold = int(get_context_size(model, context_size) * COMPACT_THRESHOLD)
     sys_tokens = int(len(system_prompt) / CHARS_PER_TOKEN) if system_prompt else 0
     if estimate_tokens(messages) + sys_tokens <= threshold:
         return None

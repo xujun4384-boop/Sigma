@@ -60,7 +60,6 @@
 # API 配置（由 Sigma 统一管理）:
 #   - LLM API（Anthropic Messages 协议）：脚本提炼
 #   - 火山方舟 ARK API：AI 图片生成
-#   - Tavily API：图片搜索
 #   - Vision API（Anthropic Messages 协议）：图片视觉判断
 # ---------------------------------------------------------------------------
 
@@ -75,7 +74,7 @@
 #   title (string, 可选) 大标题（若提供 news_content 可留空自动提炼）
 #   subtitle (string, 可选) 副标题
 #   scenes (array, 可选) 场景列表 [{"text":"字幕文案","duration":5}]。提供 news_content 时自动生成
-#   image_source (string, 可选, 默认auto) 图片来源策略: auto | search | generate | mixed
+#   image_source (string, 可选, 默认auto) 图片来源策略（保留参数，当前统一使用 AI 生成）
 #   image_style (string, 可选) AI生成图片风格前缀，默认"现代科技新闻插画风格，高清，适合竖屏视频背景"
 #   width (integer, 可选, 默认1080) 视频宽度
 #   height (integer, 可选, 默认1920) 视频高度（竖版9:16）

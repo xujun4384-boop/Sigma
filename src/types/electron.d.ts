@@ -5,13 +5,29 @@ export interface LLMEntry {
   apiKey: string
   model: string
   protocol: 'anthropic' | 'openai'
-  provider?: 'generic' | 'deepseek' | 'kimi-code'
+  provider?: 'generic' | 'deepseek' | 'kimi-code' | 'minimax'
+  thinking?: 'enabled' | 'adaptive' | 'disabled'
+  contextSize?: number
+  maxTokens?: number
+  temperature?: number
+  topP?: number
 }
 
 export interface SkillKeysConfig {
   tavilyApiKey: string
-  imageGenApiKey: string
-  imageGenBaseUrl: string
+  imageGenProvider?: 'ark' | 'minimax'
+  imageGenApiKey?: string
+  imageGenBaseUrl?: string
+  imageGenModel?: string
+  imageArkApiKey?: string
+  imageArkBaseUrl?: string
+  imageArkModel?: string
+  imageMinimaxApiKey?: string
+  imageMinimaxBaseUrl?: string
+  imageMinimaxModel?: string
+  musicGenApiKey: string
+  musicGenBaseUrl: string
+  musicGenModel: string
   webSearchProvider: 'kimi' | 'tavily' | 'custom'
   webSearchApiKey: string
   webSearchBaseUrl: string
@@ -24,6 +40,14 @@ export interface SkillKeysConfig {
   wechatRelayKey: string
   fengniaoApiKey: string
   flyaiApiKey: string
+  baiduMapAuthToken: string
+  volcApiKey: string
+  embedBaseUrl: string
+  embedApiKey: string
+  embedModel: string
+  voiceLlmBaseUrl: string
+  voiceLlmApiKey: string
+  voiceLlmModel: string
   mail163Address: string
   mail163AuthCode: string
   mail163SmtpHost: string
@@ -102,6 +126,12 @@ export interface ElectronAPI {
   showItemInFolder: (filePath: string) => Promise<{ success: boolean; error?: string }>
   deleteFile: (filePath: string) => Promise<{ success: boolean; error?: string }>
   renameFile: (filePath: string, newName: string) => Promise<{ success: boolean; newPath?: string; error?: string }>
+  createFile: (parentDir: string, name: string) => Promise<{ success: boolean; path?: string; error?: string }>
+  createFolder: (parentDir: string, name: string) => Promise<{ success: boolean; path?: string; error?: string }>
+  writeFile: (filePath: string, content: string) => Promise<{ success: boolean; error?: string }>
+  pasteFile: (sourcePath: string, targetDir: string) => Promise<{ success: boolean; path?: string; error?: string }>
+  moveFiles: (sourcePaths: string[], targetDir: string) => Promise<{ success: boolean; count?: number; conflicts?: string[]; error?: string }>
+  copyPath: (filePath: string) => Promise<{ success: boolean; error?: string }>
   addToChat: (filePath: string) => Promise<{ success: boolean; error?: string }>
   convertPptxToImages: (filePath: string) => Promise<{ success: boolean; images?: string[]; count?: number; error?: string }>
   onAddFileToChat: (callback: (fileInfo: { path: string; fullPath: string; name: string; type: string; isDirectory: boolean }) => void) => () => void

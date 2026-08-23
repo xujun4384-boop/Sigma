@@ -13,7 +13,10 @@ class AskUserTool(BaseTool):
         "向用户提出问题，暂停任务等待用户回答后继续执行。"
         "适用于：需要用户确认方向、选择方案、补充信息、澄清歧义等场景。"
         "也适用于工具调用次数即将用尽时向用户汇报进度并请求继续。"
-        "调用后任务暂停，用户提交答案后自动继续，且工具调用次数会重新计数。"
+        "调用后任务暂停，用户提交后自动继续，且工具调用次数会重新计数。"
+        "严格要求：questions 必须是对象数组；每题的 id、text、type 为字符串；"
+        "single_choice 与 multi_choice 的 options 必须直接是字符串数组，例如 [\"方案 A\", \"方案 B\"]，"
+        "不要将选项包装为 {label: ...}、{text: ...}、{item: [...]} 或其他对象。"
     )
     parameters = [
         ToolParameter(
@@ -26,7 +29,7 @@ class AskUserTool(BaseTool):
             "id (string, 唯一标识), "
             "text (string, 问题文本), "
             "type (string, 题型: single_choice|multi_choice|open), "
-            "options (string[], 选择题的选项, open类型不需要), "
+            "options (string[], 选择题的直接字符串数组；正确示例 [\"选项 A\", \"选项 B\"]；禁止对象包装), "
             "required (boolean, 是否必填, 默认true)",
         ),
     ]

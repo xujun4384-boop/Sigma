@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { ExternalLink, Eye, MessageSquare, Edit3, Trash2, FolderOpen, CheckCircle, XCircle } from 'lucide-react'
+import { ExternalLink, Eye, MessageSquare, Edit3, Trash2, FolderOpen, FilePlus, FolderPlus, Copy, ClipboardPaste, Link2 } from 'lucide-react'
 import { useTranslation } from '../i18n/I18nContext'
 import './ContextMenu.css'
 
@@ -8,11 +8,12 @@ interface Props {
   x: number
   y: number
   item: { name: string; path: string; type: string; fullPath: string } | null
+  hasClipboard?: boolean
   onClose: () => void
   onAction?: (action: string, item: any) => void
 }
 
-export default function ContextMenu({ visible, x, y, item, onClose, onAction }: Props) {
+export default function ContextMenu({ visible, x, y, item, hasClipboard, onClose, onAction }: Props) {
   const { t } = useTranslation()
   const menuRef = useRef<HTMLDivElement>(null)
 
@@ -46,6 +47,11 @@ export default function ContextMenu({ visible, x, y, item, onClose, onAction }: 
         case 'preview': onAction?.('preview', item); break
         case 'showInFolder': await api.showItemInFolder(item.path); break
         case 'addToChat': await api.addToChat(item.path); onAction?.('addToChat', item); break
+        case 'newFile': onAction?.('newFile', item); break
+        case 'newFolder': onAction?.('newFolder', item); break
+        case 'copy': onAction?.('copy', item); break
+        case 'paste': onAction?.('paste', item); break
+        case 'copyPath': await api.copyPath(item.path); break
         case 'rename': onAction?.('rename', item); break
         case 'delete': { await api.deleteFile(item.path); onAction?.('delete', item); break }
       }
@@ -69,6 +75,30 @@ export default function ContextMenu({ visible, x, y, item, onClose, onAction }: 
       )}
       <button className="context-menu-item" onClick={() => handleAction('showInFolder')}>
         <FolderOpen size={14} /> {t("context.show_in_folder")}
+      </button>
+      <div className="context-divider" />
+      {isFolder && (
+        <>
+          <button className="context-menu-item" onClick={() => handleAction('newFile')}>
+            <FilePlus size={14} /> {t("context.new_file")}
+          </button>
+          <button className="context-menu-item" onClick={() => handleAction('newFolder')}>
+            <FolderPlus size={14} /> {t("context.new_folder")}
+          </button>
+        </>
+      )}
+      <button className="context-menu-item" onClick={() => handleAction('copy')}>
+        <Copy size={14} /> {t("context.copy")}
+      </button>
+      <button
+        className="context-menu-item"
+        onClick={() => handleAction('paste')}
+        disabled={!hasClipboard}
+      >
+        <ClipboardPaste size={14} /> {t("context.paste")}
+      </button>
+      <button className="context-menu-item" onClick={() => handleAction('copyPath')}>
+        <Link2 size={14} /> {t("context.copy_path")}
       </button>
       <div className="context-divider" />
       <button className="context-menu-item" onClick={() => handleAction('addToChat')}>

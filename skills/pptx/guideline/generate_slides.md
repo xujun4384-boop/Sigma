@@ -103,13 +103,13 @@ Based on the user requirements analyzed in step2, determine the content mode and
 
 #### Image Supplementation Strategy
 1. Prioritize extracting suitable images from user-uploaded content (such as Word, PDF, PPTX, etc.) as presentation illustrations
-2. If the user has not provided sufficient and suitable images, and has not explicitly requested no additional images, you should by default use image search, image generation tools, etc. to prepare appropriate illustrations for the presentation
-3. Image search strategy:
-  - Collected images should reference the visual design style in design.md, pursuing movie poster or magazine cover level visual impact and aesthetics. Prioritize high-resolution, watermark-free images
-  - Using English keywords for searches typically yields higher quality results. Append style keywords to match the design style. Never include words like PPT, presentation, premium color scheme: these will cause search results to return PPT screenshots
-  - Do not search for data charts (line charts, bar charts, pie charts, etc. — use chart elements), table screenshots (use table elements), icons (use icon elements), or diagrams (flowcharts, hierarchy diagrams, architecture diagrams, etc. — use shape+text+line element combinations)
-4. Retry strategy: If initial search results are of poor quality, you must try different keywords or use image generation tools (if available). ***Never use low-quality images or substitute with gradients/solid colors/placeholders!***
-  - Do not replace image slots that originally need images with solid color backgrounds, gradient fills, shape compositions, etc. just because searching is difficult. If a suitable image truly cannot be found, use the closest search result rather than removing the image.
+2. If the user has not provided sufficient and suitable images, and has not explicitly requested no additional images, you should by default use image generation tools to prepare appropriate illustrations for the presentation
+3. Image generation strategy:
+  - Generated images should reference the visual design style in design.md, pursuing movie poster or magazine cover level visual impact and aesthetics
+  - Write detailed prompts that match the design style (color scheme, mood, composition). Using English prompts typically yields higher quality results
+  - Do not generate data charts (line charts, bar charts, pie charts, etc. — use chart elements), table screenshots (use table elements), icons (use icon elements), or diagrams (flowcharts, hierarchy diagrams, architecture diagrams, etc. — use shape+text+line element combinations)
+4. Retry strategy: If initial generation results are of poor quality, you must try different prompts or refine the style description. ***Never use low-quality images or substitute with gradients/solid colors/placeholders!***
+  - Do not replace image slots that originally need images with solid color backgrounds, gradient fills, shape compositions, etc. just because generation is difficult
 5. Image usage guidelines
   - Cover/chapter/closing pages: Full-bleed high-quality images with gradient masks are recommended to create visual impact
   - Content pages: Images should be directly relevant to the page content; avoid purely decorative images
