@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron')
+const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
 contextBridge.exposeInMainWorld('electronAPI', {
   platform: process.platform,
@@ -46,6 +46,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   copyPath: (filePath) => ipcRenderer.invoke('copy-path', filePath),
   addToChat: (filePath) => ipcRenderer.invoke('file-add-to-chat', filePath),
   convertPptxToImages: (filePath) => ipcRenderer.invoke('convert-pptx', filePath),
+
+  // Drag & Drop (OS-level)
+  onDragStart: (filePath) => ipcRenderer.send('ondragstart', filePath),
+  copyFiles: (sourcePaths, targetDir) => ipcRenderer.invoke('file-copy', sourcePaths, targetDir),
+  getPathForFile: (file) => webUtils.getPathForFile(file),
 
   onAddFileToChat: (callback) => {
     const listener = (event, fileInfo) => callback(fileInfo)

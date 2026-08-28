@@ -61,12 +61,8 @@ def _ensure_network_bridge_memory():
             encoding="utf-8",
         )
 from sigma_logger import log
-import voice_chat
 
 app = FastAPI(title="Sigma Server")
-
-# 语音实时通话（独立于主 LLM 链路）
-voice_chat.register(app)
 
 app.add_middleware(
     CORSMiddleware,
@@ -407,7 +403,7 @@ async def llm_balance(request: Request):
     api_key = body.get("apiKey") or ""
     base_url = (body.get("baseUrl") or "").rstrip("/")
 
-    if provider not in ("deepseek", "kimi-code", "minimax"):
+    if provider not in ("deepseek", "kimi-code", "minimax", "ark"):
         return {"success": False, "error": f"Provider '{provider}' does not support balance query"}
     if not api_key:
         return {"success": False, "error": "Missing API Key"}
@@ -422,6 +418,13 @@ async def llm_balance(request: Request):
                 if not base_url:
                     return {"success": False, "error": "Missing base URL for Kimi Code"}
                 url = urljoin(base_url + "/", "v1/usages")
+            elif provider == "ark":
+                # 火山引擎账单 QueryBalanceAcct 使用 HMAC-SHA256 签名，不走 Bearer Token
+                # apiKey 字段传入格式为 "AK:SK"
+                if ":" not in api_key:
+                    return {"success": False, "error": "火山引擎余额查询需要 AK:SK 格式，例如 'AKLTxxx:WkRZxxx'"}
+                ak, sk = api_key.split(":", 1)
+                return await _query_volc_balance(client, ak, sk)
             else:
                 # MiniMax 用量接口独立于 chat 域名，按官方文档固定为 www.minimaxi.com。
                 # baseUrl 仅用于参考，应用真实接口走官方地址。
@@ -451,6 +454,90 @@ async def llm_balance(request: Request):
         return {"success": False, "error": "Request timeout"}
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+async def _query_volc_balance(client: httpx.AsyncClient, ak: str, sk: str):
+    """火山引擎 QueryBalanceAcct 余额查询（HMAC-SHA256 签名）"""
+    import hashlib
+    import hmac
+    from datetime import datetime, timezone
+
+    host = "billing.volcengineapi.com"
+    region = "cn-beijing"
+    service = "billing"
+    action = "QueryBalanceAcct"
+    version = "2022-01-01"
+
+    now = datetime.now(timezone.utc)
+    x_date = now.strftime("%Y%m%dT%H%M%SZ")
+    date_stamp = now.strftime("%Y%m%d")
+
+    # 步骤二：创建规范请求
+    canonical_uri = "/"
+    canonical_querystring = f"Action={action}&Version={version}"
+    canonical_headers = f"host:{host}\nx-date:{x_date}\n"
+    signed_headers = "host;x-date"
+    payload_hash = hashlib.sha256(b"").hexdigest()  # GET 请求 body 为空
+
+    canonical_request = (
+        f"GET\n{canonical_uri}\n{canonical_querystring}\n"
+        f"{canonical_headers}\n{signed_headers}\n{payload_hash}"
+    )
+
+    # 步骤三：创建待签名字符串
+    algorithm = "HMAC-SHA256"
+    credential_scope = f"{date_stamp}/{region}/{service}/request"
+    string_to_sign = (
+        f"{algorithm}\n{x_date}\n{credential_scope}\n"
+        f"{hashlib.sha256(canonical_request.encode()).hexdigest()}"
+    )
+
+    # 步骤四：派生签名密钥
+    def sign(key: bytes, msg: str) -> bytes:
+        return hmac.new(key, msg.encode(), hashlib.sha256).digest()
+
+    k_secret = sk.encode()
+    k_date = sign(k_secret, date_stamp)
+    k_region = sign(k_date, region)
+    k_service = sign(k_region, service)
+    k_signing = sign(k_service, "request")
+
+    # 步骤五：计算签名
+    signature = hmac.new(k_signing, string_to_sign.encode(), hashlib.sha256).hexdigest()
+
+    # 步骤六：构建 Authorization
+    authorization = (
+        f"{algorithm} Credential={ak}/{credential_scope}, "
+        f"SignedHeaders={signed_headers}, Signature={signature}"
+    )
+
+    url = f"https://{host}/?Action={action}&Version={version}"
+    resp = await client.get(
+        url,
+        headers={
+            "Host": host,
+            "X-Date": x_date,
+            "Authorization": authorization,
+        },
+    )
+    data = resp.json()
+
+    if resp.status_code != 200:
+        error = data.get("ResponseMetadata", {}).get("Error", {})
+        return {"success": False, "error": f"火山引擎 API 错误: {error.get('Code', '')} {error.get('Message', str(data))}"}
+
+    result = data.get("Result", {})
+    return {
+        "success": True,
+        "balance": {
+            "account_id": result.get("AccountID"),
+            "available_balance": result.get("AvailableBalance"),
+            "cash_balance": result.get("CashBalance"),
+            "arrears_balance": result.get("ArrearsBalance"),
+            "freeze_amount": result.get("FreezeAmount"),
+            "credit_limit": result.get("CreditLimit"),
+        }
+    }
 
 
 @app.post("/api/test-music")
@@ -624,6 +711,75 @@ async def test_mail163(request: Request):
 
     if smtp_ok and imap_ok:
         return {"success": True, "detail": "SMTP 与 IMAP 均连接成功，授权码有效"}
+    if smtp_ok:
+        return {"success": True, "detail": f"SMTP 连接成功，但 IMAP 失败: {imap_err}"}
+    if imap_ok:
+        return {"success": True, "detail": f"IMAP 连接成功，但 SMTP 失败: {smtp_err}"}
+    return {"success": False, "error": f"SMTP 与 IMAP 均连接失败。SMTP: {smtp_err}。IMAP: {imap_err}"}
+
+
+def _check_wecom_email_smtp(address: str, auth_code: str, host: str, port: int):
+    """同步测试企业微信邮箱 SMTP 登录，返回 (ok, error)。"""
+    import smtplib
+    try:
+        server = smtplib.SMTP_SSL(host, port, timeout=30)
+        server.login(address, auth_code)
+        server.quit()
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def _check_wecom_email_imap(address: str, auth_code: str, host: str, port: int):
+    """同步测试企业微信邮箱 IMAP 登录并读取收件箱，返回 (ok, error)。"""
+    import imaplib
+    import traceback
+    try:
+        print(f"[test-wecom-email] IMAP connecting to {host}:{port}...")
+        imap = imaplib.IMAP4_SSL(host, port)
+        print(f"[test-wecom-email] IMAP login as {address}...")
+        imap.login(address, auth_code)
+        typ, data = imap.select("INBOX", readonly=True)
+        if typ != "OK":
+            imap.logout()
+            err_text = data[0].decode(errors="replace") if data and data[0] else str(data)
+            return False, f"登录成功但打开收件箱失败: {err_text}"
+        imap.logout()
+        return True, None
+    except Exception as e:
+        traceback.print_exc()
+        return False, str(e)
+
+
+@app.post("/api/test-wecom-email")
+async def test_wecom_email(request: Request):
+    """测试企业微信邮箱连接，验证授权码及 SMTP/IMAP 服务是否可用"""
+    body = await request.json()
+    address = body.get("address") or ""
+    auth_code = body.get("authCode") or ""
+    smtp_host = body.get("smtpHost") or "smtp.exmail.qq.com"
+    imap_host = body.get("imapHost") or "imap.exmail.qq.com"
+
+    def _to_port(value, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    smtp_port = _to_port(body.get("smtpPort"), 465)
+    imap_port = _to_port(body.get("imapPort"), 993)
+
+    if not address or not auth_code:
+        return {"success": False, "error": "缺少邮箱地址或授权码"}
+
+    smtp_ok, smtp_err = await asyncio.to_thread(_check_wecom_email_smtp, address, auth_code, smtp_host, smtp_port)
+    imap_ok, imap_err = await asyncio.to_thread(_check_wecom_email_imap, address, auth_code, imap_host, imap_port)
+
+    print(f"[test-wecom-email] SMTP ok={smtp_ok} err={smtp_err}")
+    print(f"[test-wecom-email] IMAP ok={imap_ok} err={imap_err}")
+
+    if smtp_ok and imap_ok:
+        return {"success": True, "detail": "SMTP 与 IMAP 均连接成功，凭据有效"}
     if smtp_ok:
         return {"success": True, "detail": f"SMTP 连接成功，但 IMAP 失败: {imap_err}"}
     if imap_ok:
@@ -989,6 +1145,7 @@ async def _execute_custom_agent_chat(
         music_gen_api_key=skill_keys.get("musicGenApiKey", ""),
         music_gen_base_url=skill_keys.get("musicGenBaseUrl", "https://api.minimaxi.com/v1"),
         music_gen_model=skill_keys.get("musicGenModel", "music-3.0"),
+        minimax_video_api_key=skill_keys.get("minimaxVideoApiKey", ""),
         vision_api_key=skill_keys.get("visionApiKey", ""),
         vision_model=skill_keys.get("visionModel", "kimi-for-coding"),
         vision_base_url=skill_keys.get("visionBaseUrl", "https://api.moonshot.cn/anthropic"),
@@ -1005,6 +1162,12 @@ async def _execute_custom_agent_chat(
         mail163_smtp_port=skill_keys.get("mail163SmtpPort", ""),
         mail163_imap_host=skill_keys.get("mail163ImapHost", ""),
         mail163_imap_port=skill_keys.get("mail163ImapPort", ""),
+        wecom_email_address=skill_keys.get("wecomEmailAddress", ""),
+        wecom_email_auth_code=skill_keys.get("wecomEmailAuthCode", ""),
+        wecom_email_smtp_host=skill_keys.get("wecomEmailSmtpHost", ""),
+        wecom_email_smtp_port=skill_keys.get("wecomEmailSmtpPort", ""),
+        wecom_email_imap_host=skill_keys.get("wecomEmailImapHost", ""),
+        wecom_email_imap_port=skill_keys.get("wecomEmailImapPort", ""),
         llm_config={
             "base_url": base_url,
             "api_key": api_key,
@@ -1459,7 +1622,7 @@ async def _execute_chat(
     # 推送最新配置到已连接的浏览器扩展
     asyncio.create_task(bridge_manager._push_llm_configs())
 
-    # ── 同步 skillKeys，供语音桥接等复用主程序完整配置 ──
+    # 同步 skillKeys，供浏览器扩展复用主程序完整配置
     skill_keys = config.get("skillKeys", {}) or {}
     bridge_manager.register_skill_keys(skill_keys)
 
@@ -1543,6 +1706,7 @@ async def _execute_chat(
         music_gen_api_key=skill_keys.get("musicGenApiKey", ""),
         music_gen_base_url=skill_keys.get("musicGenBaseUrl", "https://api.minimaxi.com/v1"),
         music_gen_model=skill_keys.get("musicGenModel", "music-3.0"),
+        minimax_video_api_key=skill_keys.get("minimaxVideoApiKey", ""),
         vision_api_key=skill_keys.get("visionApiKey", ""),
         vision_model=skill_keys.get("visionModel", "kimi-for-coding"),
         vision_base_url=skill_keys.get("visionBaseUrl", "https://api.moonshot.cn/anthropic"),
@@ -1559,6 +1723,12 @@ async def _execute_chat(
         mail163_smtp_port=skill_keys.get("mail163SmtpPort", ""),
         mail163_imap_host=skill_keys.get("mail163ImapHost", ""),
         mail163_imap_port=skill_keys.get("mail163ImapPort", ""),
+        wecom_email_address=skill_keys.get("wecomEmailAddress", ""),
+        wecom_email_auth_code=skill_keys.get("wecomEmailAuthCode", ""),
+        wecom_email_smtp_host=skill_keys.get("wecomEmailSmtpHost", ""),
+        wecom_email_smtp_port=skill_keys.get("wecomEmailSmtpPort", ""),
+        wecom_email_imap_host=skill_keys.get("wecomEmailImapHost", ""),
+        wecom_email_imap_port=skill_keys.get("wecomEmailImapPort", ""),
         llm_config={
             "base_url": base_url,
             "api_key": api_key,
@@ -1906,30 +2076,6 @@ async def network_bridge_sync_configs(request: Request):
     await bridge_manager._push_llm_configs()
 
     return {"success": True, "synced": count}
-
-
-@app.post("/api/voice/config")
-async def voice_config_save(request: Request):
-    """接收前端 Skill Keys 中的语音记忆配置，写入 .sigma/voice/config.json。"""
-    import voice_memory
-    body = await request.json()
-    cfg = {
-        "volcApiKey": body.get("volcApiKey", ""),
-        "embedBaseUrl": body.get("embedBaseUrl", ""),
-        "embedApiKey": body.get("embedApiKey", ""),
-        "embedModel": body.get("embedModel", ""),
-        "voiceLlmBaseUrl": body.get("voiceLlmBaseUrl", ""),
-        "voiceLlmApiKey": body.get("voiceLlmApiKey", ""),
-        "voiceLlmModel": body.get("voiceLlmModel", ""),
-    }
-    try:
-        voice_memory.MEMORY_DIR.mkdir(parents=True, exist_ok=True)
-        (voice_memory.MEMORY_DIR / "config.json").write_text(
-            json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        return {"success": True}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
 
 
 @app.get("/api/network-bridge/vision-config")

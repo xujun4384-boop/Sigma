@@ -228,9 +228,9 @@ class VideoComposeTool(BaseTool):
         ToolParameter("project", "string", "项目名称，与 video_scene/video_tts 保持一致", required=False),
         ToolParameter("scene_videos", "array", "场景视频文件路径列表"),
         ToolParameter("scene_audios", "array", "场景旁白音频路径列表（与scene_videos一一对应，可含空字符串）", required=False),
-        ToolParameter("subtitles", "array", "字幕列表 [[text, start_sec, end_sec], ...]", required=False),
-        ToolParameter("bgm_enabled", "boolean", "是否生成背景音乐", required=False, default=True),
-        ToolParameter("bgm_volume", "number", "BGM 音量 (0-1)", required=False, default=0.18),
+        ToolParameter("subtitles", "array", "字幕列表 [[text, start_sec, end_sec], ...]，默认不叠加字幕", required=False),
+        ToolParameter("bgm_enabled", "boolean", "是否生成背景音乐，默认 false（不自动加 BGM）", required=False, default=False),
+        ToolParameter("bgm_volume", "number", "BGM 音量 (0-1)，仅在 bgm_enabled=true 时生效", required=False, default=0.18),
         ToolParameter("width", "integer", "视频宽度", required=False, default=1920),
         ToolParameter("height", "integer", "视频高度", required=False, default=1080),
         ToolParameter("fps", "integer", "帧率", required=False, default=30),
@@ -238,7 +238,7 @@ class VideoComposeTool(BaseTool):
 
     def execute(self, output_path: str, scene_videos: list,
                 project: str = None, scene_audios: list = None, subtitles: list = None,
-                bgm_enabled: bool = True, bgm_volume: float = 0.18,
+                bgm_enabled: bool = False, bgm_volume: float = 0.18,
                 width: int = 1920, height: int = 1080,
                 fps: int = 30, **kwargs) -> ToolResult:
         from .scripts.composer import compose

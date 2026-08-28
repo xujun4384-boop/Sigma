@@ -170,7 +170,7 @@ export default function ExplorerPanel({ width, onSelectFile, highlightPath, onTo
     // electron 原生文件变化事件 (chokidar watcher)
     if (window.electronAPI?.onFileSystemChange) {
       const cleanup = window.electronAPI.onFileSystemChange((event) => {
-        if (['add', 'addDir', 'unlink', 'unlinkDir', 'rename', 'delete'].includes(event.type)) {
+        if (['add', 'addDir', 'unlink', 'unlinkDir', 'rename', 'delete', 'move'].includes(event.type)) {
           loadTree()
         }
       })
@@ -382,6 +382,9 @@ export default function ExplorerPanel({ width, onSelectFile, highlightPath, onTo
     onDragOver: (path: string) => setDropTargetPath(path),
     onDragLeave: (path: string) => setDropTargetPath(prev => prev === path ? null : prev),
     onDrop: handleDrop,
+    setNotice,
+    loadTree,
+    t,
   })
 
   return (
@@ -413,9 +416,12 @@ export default function ExplorerPanel({ width, onSelectFile, highlightPath, onTo
         className="explorer-tree"
         ref={treeContainerRef}
         onDragOver={e => {
-          if (e.dataTransfer.types.includes('application/x-sigma-path')) {
+          // 内部拖拽（Sigma 路径）或外部文件（Files）都 preventDefault，允许 drop 到文件夹节点上
+          const isSigmaPath = e.dataTransfer.types.includes('application/x-sigma-path')
+          const isExternal = e.dataTransfer.types.includes('Files')
+          if (isSigmaPath || isExternal) {
             e.preventDefault()
-            e.dataTransfer.dropEffect = 'move'
+            e.dataTransfer.dropEffect = isExternal ? 'copy' : 'move'
           }
         }}
       >
@@ -586,7 +592,7 @@ export default function ExplorerPanel({ width, onSelectFile, highlightPath, onTo
   )
 }
 
-function TreeItem({ item, level, onSelect, onContextMenu, expandedPaths, onToggleExpand, highlightPath, draggingPath, dropTargetPath, onDragStart, onDragEnd, onDragOver, onDragLeave, onDrop }: {
+function TreeItem({ item, level, onSelect, onContextMenu, expandedPaths, onToggleExpand, highlightPath, draggingPath, dropTargetPath, onDragStart, onDragEnd, onDragOver, onDragLeave, onDrop, setNotice, loadTree, t }: {
   item: FolderTreeItem; level: number;
   onSelect: (item: FolderTreeItem) => void;
   onContextMenu: (e: React.MouseEvent, item: FolderTreeItem) => void;
@@ -600,6 +606,9 @@ function TreeItem({ item, level, onSelect, onContextMenu, expandedPaths, onToggl
   onDragOver: (path: string) => void;
   onDragLeave: (path: string) => void;
   onDrop: (sourcePath: string, targetPath: string) => void;
+  setNotice: (msg: string | null) => void;
+  loadTree: () => void;
+  t: (key: string) => string;
 }) {
   const isWorkspace = item.type === 'workspace-folder'
   const isFolder = item.type === 'folder' || item.type === 'workspace-folder'
@@ -632,6 +641,13 @@ function TreeItem({ item, level, onSelect, onContextMenu, expandedPaths, onToggl
         style={{ paddingLeft: 12 + level * 14 }}
         draggable={!isWorkspace}
         onDragStart={e => {
+          // 按住 Ctrl：触发 OS 级拖拽，外部应用（Windows资源管理器、Word、VS Code等）可接收
+          if (e.ctrlKey) {
+            e.preventDefault() // 必须阻止默认，否则 HTML5 拖拽和 OS 拖拽冲突导致崩溃
+            window.electronAPI?.onDragStart(item.path)
+            return
+          }
+          // 默认：HTML5 内部拖拽（文件夹移动、拖到聊天区附件）
           e.dataTransfer.effectAllowed = 'copyMove'
           e.dataTransfer.setData('application/x-sigma-path', item.path)
           e.dataTransfer.setData('application/x-sigma-paths', JSON.stringify([{ path: item.path, name: item.name }]))
@@ -648,16 +664,48 @@ function TreeItem({ item, level, onSelect, onContextMenu, expandedPaths, onToggl
           if (!isFolder || draggingPath === item.path) return
           e.preventDefault()
           e.stopPropagation()
-          e.dataTransfer.dropEffect = 'move'
+          // 外部文件拖入时 copy，内部拖拽时 move
+          const isExternal = e.dataTransfer.types.includes('Files')
+          e.dataTransfer.dropEffect = isExternal ? 'copy' : 'move'
           onDragOver(item.path)
         }}
         onDragLeave={e => {
           if (isFolder && !e.currentTarget.contains(e.relatedTarget as Node)) onDragLeave(item.path)
         }}
-        onDrop={e => {
+        onDrop={async e => {
           if (!isFolder) return
           e.preventDefault()
           e.stopPropagation()
+
+          // 外部文件拖入：Files 类型 + 非 Sigma 内部 MIME
+          const hasSigmaPath = e.dataTransfer.types.includes('application/x-sigma-path')
+          const isExternalFiles = e.dataTransfer.types.includes('Files') && !hasSigmaPath
+
+          if (isExternalFiles) {
+            // 从 OS 拖进来的文件：copy 进目标文件夹
+            const files = Array.from(e.dataTransfer.files)
+            if (files.length === 0) return
+            try {
+              const paths = files.map(f => window.electronAPI?.getPathForFile?.(f)).filter(Boolean) as string[]
+              if (paths.length === 0) return
+              const result = await window.electronAPI?.copyFiles(paths, item.path)
+              if (!result?.success) {
+                const msg = result?.error === 'already_exists'
+                  ? t('explorer.move_exists')
+                  : result?.error === 'target_not_found'
+                    ? t('explorer.move_invalid_target')
+                    : result?.error || 'Copy failed'
+                setNotice(msg)
+              } else {
+                loadTree()
+              }
+            } catch (err: any) {
+              setNotice(err?.message || 'Copy failed')
+            }
+            return
+          }
+
+          // Sigma 内部拖拽：走原有 move 逻辑
           const sourcePath = e.dataTransfer.getData('application/x-sigma-path') || e.dataTransfer.getData('text/plain')
           onDrop(sourcePath, item.path)
         }}
@@ -686,6 +734,9 @@ function TreeItem({ item, level, onSelect, onContextMenu, expandedPaths, onToggl
           onDragOver={onDragOver}
           onDragLeave={onDragLeave}
           onDrop={onDrop}
+          setNotice={setNotice}
+          loadTree={loadTree}
+          t={t}
         />
       ))}
     </div>

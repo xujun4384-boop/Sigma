@@ -880,6 +880,7 @@ class ToolLoop:
                     "file_path": file_path,
                     "file_name": file_name,
                     "file_type": file_type,
+                    "is_new": is_new,
                 })
 
                 if is_new:
@@ -1084,7 +1085,7 @@ class ToolLoop:
                                 had_text = True
                                 await queue.put({"type": "text", "content": text, "contentType": "text"})
                             elif delta_type == "thinking_delta":
-                                # 思考过程单独标记为 thinking：主界面折叠显示，语音场景排除
+                                # 思考过程单独标记为 thinking，主界面折叠显示
                                 text = delta.get("thinking", "")
                                 block["text"] += text
                                 thinking_buf.append(text)

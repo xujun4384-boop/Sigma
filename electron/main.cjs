@@ -5,7 +5,7 @@ const { spawn } = require('child_process')
 let chokidar = null
 try { chokidar = require('chokidar') } catch (e) { console.error('[Electron] chokidar not available:', e.message) }
 
-let electron, app, BrowserWindow, ipcMain, Menu, dialog, nativeTheme, protocol, net, shell
+let electron, app, BrowserWindow, ipcMain, Menu, dialog, nativeTheme, protocol, net, shell, nativeImage
 
 try {
   electron = require('electron')
@@ -18,6 +18,7 @@ try {
   protocol = electron.protocol
   net = electron.net
   shell = electron.shell
+  nativeImage = electron.nativeImage
 } catch (error) {
   console.error('[ERROR] Failed to load Electron:', error)
   process.exit(1)
@@ -371,15 +372,6 @@ function createMainWindow() {
     show: false,
     icon: path.join(__dirname, '..', 'icon.png'),
     webPreferences: { preload: path.join(__dirname, 'preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: false },
-  })
-
-  // 允许麦克风权限（语音实时通话使用 getUserMedia）
-  const ses = mainWindow.webContents.session
-  ses.setPermissionRequestHandler((webContents, permission, callback) => {
-    callback(permission === 'media')
-  })
-  ses.setPermissionCheckHandler((webContents, permission) => {
-    return permission === 'media'
   })
 
   const isDev = process.env.NODE_ENV === 'development'
@@ -770,6 +762,76 @@ function uniqueDestPath(destDir, name) {
     if (!fs.existsSync(candidate)) return candidate
   }
 }
+
+// ── Drag & Drop ──
+
+ipcMain.on('ondragstart', (event, filePath) => {
+  // Electron 17+ 要求 icon 必须提供，用一个 1x1 透明 PNG 占位
+  // Windows 会自动替换成系统文件图标
+  const icon = nativeImage.createFromBuffer(Buffer.from(
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==',
+    'base64'
+  ))
+  try {
+    const fp = path.isAbsolute(filePath) ? filePath : path.join(currentWorkingDir, filePath)
+    if (fs.existsSync(fp)) {
+      // 用 event.sender 而不是 mainWindow，确保在正确的 webContents 上同步执行
+      event.sender.startDrag({ file: fp, icon })
+    }
+  } catch (err) {
+    console.error('[DragOut] startDrag failed:', err)
+  }
+})
+
+// 外部文件复制/移动到工作区（处理同盘 rename 和跨盘 copy 两种情况）
+ipcMain.handle('file-copy', async (event, sourcePaths, targetDir) => {
+  try {
+    const sources = Array.isArray(sourcePaths) ? sourcePaths : [sourcePaths]
+    const target = path.isAbsolute(targetDir) ? targetDir : path.join(currentWorkingDir, targetDir)
+    if (!fs.existsSync(target) || !fs.statSync(target).isDirectory()) {
+      return { success: false, error: 'target_not_found' }
+    }
+
+    const resolvedSources = sources.map(s =>
+      path.isAbsolute(s) ? s : path.join(currentWorkingDir, s)
+    )
+
+    // 校验所有源文件
+    for (const src of resolvedSources) {
+      if (!fs.existsSync(src)) return { success: false, error: 'source_not_found' }
+    }
+
+    // 检查同名冲突
+    const conflicts = resolvedSources
+      .map(src => path.join(target, path.basename(src)))
+      .filter(dest => fs.existsSync(dest))
+    if (conflicts.length > 0) {
+      return { success: false, error: 'already_exists', conflicts }
+    }
+
+    // 同盘 rename（快）/ 跨盘 copy+delete（递归）
+    for (const src of resolvedSources) {
+      const dest = path.join(target, path.basename(src))
+      try {
+        fs.renameSync(src, dest)
+      } catch {
+        copyRecursive(src, dest)
+        if (fs.statSync(src).isDirectory()) {
+          fs.rmSync(src, { recursive: true, force: true })
+        } else {
+          fs.unlinkSync(src)
+        }
+      }
+    }
+
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('file-system-change', {
+        type: 'move', paths: resolvedSources, targetDir: target,
+      })
+    }
+    return { success: true, count: resolvedSources.length }
+  } catch (err) { return { success: false, error: err.message } }
+})
 
 ipcMain.handle('file-paste', async (event, sourcePath, targetDir) => {
   try {

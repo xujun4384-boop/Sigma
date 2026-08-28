@@ -149,11 +149,16 @@ class FileWatcher:
             }.get(suffix, suffix.lstrip("."))
             file_name = os.path.basename(path_str)
 
+            # 新文件（无历史快照）→ 生成 diff 前补建快照，确保前端能识别并弹出
+            is_new = path_str not in file_diff_tracker.snapshots
+            if is_new:
+                file_diff_tracker.snapshot_file(path_str)
+
             # 推送修改开始（总是发送，确保前端弹出标签页）
             for queue, loop in self._listeners:
                 loop.call_soon_threadsafe(
                     queue.put_nowait,
-                    {"type": "file_modification_start", "file_path": path_str, "file_name": file_name, "file_type": file_type},
+                    {"type": "file_modification_start", "file_path": path_str, "file_name": file_name, "file_type": file_type, "is_new": is_new},
                 )
 
             # 尝试生成结构化 diff（仅支持 .xlsx/.docx/.md）

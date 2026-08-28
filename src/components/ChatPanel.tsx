@@ -94,7 +94,7 @@ interface ChatPanelProps {
   onSelectLLM: (id: string) => void
   resetKey: number
   onFileDiffUpdate?: (data: { filePath: string; fileName: string; fileType: string; diffData: any }) => void
-  onFileModificationStart?: (data: { filePath: string; fileName: string; fileType: string }) => void
+  onFileModificationStart?: (data: { filePath: string; fileName: string; fileType: string; isNew?: boolean }) => void
   onFileModificationComplete?: (data: { filePath: string }) => void
   onCanvasPatch?: (data: { canvasName: string; operation: 'add' | 'replace'; elements: any[]; batchIndex?: number; batchTotal?: number; isFinal?: boolean }) => void
   onOpenTerminal?: (tab: TerminalTab) => void
@@ -299,6 +299,7 @@ export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKe
                   filePath: data.file_path as string,
                   fileName: data.file_name as string,
                   fileType: data.file_type as string,
+                  isNew: (data.is_new as boolean) || false,
                 })
               } else if (type === 'file_diff_update') {
                 onFileDiffUpdate?.({
@@ -897,7 +898,7 @@ function handleSSEEvent(
   setMessages: React.Dispatch<React.SetStateAction<Message[]>>,
   setContextUsage: React.Dispatch<React.SetStateAction<ContextUsageData | null>>,
   onFileDiffUpdate?: (data: { filePath: string; fileName: string; fileType: string; diffData: any }) => void,
-  onFileModificationStart?: (data: { filePath: string; fileName: string; fileType: string }) => void,
+  onFileModificationStart?: (data: { filePath: string; fileName: string; fileType: string; isNew?: boolean }) => void,
   onFileModificationComplete?: (data: { filePath: string }) => void,
   onCanvasPatch?: (data: { canvasName: string; operation: 'add' | 'replace'; elements: any[]; batchIndex?: number; batchTotal?: number; isFinal?: boolean }) => void,
 ) {
@@ -1217,6 +1218,7 @@ function handleSSEEvent(
       filePath: data.file_path as string,
       fileName: data.file_name as string,
       fileType: data.file_type as string,
+      isNew: (data.is_new as boolean) || false,
     })
     return
   }

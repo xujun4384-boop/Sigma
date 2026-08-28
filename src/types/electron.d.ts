@@ -5,7 +5,7 @@ export interface LLMEntry {
   apiKey: string
   model: string
   protocol: 'anthropic' | 'openai'
-  provider?: 'generic' | 'deepseek' | 'kimi-code' | 'minimax'
+  provider?: 'generic' | 'deepseek' | 'kimi-code' | 'minimax' | 'ark'
   thinking?: 'enabled' | 'adaptive' | 'disabled'
   contextSize?: number
   maxTokens?: number
@@ -28,6 +28,7 @@ export interface SkillKeysConfig {
   musicGenApiKey: string
   musicGenBaseUrl: string
   musicGenModel: string
+  minimaxVideoApiKey: string
   webSearchProvider: 'kimi' | 'tavily' | 'custom'
   webSearchApiKey: string
   webSearchBaseUrl: string
@@ -41,19 +42,20 @@ export interface SkillKeysConfig {
   fengniaoApiKey: string
   flyaiApiKey: string
   baiduMapAuthToken: string
-  volcApiKey: string
-  embedBaseUrl: string
-  embedApiKey: string
-  embedModel: string
-  voiceLlmBaseUrl: string
-  voiceLlmApiKey: string
-  voiceLlmModel: string
   mail163Address: string
   mail163AuthCode: string
   mail163SmtpHost: string
   mail163SmtpPort: string
   mail163ImapHost: string
   mail163ImapPort: string
+  wecomEmailAddress: string
+  wecomEmailAuthCode: string
+  wecomEmailSmtpHost: string
+  wecomEmailSmtpPort: string
+  wecomEmailImapHost: string
+  wecomEmailImapPort: string
+  volcAccessKey?: string
+  volcSecretKey?: string
 }
 
 export interface KimiConfig {
@@ -134,6 +136,9 @@ export interface ElectronAPI {
   copyPath: (filePath: string) => Promise<{ success: boolean; error?: string }>
   addToChat: (filePath: string) => Promise<{ success: boolean; error?: string }>
   convertPptxToImages: (filePath: string) => Promise<{ success: boolean; images?: string[]; count?: number; error?: string }>
+  onDragStart: (filePath: string) => void
+  copyFiles: (sourcePaths: string[], targetDir: string) => Promise<{ success: boolean; count?: number; conflicts?: string[]; error?: string }>
+  getPathForFile: (file: File) => string
   onAddFileToChat: (callback: (fileInfo: { path: string; fullPath: string; name: string; type: string; isDirectory: boolean }) => void) => () => void
   onDirectoryChange: (callback: (data: { path: string }) => void) => () => void
   getNativeTheme: () => Promise<NativeThemeInfo>

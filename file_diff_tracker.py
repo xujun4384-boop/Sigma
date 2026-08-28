@@ -143,18 +143,24 @@ class FileDiffTracker:
             text = f.read()
         return {'text': text, 'lines': text.splitlines()}
 
-    def get_diff(self, file_path: str) -> Optional[Dict]:
+    def get_diff(self, file_path: str, snapshot_if_missing: bool = False) -> Optional[Dict]:
         """
         获取文件的差异信息
 
         Args:
             file_path: 文件路径
+            snapshot_if_missing: 无快照时是否先对当前状态补建快照再返回 None
+                （供外部文件监听通道调用，使文件的后续修改也能正常产生 diff，
+                而非每次都被当作首次出现）
 
         Returns:
             差异信息字典，如果没有快照或文件不存在则返回 None
         """
         if file_path not in self.snapshots:
-            print(f"[FileDiffTracker] 没有找到快照: {file_path}")
+            if snapshot_if_missing:
+                self.snapshot_file(file_path)
+            else:
+                print(f"[FileDiffTracker] 没有找到快照: {file_path}")
             return None
 
         if not os.path.exists(file_path):

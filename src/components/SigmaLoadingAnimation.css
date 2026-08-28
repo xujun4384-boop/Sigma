@@ -59,7 +59,7 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 18px;
+  gap: 14px;
 }
 
 /* SIGMA 文字 */
@@ -102,15 +102,66 @@
   }
 }
 
+/* 标语区域 */
+.sigma-loading-tagline {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.sigma-tagline-en,
+.sigma-tagline-zh {
+  position: relative;
+  overflow: hidden;
+  white-space: nowrap;
+  background: linear-gradient(
+    90deg,
+    var(--text-muted) 0%,
+    var(--text-muted) 42%,
+    rgba(232, 234, 237, 0.85) 50%,
+    var(--text-muted) 58%,
+    var(--text-muted) 100%
+  );
+  background-size: 250% 100%;
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  animation: sigmaShine 2.2s ease-in-out infinite;
+}
+
+.sigma-tagline-en {
+  font-size: 12px;
+  letter-spacing: 2.5px;
+  font-weight: 400;
+}
+
+.sigma-tagline-zh {
+  font-size: 13px;
+  letter-spacing: 2px;
+  font-weight: 300;
+  animation-delay: 0.15s;
+}
+
+@keyframes sigmaShine {
+  0% {
+    background-position: 100% 0;
+  }
+  50% {
+    background-position: 0% 0;
+  }
+  100% {
+    background-position: 100% 0;
+  }
+}
+
 /* 底部状态行 */
 .sigma-loading-subtitle {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 11px;
-  letter-spacing: 3px;
-  color: var(--text-muted);
-  opacity: 0.7;
+  margin-top: 8px;
 }
 
 .sigma-dot {
@@ -127,17 +178,6 @@
 @keyframes sigmaDotPulse {
   0%, 100% { opacity: 0.2; transform: scale(0.8); }
   50% { opacity: 0.9; transform: scale(1.2); }
-}
-
-.sigma-status {
-  margin-left: 8px;
-  font-weight: 500;
-  animation: sigmaBlink 2s step-start infinite;
-}
-
-@keyframes sigmaBlink {
-  0%, 100% { opacity: 0.5; }
-  50% { opacity: 0.9; }
 }
 
 /* 空状态容器适配 */

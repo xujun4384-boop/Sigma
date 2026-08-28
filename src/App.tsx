@@ -6,13 +6,12 @@ import PreviewPanel from './components/PreviewPanel'
 import Sidebar, { loadSystemSettings } from './components/Sidebar'
 import ScanningOverlay from './components/ScanningOverlay'
 import Onboarding from './components/Onboarding'
-import VoiceChatModal from './components/VoiceChatModal'
 import { I18nProvider, getSavedLanguage, saveLanguage } from './i18n/I18nContext'
 import type { Lang } from './i18n/translations'
 import type { KimiConfig, LLMEntry, FolderTreeItem } from './types/electron'
 import { getBackendUrl } from './utils/config'
 import { loadAgents, syncAgentsToBackend } from './utils/agentStore'
-import { PanelRightOpen, Phone } from 'lucide-react'
+import { PanelRightOpen } from 'lucide-react'
 import './App.css'
 
 export type ThemeMode = 'dark' | 'light' | 'auto'
@@ -52,19 +51,18 @@ const DEFAULT_KIMI_CONFIG: KimiConfig = {
       fengniaoApiKey: '',
       flyaiApiKey: '',
       baiduMapAuthToken: '',
-      volcApiKey: '',
-      embedBaseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
-      embedApiKey: '',
-      embedModel: 'doubao-embedding-large-text-240915',
-      voiceLlmBaseUrl: 'https://api.deepseek.com',
-      voiceLlmApiKey: '',
-      voiceLlmModel: 'deepseek-chat',
       mail163Address: '',
       mail163AuthCode: '',
       mail163SmtpHost: 'smtp.163.com',
       mail163SmtpPort: '465',
       mail163ImapHost: 'imap.163.com',
       mail163ImapPort: '993',
+      wecomEmailAddress: '',
+      wecomEmailAuthCode: '',
+      wecomEmailSmtpHost: 'smtp.exmail.qq.com',
+      wecomEmailSmtpPort: '465',
+      wecomEmailImapHost: 'imap.exmail.qq.com',
+      wecomEmailImapPort: '993',
     },
 }
 
@@ -109,7 +107,6 @@ export default function App() {
   const [fileDiffQueue, setFileDiffQueue] = useState<FileDiffState[]>([])
   const [canvasPatch, setCanvasPatch] = useState<{ canvasName: string; operation: 'add' | 'replace'; elements: any[] } | null>(null)
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([])
-  const [voiceOpen, setVoiceOpen] = useState(false)
 
   // 项目扫描状态
   const [scanningPhase, setScanningPhase] = useState<'init' | 'scanning' | 'analyzing' | 'done' | null>(null)
@@ -187,39 +184,30 @@ export default function App() {
     return cleanup
   }, [runProjectScan])
 
-  // 主题: 初始化 data-theme 属性 + 监听系统主题变化
+  // 主题: 初始化 data-theme 属性 + auto 模式按时间切换（19:00~08:00 深色）
   useEffect(() => {
-    const resolveTheme = (mode: ThemeMode, systemIsDark: boolean): 'dark' | 'light' => {
-      if (mode === 'auto') return systemIsDark ? 'dark' : 'light'
+    const resolveTheme = (mode: ThemeMode): 'dark' | 'light' => {
+      if (mode === 'auto') {
+        const hour = new Date().getHours()
+        return (hour >= 19 || hour < 8) ? 'dark' : 'light'
+      }
       return mode
     }
 
-    const systemDarkQuery = window.matchMedia('(prefers-color-scheme: dark)')
     const applyTheme = () => {
-      const resolved = resolveTheme(themeMode, systemDarkQuery.matches)
-      document.documentElement.setAttribute('data-theme', resolved)
+      document.documentElement.setAttribute('data-theme', resolveTheme(themeMode))
     }
 
     applyTheme()
 
-    const onSystemChange = () => {
-      if (themeMode === 'auto') applyTheme()
-    }
-    systemDarkQuery.addEventListener('change', onSystemChange)
-
-    // Electron nativeTheme 监听（优先级高于 CSS media query）
-    let cleanupNative: (() => void) | undefined
-    if (window.electronAPI?.onNativeThemeUpdated) {
-      cleanupNative = window.electronAPI.onNativeThemeUpdated((info) => {
-        if (themeMode === 'auto') {
-          document.documentElement.setAttribute('data-theme', info.shouldUseDarkColors ? 'dark' : 'light')
-        }
-      })
+    // auto 模式下每分钟检查一次时间，跨 19:00 / 08:00 时自动切换
+    let timer: ReturnType<typeof setInterval> | undefined
+    if (themeMode === 'auto') {
+      timer = setInterval(applyTheme, 60_000)
     }
 
     return () => {
-      systemDarkQuery.removeEventListener('change', onSystemChange)
-      if (cleanupNative) cleanupNative()
+      if (timer) clearInterval(timer)
     }
   }, [themeMode])
 
@@ -331,8 +319,15 @@ export default function App() {
     setTerminalTabs(prev => prev.filter(t => t.id !== id))
   }, [])
 
-  const handleFileModificationStart = useCallback(({ filePath }: { filePath: string; fileName: string; fileType: string }) => {
-    // 仅标记「修改中」状态，不在此处打开预览。
+  const handleFileModificationStart = useCallback(({ filePath, fileName, fileType, isNew }: { filePath: string; fileName: string; fileType: string; isNew?: boolean }) => {
+    if (isNew) {
+      // 新文件：立即弹出预览，让用户看到产出结果
+      const normalizedType = fileType === 'excel' ? 'xlsx' : fileType === 'word' ? 'docx' : fileType
+      setSelectedFile({ path: filePath, name: fileName, type: normalizedType } as FolderTreeItem)
+      setFileDiffQueue(prev => [...prev, { filePath, fileName, fileType: normalizedType, diffData: null, isModifying: true }])
+      return
+    }
+    // 已有文件：仅标记「修改中」状态，不在此处打开预览。
     // 避免 mtime 变化但无实际内容 diff 的文件（如 pdf/pptx 等非 diff 类型）被误报为文件变更而弹出无关页面。
     // 真正的文件打开由 handleFileDiffUpdate（携带 diff 数据）触发。
     setFileDiffQueue(prev => {
@@ -500,17 +495,6 @@ export default function App() {
 
           {scanningPhase && (
             <ScanningOverlay visible={true} phase={scanningPhase} />
-          )}
-
-          <button className="voice-fab" onClick={() => setVoiceOpen(true)} title="语音通话">
-            <Phone size={20} />
-          </button>
-
-          {voiceOpen && (
-            <VoiceChatModal
-              apiKey={config.skillKeys.volcApiKey}
-              onClose={() => setVoiceOpen(false)}
-            />
           )}
         </>
       )}

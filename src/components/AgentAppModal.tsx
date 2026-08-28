@@ -127,7 +127,7 @@ export default function AgentAppModal({ url, title = '智能体', onClose }: Age
           className="agent-app-frame"
           src={url}
           title={title}
-          allow="clipboard-read; clipboard-write; microphone"
+          allow="clipboard-read; clipboard-write"
         />
         <div className="agent-app-resize-handle" onMouseDown={onResizeStart} />
       </div>

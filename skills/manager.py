@@ -45,6 +45,7 @@ from skills.ask_user import AskUserTool
 from skills.network_bridge import NetworkBridgeTool
 from skills.wechat_publisher import WeChatPublisherTool
 from skills.mail_163 import Mail163Tool
+from skills.wecom_email import WecomEmailTool
 from skills.project_memory import (
     ProjectScanTool, MemoryReadTool, MemoryRecordTool, MemoryUpdateTool,
 )
@@ -53,6 +54,7 @@ from skills.batch_read import BatchReadTool
 from skills.video_generate import VideoSceneTool, VideoTTSTool, VideoComposeTool
 from skills.video_auto import VideoAutoTool
 from skills.video_custom import VideoCustomTool
+from skills.video_cinematic import VideoCinematicStoryboardTool, VideoCinematicGenerateTool
 from skills.fengniao import (
     FengniaoFuzzySearch, FengniaoBasicInfo, FengniaoShareholders,
     FengniaoExecutives, FengniaoInvestments, FengniaoChanges,
@@ -107,8 +109,11 @@ ALL_TOOL_CLASSES: dict[str, type] = {
     "video_compose": VideoComposeTool,
     "video_auto": VideoAutoTool,
     "video_custom": VideoCustomTool,
+    "video_cinematic_storyboard": VideoCinematicStoryboardTool,
+    "video_cinematic_generate": VideoCinematicGenerateTool,
     "wechat_publish": WeChatPublisherTool,
     "mail_163": Mail163Tool,
+    "wecom_email": WecomEmailTool,
     "fengniao_search": FengniaoFuzzySearch,
     "fengniao_basic_info": FengniaoBasicInfo,
     "fengniao_shareholders": FengniaoShareholders,
@@ -265,6 +270,10 @@ ALL_SKILLS: dict[str, dict] = {
         "label": "视频自定义生成",
         "tool_names": ["video_custom"],
     },
+    "video_cinematic": {
+        "label": "电影级视频生成",
+        "tool_names": ["video_cinematic_storyboard", "video_cinematic_generate"],
+    },
     "wechat_publisher": {
         "label": "公众号发布",
         "tool_names": ["wechat_publish"],
@@ -272,6 +281,10 @@ ALL_SKILLS: dict[str, dict] = {
     "mail_163": {
         "label": "163邮箱收发",
         "tool_names": ["mail_163"],
+    },
+    "wecom_email": {
+        "label": "企业微信邮箱",
+        "tool_names": ["wecom_email"],
     },
     "fengniao": {
         "label": "风鸟企业查询",
@@ -312,6 +325,7 @@ class SkillManager:
                  image_gen_provider: str = "ark",
                  music_gen_api_key: str = "", music_gen_base_url: str = "",
                  music_gen_model: str = "",
+                 minimax_video_api_key: str = "",
                  vision_api_key: str = "", vision_model: str = "",
                  vision_base_url: str = "",
                  wechat_appid: str = "", wechat_appsecret: str = "",
@@ -321,6 +335,9 @@ class SkillManager:
                  mail163_address: str = "", mail163_auth_code: str = "",
                  mail163_smtp_host: str = "", mail163_smtp_port: str = "",
                  mail163_imap_host: str = "", mail163_imap_port: str = "",
+                 wecom_email_address: str = "", wecom_email_auth_code: str = "",
+                 wecom_email_smtp_host: str = "", wecom_email_smtp_port: str = "",
+                 wecom_email_imap_host: str = "", wecom_email_imap_port: str = "",
                  llm_config: dict | None = None,
                  todo_manager: TodoManager | None = None,
                  backup_enabled: bool = True,
@@ -340,6 +357,7 @@ class SkillManager:
         self.music_gen_api_key = music_gen_api_key
         self.music_gen_base_url = music_gen_base_url
         self.music_gen_model = music_gen_model
+        self.minimax_video_api_key = minimax_video_api_key
         self.vision_api_key = vision_api_key
         self.vision_model = vision_model
         self.vision_base_url = vision_base_url
@@ -356,6 +374,12 @@ class SkillManager:
         self.mail163_smtp_port = mail163_smtp_port
         self.mail163_imap_host = mail163_imap_host
         self.mail163_imap_port = mail163_imap_port
+        self.wecom_email_address = wecom_email_address
+        self.wecom_email_auth_code = wecom_email_auth_code
+        self.wecom_email_smtp_host = wecom_email_smtp_host
+        self.wecom_email_smtp_port = wecom_email_smtp_port
+        self.wecom_email_imap_host = wecom_email_imap_host
+        self.wecom_email_imap_port = wecom_email_imap_port
         self.llm_config = llm_config or {}
         self.todo_manager = todo_manager
         self.sub_agent_max_turns = 8  # 可被 server.py 动态设置
@@ -580,6 +604,17 @@ class SkillManager:
                     llm_config=self.llm_config,
                     skill_manager=self,
                 )
+            elif tool_name == "video_cinematic_storyboard":
+                self._instances[tool_name] = cls(
+                    cwd=str(self.cwd),
+                    llm_config=self.llm_config,
+                )
+            elif tool_name == "video_cinematic_generate":
+                self._instances[tool_name] = cls(
+                    cwd=str(self.cwd),
+                    llm_config=self.llm_config,
+                    minimax_video_api_key=self.minimax_video_api_key,
+                )
             elif tool_name == "wechat_publish":
                 self._instances[tool_name] = cls(
                     cwd=str(self.cwd),
@@ -597,6 +632,16 @@ class SkillManager:
                     smtp_port=self.mail163_smtp_port,
                     imap_host=self.mail163_imap_host,
                     imap_port=self.mail163_imap_port,
+                )
+            elif tool_name == "wecom_email":
+                self._instances[tool_name] = cls(
+                    cwd=str(self.cwd),
+                    address=self.wecom_email_address,
+                    auth_code=self.wecom_email_auth_code,
+                    smtp_host=self.wecom_email_smtp_host,
+                    smtp_port=self.wecom_email_smtp_port,
+                    imap_host=self.wecom_email_imap_host,
+                    imap_port=self.wecom_email_imap_port,
                 )
             elif tool_name in (
                 "fengniao_search", "fengniao_basic_info", "fengniao_shareholders",

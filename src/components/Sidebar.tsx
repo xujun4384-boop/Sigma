@@ -153,7 +153,7 @@ function ApiTab({ config, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLL
   const [showKey, setShowKey] = useState(false)
   const [saved, setSaved] = useState(false)
   const [llmName, setLlmName] = useState('')
-  const [provider, setProvider] = useState<'generic' | 'deepseek' | 'kimi-code' | 'minimax'>('generic')
+  const [provider, setProvider] = useState<'generic' | 'deepseek' | 'kimi-code' | 'minimax' | 'ark'>('generic')
   const [testingIds, setTestingIds] = useState<Record<string, 'testing' | 'success' | 'error'>>({})
   const [balances, setBalances] = useState<Record<string, { loading: boolean; data?: any; error?: string }>>({})
   const [view, setView] = useState<'list' | 'add' | 'edit'>('list')
@@ -271,10 +271,15 @@ function ApiTab({ config, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLL
     setBalances(prev => ({ ...prev, [entry.id]: { loading: true } }))
     try {
       const baseUrl = await getBackendUrl()
+      // 火山引擎 ark 需要从 skillKeys 取 AK/SK
+      const sk = (config.skillKeys || {}) as Record<string, string>
+      const apiKey = entry.provider === 'ark'
+        ? `${sk.volcAccessKey || ''}:${sk.volcSecretKey || ''}`
+        : entry.apiKey
       const resp = await fetch(`${baseUrl}/api/llm-balance`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ provider: entry.provider, apiKey: entry.apiKey, baseUrl: entry.baseUrl }),
+        body: JSON.stringify({ provider: entry.provider, apiKey, baseUrl: entry.baseUrl }),
       })
       const data = await resp.json()
       if (data.success) {
@@ -313,6 +318,15 @@ function ApiTab({ config, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLL
         parts.push(`5h ${short.remaining}/${short.limit}`)
       }
       return parts.join(' · ') || ''
+    }
+    if (entry.provider === 'ark') {
+      const avail = Number(balance.available_balance ?? 0)
+      const isLow = avail < 10
+      return (
+        <span className={isLow ? 'balance-low' : ''}>
+          ¥{balance.available_balance ?? '--'}
+        </span>
+      )
     }
     return ''
   }
@@ -558,6 +572,7 @@ function ApiTab({ config, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLL
             <button className={provider === 'deepseek' ? 'active' : ''} onClick={() => setProvider('deepseek')}>{t("api.provider_deepseek")}</button>
             <button className={provider === 'kimi-code' ? 'active' : ''} onClick={() => setProvider('kimi-code')}>{t("api.provider_kimi_code")}</button>
             <button className={provider === 'minimax' ? 'active' : ''} onClick={() => setProvider('minimax')}>{t("api.provider_minimax")}</button>
+            <button className={provider === 'ark' ? 'active' : ''} onClick={() => setProvider('ark')}>火山引擎</button>
           </div>
         </div>
 
@@ -706,6 +721,20 @@ const SKILL_DEFS: SkillDef[] = [
         visibleIf: sk => (sk.imageGenProvider || 'ark') === 'ark',
       },
       {
+        key: 'volcAccessKey',
+        type: 'password',
+        labelKey: 'skill_keys.volc_access_key',
+        placeholder: '火山引擎 AccessKey ID',
+        visibleIf: sk => (sk.imageGenProvider || 'ark') === 'ark',
+      },
+      {
+        key: 'volcSecretKey',
+        type: 'password',
+        labelKey: 'skill_keys.volc_secret_key',
+        placeholder: '火山引擎 Secret Access Key',
+        visibleIf: sk => (sk.imageGenProvider || 'ark') === 'ark',
+      },
+      {
         key: 'imageMinimaxApiKey',
         type: 'password',
         labelKey: 'skill_keys.image_minimax_api_key',
@@ -747,6 +776,21 @@ const SKILL_DEFS: SkillDef[] = [
         model: sk.musicGenModel,
       }),
     },
+  },
+  {
+    id: 'video_cinematic',
+    titleKey: 'skill_keys.video_cinematic',
+    descKey: 'skill_keys.video_cinematic_desc',
+    requiredKeys: ['minimaxVideoApiKey'],
+    fields: [
+      {
+        key: 'minimaxVideoApiKey',
+        type: 'password',
+        labelKey: 'skill_keys.minimax_video_api_key',
+        placeholder: 'MiniMax Token Plan subscription key',
+        hintKey: 'skill_keys.minimax_video_api_key_hint',
+      },
+    ],
   },
   {
     id: 'vision_ocr',
@@ -816,29 +860,6 @@ const SKILL_DEFS: SkillDef[] = [
     ],
   },
   {
-    id: 'voice_chat',
-    titleKey: 'skill_keys.voice_chat',
-    descKey: 'skill_keys.voice_chat_desc',
-    requiredKeys: ['volcApiKey'],
-    fields: [
-      { key: 'volcApiKey', type: 'password', labelKey: 'skill_keys.volc_api_key', placeholder: '火山引擎 API Key' },
-    ],
-  },
-  {
-    id: 'voice_memory',
-    titleKey: 'skill_keys.voice_memory',
-    descKey: 'skill_keys.voice_memory_desc',
-    requiredKeys: [],
-    fields: [
-      { key: 'embedBaseUrl', type: 'text', labelKey: 'skill_keys.embed_base_url', placeholder: 'https://ark.cn-beijing.volces.com/api/v3' },
-      { key: 'embedApiKey', type: 'password', labelKey: 'skill_keys.embed_api_key', placeholder: '火山方舟 API Key' },
-      { key: 'embedModel', type: 'text', labelKey: 'skill_keys.embed_model', placeholder: 'doubao-embedding-large-text-240915' },
-      { key: 'voiceLlmBaseUrl', type: 'text', labelKey: 'skill_keys.voice_llm_base_url', placeholder: 'https://api.deepseek.com' },
-      { key: 'voiceLlmApiKey', type: 'password', labelKey: 'skill_keys.voice_llm_api_key', placeholder: 'DeepSeek API Key' },
-      { key: 'voiceLlmModel', type: 'text', labelKey: 'skill_keys.voice_llm_model', placeholder: 'deepseek-chat' },
-    ],
-  },
-  {
     id: 'mail163',
     titleKey: 'skill_keys.mail163',
     descKey: 'skill_keys.mail163_desc',
@@ -861,6 +882,32 @@ const SKILL_DEFS: SkillDef[] = [
         smtpPort: sk.mail163SmtpPort || '465',
         imapHost: sk.mail163ImapHost || 'imap.163.com',
         imapPort: sk.mail163ImapPort || '993',
+      }),
+    },
+  },
+  {
+    id: 'wecom_email',
+    titleKey: 'skill_keys.wecom_email',
+    descKey: 'skill_keys.wecom_email_desc',
+    requiredKeys: ['wecomEmailAddress', 'wecomEmailAuthCode'],
+    fields: [
+      { key: 'wecomEmailAddress', type: 'text', labelKey: 'skill_keys.wecom_email_address', placeholder: 'name@company.com' },
+      { key: 'wecomEmailAuthCode', type: 'password', labelKey: 'skill_keys.wecom_email_auth_code', placeholder: 'Client authorization code' },
+      { key: 'wecomEmailSmtpHost', type: 'text', labelKey: 'skill_keys.wecom_email_smtp_host', placeholder: 'smtp.exmail.qq.com' },
+      { key: 'wecomEmailSmtpPort', type: 'text', labelKey: 'skill_keys.wecom_email_smtp_port', placeholder: '465' },
+      { key: 'wecomEmailImapHost', type: 'text', labelKey: 'skill_keys.wecom_email_imap_host', placeholder: 'imap.exmail.qq.com' },
+      { key: 'wecomEmailImapPort', type: 'text', labelKey: 'skill_keys.wecom_email_imap_port', placeholder: '993' },
+    ],
+    test: {
+      labelKey: 'skill_keys.test_wecom_email',
+      endpoint: '/api/test-wecom-email',
+      buildBody: (sk) => ({
+        address: sk.wecomEmailAddress || '',
+        authCode: sk.wecomEmailAuthCode || '',
+        smtpHost: sk.wecomEmailSmtpHost || 'smtp.exmail.qq.com',
+        smtpPort: sk.wecomEmailSmtpPort || '465',
+        imapHost: sk.wecomEmailImapHost || 'imap.exmail.qq.com',
+        imapPort: sk.wecomEmailImapPort || '993',
       }),
     },
   },
@@ -888,6 +935,8 @@ function normalizeImageGenConfig(config: KimiConfig): KimiConfig {
       imageMinimaxApiKey: current.imageMinimaxApiKey || (provider === 'minimax' ? legacyKey : ''),
       imageMinimaxBaseUrl: current.imageMinimaxBaseUrl || (provider === 'minimax' ? legacyBase : 'https://api.minimaxi.com/v1'),
       imageMinimaxModel: current.imageMinimaxModel || (provider === 'minimax' ? legacyModel : 'image-01'),
+      // 视频生成 Key 默认为空字符串（不强制复用 musicGenApiKey，避免误用订阅额度）
+      minimaxVideoApiKey: current.minimaxVideoApiKey || '',
     } as SkillKeysConfig,
   }
 }
@@ -926,24 +975,6 @@ function SkillKeysTab({ config, onSave }: { config: KimiConfig; onSave: (c: Kimi
     setSaved(true)
     setTimeout(() => setSaved(false), 2000)
     setEditingId(null)
-
-    // 同步语音/记忆配置到后端（供 voice_chat 读取）
-    const skNow = form.skillKeys || ({} as SkillKeysConfig)
-    getBackendUrl().then((baseUrl) => {
-      fetch(`${baseUrl}/api/voice/config`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          volcApiKey: skNow.volcApiKey || '',
-          embedBaseUrl: skNow.embedBaseUrl || '',
-          embedApiKey: skNow.embedApiKey || '',
-          embedModel: skNow.embedModel || '',
-          voiceLlmBaseUrl: skNow.voiceLlmBaseUrl || '',
-          voiceLlmApiKey: skNow.voiceLlmApiKey || '',
-          voiceLlmModel: skNow.voiceLlmModel || '',
-        }),
-      }).catch(() => { /* 后端未启动时静默 */ })
-    })
   }
 
   const handleTest = async (skill: SkillDef) => {

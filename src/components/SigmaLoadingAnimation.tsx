@@ -30,11 +30,14 @@ export default function SigmaLoadingAnimation() {
             </span>
           ))}
         </div>
+        <div className="sigma-loading-tagline">
+          <span className="sigma-tagline-en">SELF-ITERATING INTELLIGENT GENERAL MULTI-MODAL AGENT</span>
+          <span className="sigma-tagline-zh">具备自我迭代通用技术的多模态智能体</span>
+        </div>
         <div className="sigma-loading-subtitle">
           <span className="sigma-dot" />
           <span className="sigma-dot" />
           <span className="sigma-dot" />
-          <span className="sigma-status">AWAITING INPUT</span>
         </div>
       </div>
     </div>

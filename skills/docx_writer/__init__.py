@@ -125,15 +125,24 @@ class WriteDocxTool(BaseTool):
             para.alignment = alignment
 
     def _add_body(self, doc, content):
-        """添加正文内容。支持基本 Markdown：## 标题、| 表格、**加粗**"""
+        """添加正文内容。支持 Markdown：#~#### 标题、| 表格 |、**加粗**"""
         if not content:
             return
         from docx.enum.text import WD_ALIGN_PARAGRAPH
         from docx.shared import Pt
+        import re
 
         paragraphs = content.split('\n') if isinstance(content, str) else content
         table_rows = []  # 收集连续的表格行
         i = 0
+
+        def is_table_line(s: str) -> bool:
+            s = s.strip()
+            return s.startswith('|') and s.endswith('|') and s.count('|') >= 2
+
+        def is_sep_row(cells) -> bool:
+            return all(re.fullmatch(r':?-{2,}:?', c.replace(' ', '')) for c in cells if c.strip())
+
         while i < len(paragraphs):
             text = paragraphs[i]
 
@@ -147,31 +156,24 @@ class WriteDocxTool(BaseTool):
 
             stripped = text.strip()
 
-            # ## 二级标题
-            if stripped.startswith('## ') and not stripped.startswith('### '):
+            # Markdown 标题 # ~ ####
+            m = re.match(r'^(#{1,4})\s+(.*)$', stripped)
+            if m:
                 if table_rows:
                     self._flush_table(doc, table_rows)
                     table_rows = []
-                h = doc.add_heading(stripped[3:], level=2)
-                self._safe_set_font(h, '黑体', 16, bold=True)
+                level = len(m.group(1))  # 1~4
+                h = doc.add_heading(m.group(2).strip(), level=level)
+                # 分级字体大小
+                sizes = {1: 18, 2: 16, 3: 14, 4: 13}
+                self._safe_set_font(h, '黑体', sizes.get(level, 12), bold=True)
                 i += 1
                 continue
 
-            # ### 三级标题
-            if stripped.startswith('### '):
-                if table_rows:
-                    self._flush_table(doc, table_rows)
-                    table_rows = []
-                h = doc.add_heading(stripped[4:], level=3)
-                self._safe_set_font(h, '黑体', 14, bold=True)
-                i += 1
-                continue
-
-            # | 表格行
-            if stripped.startswith('|') and stripped.endswith('|'):
+            # | 表格行（兼容行首有空格/制表符）
+            if is_table_line(stripped):
                 cells = [c.strip() for c in stripped[1:-1].split('|')]
-                # 跳过分隔行（如 |---|---|）
-                if all(c.replace('-', '').replace(':', '').strip() == '' for c in cells):
+                if is_sep_row(cells):
                     i += 1
                     continue
                 table_rows.append(cells)
@@ -206,8 +208,8 @@ class WriteDocxTool(BaseTool):
                 self._set_font(run, '仿宋', 14)
 
     def _flush_table(self, doc, rows: list):
-        """将收集的表格行写入 docx 表格"""
-        if not rows or len(rows) < 2:
+        """将收集的表格行写入 docx 表格（Table Grid 样式自带边框）"""
+        if not rows:
             return
         from docx.shared import Pt, RGBColor, Cm
         from docx.oxml.ns import qn
@@ -252,7 +254,43 @@ class WriteDocxTool(BaseTool):
             os.makedirs(output_dir, exist_ok=True)
 
         if not isinstance(blocks, list) or not blocks:
-            return ToolResult.fail("blocks 必须是非空数组")
+            return ToolResult.fail(
+                f"blocks 必须是非空数组（list），当前类型: {type(blocks).__name__}。"
+                "如果你传入的是 JSON 字符串，请先解析为 list。"
+            )
+
+        # 入口校验：每项必须是 dict，且 type 合法
+        _VALID_TYPES = {"heading", "paragraph", "table", "page_break"}
+        for i, blk in enumerate(blocks):
+            if not isinstance(blk, dict):
+                return ToolResult.fail(
+                    f"blocks[{i}] 必须是对象(dict)，当前类型: {type(blk).__name__}，"
+                    f"值: {str(blk)[:100]}"
+                )
+            btype = blk.get("type")
+            if btype not in _VALID_TYPES:
+                return ToolResult.fail(
+                    f"blocks[{i}].type 必须是 {sorted(_VALID_TYPES)} 之一，收到: {btype!r}"
+                )
+            # 校验 color 字段（如果存在）
+            for color_field in ("color", "header_color"):
+                if color_field in blk and blk[color_field] is not None:
+                    if self._color_tuple(blk[color_field]) is None:
+                        return ToolResult.fail(
+                            f"blocks[{i}].{color_field} 颜色格式错误，应为 [r,g,b] 整数数组（0-255），"
+                            f"收到: {blk[color_field]!r}"
+                        )
+            # 校验 table 类型的 rows
+            if btype == "table":
+                rows = blk.get("rows")
+                if not isinstance(rows, list) or not rows:
+                    return ToolResult.fail(
+                        f"blocks[{i}] (table).rows 必须是非空二维数组"
+                    )
+                if not all(isinstance(r, list) for r in rows):
+                    return ToolResult.fail(
+                        f"blocks[{i}] (table).rows 每一项必须是数组"
+                    )
 
         try:
             from docx import Document
@@ -302,9 +340,36 @@ class WriteDocxTool(BaseTool):
         return mapping.get((align or "").lower())
 
     def _color_tuple(self, color) -> tuple | None:
+        """容错解析颜色：支持 [r,g,b] / (r,g,b) / "[r,g,b]" / "#FF0000" / {"item":[r,g,b]}"""
+        if color is None:
+            return None
+        # 字典形式（LLM 偶尔会写成 {"item": [r,g,b]}）
+        if isinstance(color, dict):
+            color = color.get("item") or color.get("value") or color.get("color")
+        # 字符串形式：可能是 "[0,0,0]" 或 "#FF0000" 或 "0,0,0"
+        if isinstance(color, str):
+            s = color.strip()
+            # 去掉方括号
+            if s.startswith("[") and s.endswith("]"):
+                s = s[1:-1]
+            # 十六进制 #RRGGBB
+            if s.startswith("#") and len(s) in (4, 7):
+                try:
+                    if len(s) == 4:
+                        s = "#" + "".join(c * 2 for c in s[1:])
+                    return tuple(int(s[i:i+2], 16) for i in (1, 3, 5))
+                except ValueError:
+                    return None
+            # "0,0,0" 形式
+            if "," in s:
+                color = [p.strip() for p in s.split(",")]
+            else:
+                return None
+        # 列表/元组形式
         if isinstance(color, (list, tuple)) and len(color) == 3:
             try:
-                return tuple(int(c) for c in color)
+                rgb = tuple(max(0, min(255, int(c))) for c in color)
+                return rgb
             except (TypeError, ValueError):
                 return None
         return None

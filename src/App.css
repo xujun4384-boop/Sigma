@@ -87,28 +87,3 @@
   border-color: var(--accent);
 }
 
-/* ── 语音通话悬浮按钮 ── */
-
-.voice-fab {
-  position: fixed;
-  right: 24px;
-  bottom: 24px;
-  z-index: 60;
-  width: 52px;
-  height: 52px;
-  border-radius: 50%;
-  border: none;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--accent, #3ec6ff);
-  color: #08131c;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-  transition: transform 0.15s, box-shadow 0.15s;
-}
-
-.voice-fab:hover {
-  transform: translateY(-2px);
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.45);
-}
