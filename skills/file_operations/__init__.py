@@ -2,10 +2,12 @@
 文件操作工具：read, write, bash
 """
 import os
+import base64
 import subprocess
 import tempfile
 import threading
 import time
+from pathlib import Path
 from skills.base import BaseTool, ToolParameter, ToolResult
 
 
@@ -335,6 +337,12 @@ class BashTool(BaseTool):
                 else:
                     truncated = False
 
+                # 检测是否生成了图片文件，返回路径列表
+                image_files = self._detect_generated_images(command)
+                if image_files:
+                    image_note = f"\n\n[检测到生成图片: {', '.join(image_files)}。可使用 batch_read 读取这些图片]"
+                    output += image_note
+
                 return ToolResult.ok(
                     output,
                     exit_code=process.returncode,
@@ -372,3 +380,53 @@ class BashTool(BaseTool):
 
         except Exception as e:
             return ToolResult.fail(f"命令执行失败: {e}")
+
+    def _detect_generated_images(self, command: str) -> list[str]:
+        """检测 bash 命令是否生成了图片文件，返回图片路径列表"""
+        import re
+        from datetime import datetime, timedelta
+
+        # 匹配常见的图片生成模式
+        patterns = [
+            r'savefig\(["\']([^"\']+\.(?:png|jpg|jpeg))["\']',  # matplotlib
+            r'save\(["\']([^"\']+\.(?:png|jpg|jpeg))["\']',     # PIL
+            r'to_csv\(["\']([^"\']+\.(?:png|jpg|jpeg))["\']',   # 导出为图片
+            r'plt\.savefig',  # matplotlib 通用
+            r'cv2\.imwrite',  # OpenCV
+            r'\.save\(["\']([^"\']+)["\']',  # 通用 .save()
+        ]
+
+        # 从命令中提取可能的文件名
+        potential_files = set()
+        for pattern in patterns:
+            matches = re.findall(pattern, command, re.IGNORECASE)
+            potential_files.update(matches)
+
+        # 也检查命令行参数中的文件名（如 python script.py output.png）
+        args = command.split()
+        for arg in args:
+            if arg.endswith(('.png', '.jpg', '.jpeg')):
+                potential_files.add(arg)
+
+        # 检查文件是否存在且是最近生成的（10秒内）
+        cwd = Path(self.cwd)
+        recent_time = datetime.now() - timedelta(seconds=10)
+        image_files = []
+
+        for filename in potential_files:
+            img_path = cwd / filename
+            if img_path.exists():
+                # 检查文件修改时间是否在10秒内
+                mtime = datetime.fromtimestamp(img_path.stat().st_mtime)
+                if mtime > recent_time:
+                    image_files.append(str(img_path))
+
+        # 如果没找到，扫描工作目录下最近10秒内生成的所有图片
+        if not image_files:
+            for ext in ('*.png', '*.jpg', '*.jpeg'):
+                for img_path in cwd.glob(ext):
+                    mtime = datetime.fromtimestamp(img_path.stat().st_mtime)
+                    if mtime > recent_time:
+                        image_files.append(str(img_path))
+
+        return image_files

@@ -75,6 +75,7 @@ const TOOL_TO_CAPABILITY: Record<string, AgentCapability> = {
   edit_xlsx: 'spreadsheet_processing',
   // 图片
   generate_image: 'image_generation',
+  generate_image_from_images: 'image_generation',
   read_image: 'image_processing',
   // 视频
   video_scene: 'video_generation',

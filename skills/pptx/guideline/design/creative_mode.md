@@ -25,6 +25,15 @@ Several style profiles are available in the `guideline/design/profiles/` directo
 - If the user's scenario does not match any profile, use `guideline/design/profiles/general.md` as the baseline and explain the reasoning for adjustments in design.md
 - Note: Only profiles under the profiles directory may be read; using templates under the template directory to create PPTs is strictly prohibited!
 
+#### Style source selection (风格来源选择)
+
+In addition to the scenario profile, determine whether the user has named a **style source** — a specific visual design system, a reference work, or an explicit visual/typo tendency — that should further shape the design:
+
+- If the user names such a style source, use its expressed intent as the Style Anchor and `style_prompt` input. If a style prescription file exists under `guideline/design/` for that kind of source, read and follow it as a **style overlay** on top of the selected scenario profile.
+- Example: a user wanting "现代简洁、留白足、配色克制" presentation visuals may be served by `guideline/design/opendesign_style.md` — a tone (academic/product/editorial/technical) driven overlay that maps its layout motifs (hero, metric chips, card groups, chapter band, full-bleed cover with mask) into `.pptd`/`.page` elements.
+- This is a generic decision based on whether a named style source exists and an optional tone — **not** keyword matching against specific names/words.
+- Priority: user's explicit style requirement > corresponding style prescription > generic `style_prompt`.
+
 ### step2. Design
 
 #### Overall Design Principles
@@ -57,6 +66,7 @@ design.md must include the following sections, output in order:
   - Brands: Apple, Muji, Aesop, and other brands with distinctive design styles and refined taste
   - Designers: Works of top designers such as Massimo Vignelli, Paul Rand, etc.
   - Design movements: Swiss International Style, Neo-Brutalism, Bauhaus, 8-bit, Cyberpunk, Memphis, etc.
+  - Design systems / style prescription: When the Style Source Selection identified a style prescription (e.g., `opendesign_style.md`), its tone-mapped visual character serves as the anchor — modern, restrained, whitespace-led, hero/metric/chapter-band layout motifs.
 - Do not reference styles whose color schemes are difficult to understand or translate: e.g., Duolingo (the bold red-green color scheme is hard to achieve aesthetically in presentations), Bloomberg (the overall style is rigorous and simple, suitable for extremely restrained professional scenarios, but not for other scenarios requiring visual impact)
 - **Referenced dimension explanation**: Beyond selecting an anchor, more importantly, explain what aspect of this style to reference — language style, color scheme, page layout, or information density?
 - Do not force-fit: If a query does not fully match all characteristics of a single anchor, you may select multiple anchors and separately describe what to emulate or learn from each.

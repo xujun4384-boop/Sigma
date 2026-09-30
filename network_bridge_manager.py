@@ -44,7 +44,7 @@ class NetworkBridgeManager:
 
     # ── LLM 配置管理 ──
 
-    def register_llm_config(self, name: str, base_url: str, api_key: str, model: str, protocol: str = "anthropic", active: bool = False):
+    def register_llm_config(self, name: str, base_url: str, api_key: str, model: str, protocol: str = "anthropic", active: bool = False, provider: str = "generic", thinking: str = "adaptive"):
         """注册一个 LLM 配置（通常来自主程序的 chat 请求）。"""
         if not name or not api_key:
             return
@@ -54,6 +54,8 @@ class NetworkBridgeManager:
             "apiKey": api_key,
             "model": model,
             "protocol": protocol,
+            "provider": provider,
+            "thinking": thinking,
         }
         if active:
             self._active_config_name = name

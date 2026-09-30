@@ -80,46 +80,58 @@ function measureTextSize(text: string, fontSize: number, fontFamily: number): { 
   return { width, height }
 }
 
-// 为没有绑定的文本找到最近的容器，建立双向绑定。
-// 不依赖几何重叠（LLM 经常把文字放在容器外面），直接按距离匹配。
+// 为没有绑定的文本找到最近的容器，建立双向绑定；
+// 对已有 containerId 但坐标不对的文本，按容器实际位置重新计算并居中。
+// 不依赖几何重叠（LLM 经常把文字放在容器外面），直接按 containerId 或距离匹配。
 function bindTextsToNearestContainers(elements: any[]): any[] {
   const containers = elements.filter(e =>
     CONTAINER_TYPES.has(e.type) && (e.width || 0) > 0 && (e.height || 0) > 0
   )
   if (containers.length === 0) return elements
-  const texts = elements.filter(e => e.type === 'text' && !e.containerId)
+  const containerById = new Map(containers.map(c => [c.id, c]))
+  const texts = elements.filter(e => e.type === 'text')
   if (texts.length === 0) return elements
 
   for (const text of texts) {
-    const tx = text.x || 0
-    const ty = text.y || 0
-    // 找最近的容器（按容器中心距离）
-    let best: any = null
-    let bestDist = Infinity
-    for (const c of containers) {
-      const cx = (c.x || 0) + (c.width || 0) / 2
-      const cy = (c.y || 0) + (c.height || 0) / 2
-      const dist = Math.sqrt((tx - cx) ** 2 + (ty - cy) ** 2)
-      if (dist < bestDist) { bestDist = dist; best = c }
+    // 情况 1：LLM 已绑定 containerId，但 x/y/width/height 是凭直觉写的，需要按容器重新居中
+    // 情况 2：LLM 没绑定 containerId，需要找最近容器并建立绑定
+    let container: any = null
+    if (text.containerId && containerById.has(text.containerId)) {
+      container = containerById.get(text.containerId)
+    } else if (!text.containerId) {
+      const tx = text.x || 0
+      const ty = text.y || 0
+      let bestDist = Infinity
+      for (const c of containers) {
+        const cx = (c.x || 0) + (c.width || 0) / 2
+        const cy = (c.y || 0) + (c.height || 0) / 2
+        const dist = Math.sqrt((tx - cx) ** 2 + (ty - cy) ** 2)
+        if (dist < bestDist) { bestDist = dist; container = c }
+      }
+      if (container) {
+        text.containerId = container.id
+      }
+    } else {
+      // containerId 指向的容器不存在，跳过
+      continue
     }
-    if (!best) continue
+    if (!container) continue
 
-    // 精确测量文本尺寸，设置正确坐标让 Excalidraw 居中
+    // 精确测量文本尺寸，按容器居中重算 x/y
     const fontSize = text.fontSize || 16
     const fontFamily = text.fontFamily || 2
     const { width: textWidth, height: textHeight } = measureTextSize(text.text || '', fontSize, fontFamily)
     text.width = textWidth
     text.height = textHeight
-    text.x = (best.x || 0) + ((best.width || 0) - textWidth) / 2
-    text.y = (best.y || 0) + ((best.height || 0) - textHeight) / 2
-
-    // 建立双向绑定
-    text.containerId = best.id
+    text.x = (container.x || 0) + ((container.width || 0) - textWidth) / 2
+    text.y = (container.y || 0) + ((container.height || 0) - textHeight) / 2
     text.textAlign = 'center'
     text.verticalAlign = 'middle'
-    if (!Array.isArray(best.boundElements)) best.boundElements = []
-    if (!best.boundElements.some((b: any) => b.type === 'text' && b.id === text.id)) {
-      best.boundElements.push({ type: 'text', id: text.id })
+
+    // 建立/补全双向绑定
+    if (!Array.isArray(container.boundElements)) container.boundElements = []
+    if (!container.boundElements.some((b: any) => b.type === 'text' && b.id === text.id)) {
+      container.boundElements.push({ type: 'text', id: text.id })
     }
   }
   return elements

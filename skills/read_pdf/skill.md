@@ -30,10 +30,10 @@
 #
 # OCR 配置:
 #   Settings → Skill Keys → PDF Vision OCR:
-#     Vision API Key  - 支持视觉的 API Key（如 Kimi Code）
-#     Vision Model    - 模型名，如 kimi-for-coding
-#     Vision Base URL - API 地址，如 https://api.moonshot.cn/anthropic
-#     协议: Anthropic Messages API
+#     Vision API Key  - 支持 Anthropic 协议的多模态模型 API Key
+#     Vision Model    - 模型名，如 MiniMax-M3 / claude-sonnet-4 / glm-4v
+#     Vision Base URL - API 地址，如 https://api.minimaxi.com/anthropic
+#     协议: Anthropic Messages API（已强制关闭 thinking，确保速度）
 #
 # 依赖: PyMuPDF (fitz), Pillow
 # ---------------------------------------------------------------------------

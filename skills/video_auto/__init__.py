@@ -145,6 +145,7 @@ class VideoAutoTool(BaseTool):
                 llm_base_url = self.llm_config.get("base_url", "")
                 llm_api_key = self.llm_config.get("api_key", "")
                 llm_model = self.llm_config.get("model", "")
+                llm_protocol = self.llm_config.get("protocol", "anthropic")
 
                 if not llm_base_url or not llm_api_key or not llm_model:
                     return ToolResult.fail(
@@ -158,6 +159,7 @@ class VideoAutoTool(BaseTool):
                     base_url=llm_base_url,
                     api_key=llm_api_key,
                     model=llm_model,
+                    protocol=llm_protocol,
                 )
 
                 title = script.get("title", title or "")

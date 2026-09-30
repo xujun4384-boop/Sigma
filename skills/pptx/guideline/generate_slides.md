@@ -26,6 +26,7 @@ Create an independent working directory for the current PPT task, and write all 
     * If there are no prerequisites, the page count can be left tentative and decided based on subsequent research content
   4. Content requirements: Does the user have specific charts, data, conclusions, or topic requirements, or specific requirements for language style?
   5. Visual requirements: Does the user have specific design style or color scheme requirements, or specific requirements for images, charts, and other elements?
+      * Style source: Note whether the user names a **visual style source** (a design system, a reference work, or an explicit visual/typo tendency). If so, pass it to step3's content mode navigation and, in the visual design stage (step5), read the corresponding style prescription under `guideline/design/` as a style overlay, together with an optional tone (academic/product/editorial/technical). Base this on whether a style source is named — not on keyword matching.
   6. Audience analysis: Analyze the target audience the user is likely addressing, including age, profession, expertise level, expected content presentation style, etc.
 
 ### step3: Determine Working Mode
@@ -51,6 +52,7 @@ Based on the user requirements analyzed in step2, determine the content mode and
   1. Replication/Reference mode: Read guideline/design/reference_mode.md for more information
   2. Creative mode: Read guideline/design/creative_mode.md for more information
   * design.md is the core visual reference for subsequent presentation generation. It must be persisted using the write_file tool for step6 to read and reference. It is strictly forbidden to only output it in the conversation.
+- If a **visual style source** was identified in step2, also read the corresponding style prescription under `guideline/design/` (e.g., `opendesign_style.md`) and follow it as a **style overlay** on top of the selected scenario profile, recording the tone in design.md.
 - Note: **Visual design should be based on content — less content does NOT mean simpler design; it actually demands higher-end, more refined aesthetics!** The less content there is, the more the design needs to elevate the sense of sophistication. If the content is in outline mode, or each page has relatively little text, you need more decorative elements, images, and finer grid layouts to ensure a premium visual experience.
 
 ### step6: Generate Presentation
@@ -82,6 +84,7 @@ Based on the user requirements analyzed in step2, determine the content mode and
     d. The .pptd file produced by the main agent
     e. The outline.md file produced by the main agent
     f. {skill_path}/guideline/subagent/attention.md: Notes for creating presentations
+    g. {skill_path}/guideline/design/opendesign_style.md (only when design.md indicates such a style overlay was used): Layout motif → `.pptd` element mappings for the opendesign tone-driven style
 
   * Tasks the sub-agent should handle: assign 20 pages of production tasks to each sub-agent. The following information must be declared when assigning tasks:
     * The sub-agent's content writing mode: Based on the current situation, inform the sub-agent which writing guide to read

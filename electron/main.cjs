@@ -589,6 +589,14 @@ ipcMain.handle('read-file', async (event, filePath) => {
   } catch (err) { return { success: false, error: err.message } }
 })
 
+ipcMain.handle('read-file-as-base64', async (event, filePath) => {
+  try {
+    const fp = path.isAbsolute(filePath) ? filePath : path.join(currentWorkingDir, filePath)
+    const buf = fs.readFileSync(fp)
+    return { success: true, data: buf.toString('base64') }
+  } catch (err) { return { success: false, error: err.message } }
+})
+
 ipcMain.handle('file-write', async (event, filePath, content) => {
   try {
     const fp = path.isAbsolute(filePath) ? filePath : path.join(currentWorkingDir, filePath)

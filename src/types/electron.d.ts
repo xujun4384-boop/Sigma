@@ -6,7 +6,8 @@ export interface LLMEntry {
   model: string
   protocol: 'anthropic' | 'openai'
   provider?: 'generic' | 'deepseek' | 'kimi-code' | 'minimax' | 'ark'
-  thinking?: 'enabled' | 'adaptive' | 'disabled'
+  /** 思考模式：自适应 / 强制开启 / 关闭 */
+  thinking?: 'adaptive' | 'enabled' | 'disabled'
   contextSize?: number
   maxTokens?: number
   temperature?: number
@@ -29,12 +30,11 @@ export interface SkillKeysConfig {
   musicGenBaseUrl: string
   musicGenModel: string
   minimaxVideoApiKey: string
+  doubaoVoiceApiKey: string
+  opendesignLlmId?: string
   webSearchProvider: 'kimi' | 'tavily' | 'custom'
   webSearchApiKey: string
   webSearchBaseUrl: string
-  visionApiKey: string
-  visionModel: string
-  visionBaseUrl: string
   wechatAppId: string
   wechatAppSecret: string
   wechatRelayUrl: string
@@ -54,6 +54,12 @@ export interface SkillKeysConfig {
   wecomEmailSmtpPort: string
   wecomEmailImapHost: string
   wecomEmailImapPort: string
+  gmailAddress: string
+  gmailAuthCode: string
+  gmailSmtpHost: string
+  gmailSmtpPort: string
+  gmailImapHost: string
+  gmailImapPort: string
   volcAccessKey?: string
   volcSecretKey?: string
 }

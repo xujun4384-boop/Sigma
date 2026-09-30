@@ -1,12 +1,11 @@
 """
-read_pdf skill - PDF 读取（文本提取 + 视觉 OCR）
+read_pdf skill - PDF 读取（文本提取 + 图片页自动识别）
 
-自动检测每页类型：文本页直接提取，图片页（扫描件）通过 LLM 视觉识别。
-视觉识别使用独立的 Vision API 配置，不依赖主 LLM。
+自动检测每页类型：文本页直接提取，图片页（扫描件）渲染为图片并回传给主 LLM 识别。
+图片使用内存缓存（base64），不会写入磁盘，调用完成后自动清理。
 """
 import base64
 import io
-import os
 from pathlib import Path
 
 from skills.base import BaseTool, ToolParameter, ToolResult
@@ -16,26 +15,18 @@ class ReadPdfTool(BaseTool):
     name = "read_pdf"
     description = (
         "读取 PDF 文件内容。自动检测页面类型：文本页直接提取，"
-        "图片页（扫描件）使用 LLM 视觉 API 识别。"
-        "OCR 功能需要用户在 Settings → Skill Keys → PDF Vision OCR 中配置。"
+        "图片页（扫描件）渲染为图片并返回给主 LLM 识别（需要主 LLM 支持视觉）。"
     )
     parameters = [
         ToolParameter("file_path", "string", "PDF 文件路径"),
         ToolParameter("page_range", "string", "页码范围，如 '1-5' 或 '1,3,5'（可选，默认全部）", required=False),
         ToolParameter("image_dpi", "integer", "图片页渲染 DPI（默认 150，影响清晰度和 token 消耗）", required=False, default=150),
-        ToolParameter("ocr", "boolean", "是否对图片页启用视觉识别（默认 true）", required=False, default=True),
     ]
 
-    def __init__(self, cwd: str = ".", vision_api_key: str = "",
-                 vision_model: str = "kimi-for-coding",
-                 vision_base_url: str = "https://api.moonshot.cn/anthropic"):
+    def __init__(self, cwd: str = "."):
         super().__init__(cwd)
-        self.vision_api_key = vision_api_key
-        self.vision_model = vision_model
-        self.vision_base_url = vision_base_url
 
-    def execute(self, file_path: str, page_range: str = None,
-                image_dpi: int = 150, ocr: bool = True, **kwargs) -> ToolResult:
+    def execute(self, file_path: str, page_range: str = None, image_dpi: int = 150, **kwargs) -> ToolResult:
         full_path = Path(self._resolve_path(file_path))
         if not full_path.exists():
             return ToolResult.fail(f"文件不存在: {file_path}")
@@ -65,9 +56,7 @@ class ReadPdfTool(BaseTool):
         pages = []
         text_pages = 0
         image_pages = 0
-        errors = []
-
-        has_vision_config = ocr and self.vision_api_key
+        image_files = []  # 存储图片页的文件路径
 
         for pi in page_indices:
             page = doc[pi]
@@ -80,66 +69,56 @@ class ReadPdfTool(BaseTool):
                     "content": text, "char_count": len(text),
                 })
                 text_pages += 1
-                continue
-
-            # 图片页或无文本页
-            if not has_vision_config:
-                image_pages += 1
-                pages.append({
-                    "page_num": pi + 1, "type": "image",
-                    "content": "[图片页，未配置 Vision API。请在 Settings → Skill Keys → PDF Vision OCR 中配置]",
-                    "char_count": 0,
-                })
-                continue
-
-            # OCR: 渲染为图片 → LLM vision 识别
-            try:
-                ocr_text = self._ocr_page(page, image_dpi)
-                if ocr_text:
+            else:
+                # 图片页：渲染为图片文件，返回路径
+                try:
+                    img_path = self._render_page_as_image_file(page, pi + 1, image_dpi, full_path.stem)
+                    image_files.append(img_path)
                     pages.append({
-                        "page_num": pi + 1, "type": "ocr",
-                        "content": ocr_text, "char_count": len(ocr_text),
+                        "page_num": pi + 1, "type": "image_page",
+                        "content": f"[图片页 {pi+1} 已渲染到: {img_path}]",
+                        "char_count": 0,
                     })
                     image_pages += 1
-                else:
+                except Exception as e:
                     pages.append({
-                        "page_num": pi + 1, "type": "image",
-                        "content": "[视觉识别返回空]", "char_count": 0,
+                        "page_num": pi + 1, "type": "error",
+                        "content": f"[图片页渲染失败: {e}]",
+                        "char_count": 0,
                     })
-                    image_pages += 1
-            except Exception as e:
-                errors.append(f"第 {pi+1} 页 OCR 失败: {e}")
-                # 回退：至少提供原始文本（如果有的话）
-                pages.append({
-                    "page_num": pi + 1, "type": "image",
-                    "content": text or f"[识别失败: {e}]",
-                    "char_count": len(text),
-                })
-                image_pages += 1
 
         doc.close()
 
         total_chars = sum(p.get("char_count", 0) for p in pages)
-        # 组装输出文本，把实际内容放进 content
-        out_lines = [f"PDF: {full_path.name}, 共 {page_count} 页, 文本 {text_pages} + OCR {image_pages}, 总 {total_chars} 字符"]
+        # 组装输出文本
+        out_lines = [f"PDF: {full_path.name}, 共 {page_count} 页, 文本页 {text_pages} + 图片页 {image_pages}, 总 {total_chars} 字符"]
         for p in pages:
             out_lines.append(f"\n--- 第 {p['page_num']} 页 ({p.get('type','')}) ---")
             out_lines.append(p["content"])
 
-        if errors:
-            out_lines.append(f"\n⚠️ {len(errors)} 页识别失败")
+        # 如果有图片页，提示使用 read_image 读取
+        if image_files:
+            out_lines.append(f"\n\n[系统提示: 检测到 {len(image_files)} 张扫描页面，可使用 read_image 工具读取上述图片文件]")
 
         return ToolResult.ok(
             "\n".join(out_lines),
             file_path=str(full_path), metadata=metadata,
             text_pages=text_pages, image_pages=image_pages,
             total_chars=total_chars,
+            image_files=image_files,  # 返回图片文件路径列表
         )
 
-    def _ocr_page(self, page, dpi: int) -> str:
-        """使用 LLM vision API (Anthropic 协议) 识别图片页"""
+    def _render_page_as_image(self, page, dpi: int) -> str:
+        """渲染 PDF 页面为 JPEG 图片，返回 base64（内存缓存，不写磁盘）"""
         import fitz
         from PIL import Image
+
+    def _render_page_as_image_file(self, page, page_num: int, dpi: int, pdf_name: str) -> str:
+        """渲染 PDF 页面为 JPEG 图片文件，返回文件路径"""
+        import fitz
+        from PIL import Image
+        import tempfile
+        import os
 
         zoom = dpi / 72
         mat = fitz.Matrix(zoom, zoom)
@@ -147,43 +126,23 @@ class ReadPdfTool(BaseTool):
 
         img_data = pix.tobytes("png")
         img = Image.open(io.BytesIO(img_data))
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        img_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-
-        import json
-        import urllib.request as ur
-
-        body = json.dumps({
-            "model": self.vision_model,
-            "max_tokens": 2000,
-            "messages": [{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "请详细识别这个 PDF 页面的内容，包括所有文字、表格、数字。保持原有格式。只输出识别到的内容，不要加额外说明。"},
-                    {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": img_b64}},
-                ],
-            }],
-        }).encode("utf-8")
-
-        base_url = self.vision_base_url.rstrip("/")
-        req = ur.Request(
-            f"{base_url}/v1/messages",
-            data=body,
-            headers={
-                "Authorization": f"Bearer {self.vision_api_key}",
-                "anthropic-version": "2023-06-01",
-                "Content-Type": "application/json",
-            },
-        )
-        with ur.urlopen(req, timeout=120) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-
-        content = ""
-        for block in data.get("content", []):
-            if block.get("type") == "text":
-                content += block.get("text", "")
-        return content.strip()
+        
+        # 压缩图片：限制最大尺寸，转 JPEG 降低大小
+        max_size = 1568  # Claude 推荐的最大图片尺寸
+        if img.width > max_size or img.height > max_size:
+            img.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+        
+        # 转 JPEG 格式（比 PNG 小很多）
+        if img.mode in ("RGBA", "P"):
+            img = img.convert("RGB")
+        
+        # 保存到临时文件
+        temp_dir = tempfile.gettempdir()
+        img_filename = f"{pdf_name}_page_{page_num}.jpg"
+        img_path = os.path.join(temp_dir, img_filename)
+        img.save(img_path, format="JPEG", quality=85, optimize=True)
+        
+        return img_path
 
     def _parse_range(self, page_range: str | None, page_count: int) -> list[int]:
         """解析页码范围字符串"""

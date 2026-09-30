@@ -20,6 +20,15 @@ class ToolParameter:
 
 @dataclass
 class ToolResult:
+    """工具执行结果。
+
+    重要约定（务必遵守）：
+    - `content` 是「回喂给 LLM 的文本」，LLM 只能看到这个字段。
+      任何 LLM 后续需要的信息（路径、时长、时间戳、关键数据、错误详情、
+      进度阶段等）都必须写进 content，否则 LLM 拿不到。
+    - `details` 是「给代码/前端用的结构化元数据」，tool_loop / server 不会把它
+      传给 LLM。只放非关键、可丢弃的辅助字段，不要放 LLM 需要的数据。
+    """
     success: bool
     content: str
     truncated: bool = False

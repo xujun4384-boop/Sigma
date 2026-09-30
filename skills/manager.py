@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 import inspect
 
+from sigma_logger import log
 from skills.base import BaseTool, ToolResult
 from skills.canvas import CanvasUpdateTool
 from skills.file_operations import ReadTool, WriteTool, EditTool, BashTool
@@ -21,9 +22,10 @@ from skills.docx_reader import ReadDocxTool
 from skills.docx_writer import WriteDocxTool
 from skills.docx_editor import EditDocxTool
 from skills.docx_analyzer import SearchDocxTool
-from skills.image_reader import ImagePreviewTool, ImageReaderTool
+from skills.image_reader import ImageReaderTool
 from skills.image_search import ImageSearchTool
 from skills.image_generate import ImageGenerateTool
+from skills.image_to_image import ImageToImageTool
 from skills.music_generate import MusicGenerateTool
 from skills.sandbox import SandboxTool
 from skills.sub_agent import SubAgentTool
@@ -46,15 +48,24 @@ from skills.network_bridge import NetworkBridgeTool
 from skills.wechat_publisher import WeChatPublisherTool
 from skills.mail_163 import Mail163Tool
 from skills.wecom_email import WecomEmailTool
+from skills.gmail import GmailTool
 from skills.project_memory import (
     ProjectScanTool, MemoryReadTool, MemoryRecordTool, MemoryUpdateTool,
 )
 
 from skills.batch_read import BatchReadTool
-from skills.video_generate import VideoSceneTool, VideoTTSTool, VideoComposeTool
+from skills.video_generate import VideoSceneTool, VideoComposeTool
 from skills.video_auto import VideoAutoTool
 from skills.video_custom import VideoCustomTool
+from skills.video_overlay import VideoOverlayTool
+from skills.video_card import VideoCardTool
 from skills.video_cinematic import VideoCinematicStoryboardTool, VideoCinematicGenerateTool
+from skills.opendesign import OpendesignVideoTool
+from skills.doubao_tts import DoubaoTTS
+from skills.video_produce import VideoProduceTool
+from skills.video_shot import VideoShotTool
+from skills.compose_video import ComposeVideoTool
+from skills.animation_painter import AnimationPainterRenderTool
 from skills.fengniao import (
     FengniaoFuzzySearch, FengniaoBasicInfo, FengniaoShareholders,
     FengniaoExecutives, FengniaoInvestments, FengniaoChanges,
@@ -70,8 +81,14 @@ from skills.baidu_map import (
     BaiduMapReverseGeocodingTool, BaiduMapWeatherTool, BaiduMapRenderTool,
 )
 
-# 内部工具：仅供子 Agent 使用，不对外暴露给 LLM（只读工具由 batch_read 统一入口）
-_INTERNAL_TOOLS = {"read", "read_docx", "read_pdf", "read_pptx"}
+# 内部工具：仅供子 Agent / 编排流程使用，不对外暴露给 LLM（只读工具由 batch_read 统一入口）。
+# video_auto/video_custom/video_overlay 已并入 video_card；opendesign/doubao_tts/pdoom 归 video_shot 调度，均不直接暴露。
+_INTERNAL_TOOLS = {
+    "read", "read_docx", "read_pdf", "read_pptx", "read_image",
+    "video_scene", "video_compose",
+    "video_auto", "video_custom", "video_overlay",
+    "opendesign_video", "doubao_tts", "pdoom_render",
+}
 
 # 所有工具类的注册表
 ALL_TOOL_CLASSES: dict[str, type] = {
@@ -83,9 +100,9 @@ ALL_TOOL_CLASSES: dict[str, type] = {
     "edit_docx": EditDocxTool,
     "search_docx": SearchDocxTool,
     "read_image": ImageReaderTool,
-    "preview_image": ImagePreviewTool,
     "search_image": ImageSearchTool,
     "generate_image": ImageGenerateTool,
+    "generate_image_from_images": ImageToImageTool,
     "generate_music": MusicGenerateTool,
     "sandbox_run": SandboxTool,
     "sub_agent": SubAgentTool,
@@ -105,15 +122,23 @@ ALL_TOOL_CLASSES: dict[str, type] = {
     "memory_update": MemoryUpdateTool,
     "batch_read": BatchReadTool,
     "video_scene": VideoSceneTool,
-    "video_tts": VideoTTSTool,
     "video_compose": VideoComposeTool,
     "video_auto": VideoAutoTool,
     "video_custom": VideoCustomTool,
+    "video_overlay": VideoOverlayTool,
+    "video_card": VideoCardTool,
+    "video_shot": VideoShotTool,
+    "compose_video": ComposeVideoTool,
     "video_cinematic_storyboard": VideoCinematicStoryboardTool,
     "video_cinematic_generate": VideoCinematicGenerateTool,
+    "opendesign_video": OpendesignVideoTool,
+    "doubao_tts": DoubaoTTS,
+    "video_produce": VideoProduceTool,
+    "pdoom_render": AnimationPainterRenderTool,
     "wechat_publish": WeChatPublisherTool,
     "mail_163": Mail163Tool,
     "wecom_email": WecomEmailTool,
+    "gmail": GmailTool,
     "fengniao_search": FengniaoFuzzySearch,
     "fengniao_basic_info": FengniaoBasicInfo,
     "fengniao_shareholders": FengniaoShareholders,
@@ -180,7 +205,7 @@ ALL_SKILLS: dict[str, dict] = {
     },
     "image_reader": {
         "label": "图片读取",
-        "tool_names": ["preview_image", "read_image"],
+        "tool_names": ["read_image"],
     },
     "image_search": {
         "label": "图片搜索",
@@ -189,6 +214,10 @@ ALL_SKILLS: dict[str, dict] = {
     "image_generate": {
         "label": "图片生成",
         "tool_names": ["generate_image"],
+    },
+    "image_to_image": {
+        "label": "图生图",
+        "tool_names": ["generate_image_from_images"],
     },
     "music_generate": {
         "label": "音乐生成",
@@ -258,21 +287,33 @@ ALL_SKILLS: dict[str, dict] = {
         "label": "批量读取",
         "tool_names": ["batch_read"],
     },
-    "video_generate": {
-        "label": "视频生成",
-        "tool_names": ["video_scene", "video_tts", "video_compose"],
+    "video_card": {
+        "label": "竖版卡片视频",
+        "tool_names": ["video_card"],
     },
-    "video_auto": {
-        "label": "视频自动生成",
-        "tool_names": ["video_auto"],
+    "video_shot": {
+        "label": "视频片段生成",
+        "tool_names": ["video_shot"],
     },
-    "video_custom": {
-        "label": "视频自定义生成",
-        "tool_names": ["video_custom"],
+    "compose_video": {
+        "label": "视频合成",
+        "tool_names": ["compose_video"],
     },
     "video_cinematic": {
         "label": "电影级视频生成",
         "tool_names": ["video_cinematic_storyboard", "video_cinematic_generate"],
+    },
+    "opendesign": {
+        "label": "OpenDesign 视频生成",
+        "tool_names": ["opendesign_video"],
+    },
+    "doubao_tts": {
+        "label": "豆包语音生成",
+        "tool_names": ["doubao_tts"],
+    },
+    "video_produce": {
+        "label": "视频制作流水线",
+        "tool_names": ["video_produce"],
     },
     "wechat_publisher": {
         "label": "公众号发布",
@@ -285,6 +326,10 @@ ALL_SKILLS: dict[str, dict] = {
     "wecom_email": {
         "label": "企业微信邮箱",
         "tool_names": ["wecom_email"],
+    },
+    "gmail": {
+        "label": "Gmail",
+        "tool_names": ["gmail"],
     },
     "fengniao": {
         "label": "风鸟企业查询",
@@ -314,7 +359,16 @@ ALL_SKILLS: dict[str, dict] = {
         "label": "PPT 生成",
         "tool_names": ["convert_pptx"],
     },
+    "animation_painter": {
+        "label": "动画绘制（p5.brush 水彩）",
+        "tool_names": ["pdoom_render"],
+    },
 }
+
+
+def _norm_path(p) -> str:
+    """归一化脚本/命令路径用于比对：小写、统一斜杠、剥外层空白与包裹引号。"""
+    return str(p).strip().strip('"').strip("'").replace("\\", "/").lower()
 
 
 class SkillManager:
@@ -326,8 +380,7 @@ class SkillManager:
                  music_gen_api_key: str = "", music_gen_base_url: str = "",
                  music_gen_model: str = "",
                  minimax_video_api_key: str = "",
-                 vision_api_key: str = "", vision_model: str = "",
-                 vision_base_url: str = "",
+                 doubao_voice_api_key: str = "",
                  wechat_appid: str = "", wechat_appsecret: str = "",
                  wechat_relay_url: str = "", wechat_relay_key: str = "",
                  fengniao_api_key: str = "", flyai_api_key: str = "",
@@ -338,7 +391,11 @@ class SkillManager:
                  wecom_email_address: str = "", wecom_email_auth_code: str = "",
                  wecom_email_smtp_host: str = "", wecom_email_smtp_port: str = "",
                  wecom_email_imap_host: str = "", wecom_email_imap_port: str = "",
+                 gmail_address: str = "", gmail_auth_code: str = "",
+                 gmail_smtp_host: str = "", gmail_smtp_port: str = "",
+                 gmail_imap_host: str = "", gmail_imap_port: str = "",
                  llm_config: dict | None = None,
+                 opendesign_llm_config: dict | None = None,
                  todo_manager: TodoManager | None = None,
                  backup_enabled: bool = True,
                  skills_root: str | None = None,
@@ -358,9 +415,7 @@ class SkillManager:
         self.music_gen_base_url = music_gen_base_url
         self.music_gen_model = music_gen_model
         self.minimax_video_api_key = minimax_video_api_key
-        self.vision_api_key = vision_api_key
-        self.vision_model = vision_model
-        self.vision_base_url = vision_base_url
+        self.doubao_voice_api_key = doubao_voice_api_key
         self.wechat_appid = wechat_appid
         self.wechat_appsecret = wechat_appsecret
         self.wechat_relay_url = wechat_relay_url
@@ -380,7 +435,14 @@ class SkillManager:
         self.wecom_email_smtp_port = wecom_email_smtp_port
         self.wecom_email_imap_host = wecom_email_imap_host
         self.wecom_email_imap_port = wecom_email_imap_port
+        self.gmail_address = gmail_address
+        self.gmail_auth_code = gmail_auth_code
+        self.gmail_smtp_host = gmail_smtp_host
+        self.gmail_smtp_port = gmail_smtp_port
+        self.gmail_imap_host = gmail_imap_host
+        self.gmail_imap_port = gmail_imap_port
         self.llm_config = llm_config or {}
+        self.opendesign_llm_config = opendesign_llm_config or {}
         self.todo_manager = todo_manager
         self.sub_agent_max_turns = 8  # 可被 server.py 动态设置
         self._instances: dict[str, BaseTool] = {}
@@ -405,6 +467,58 @@ class SkillManager:
         else:
             self._skills = dict(ALL_SKILLS)
             self._tool_classes = dict(ALL_TOOL_CLASSES)
+
+        # 建立「技能 scripts 脚本」索引，供 tool_loop 拦截 bash/sandbox 直调。
+        # 由 ALL_SKILLS 通用推导，不硬编码技能名，自动覆盖未来新技能。
+        self._skill_scripts = {}  # 归一化路径 -> (label, tool_names)；含绝对与相对 key
+        for name, spec in self._skills.items():
+            scripts_dir = self.skills_root / name / "scripts"
+            if scripts_dir.is_dir():
+                label = spec.get("label", name)
+                tool_names = spec.get("tool_names", [])
+                for py in scripts_dir.rglob("*.py"):
+                    abs_key = _norm_path(py)
+                    rel_key = f"skills/{name}/scripts/{py.relative_to(scripts_dir)}"
+                    self._skill_scripts[abs_key] = (label, tool_names)
+                    self._skill_scripts[_norm_path(rel_key)] = (label, tool_names)
+
+        # Gmail 需要外网连接：初始化时做连接测试，失败则对 LLM 隐藏
+        self._maybe_disable_gmail()
+
+    def _maybe_disable_gmail(self):
+        """测试 Gmail 连接。如果失败（网络不可达或凭据错误），从 skills 中移除 gmail，
+        使 LLM 看不到这个 skill。仅当用户配置了 gmail 凭据时才测试。"""
+        if "gmail" not in self._skills:
+            return
+        if not self.gmail_address or not self.gmail_auth_code:
+            log.info("[Gmail] 未配置凭据，gmail skill 对 LLM 不可见")
+            self._skills.pop("gmail", None)
+            self._tool_classes.pop("gmail", None)
+            return
+        import smtplib
+        import imaplib
+        smtp_host = self.gmail_smtp_host or "smtp.gmail.com"
+        smtp_port = int(self.gmail_smtp_port) if self.gmail_smtp_port else 465
+        imap_host = self.gmail_imap_host or "imap.gmail.com"
+        imap_port = int(self.gmail_imap_port) if self.gmail_imap_port else 993
+        try:
+            with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=10) as s:
+                s.login(self.gmail_address, self.gmail_auth_code)
+        except Exception as e:
+            log.warning(f"[Gmail] SMTP 连接测试失败，gmail skill 对 LLM 不可见: {e}")
+            self._skills.pop("gmail", None)
+            self._tool_classes.pop("gmail", None)
+            return
+        try:
+            imap = imaplib.IMAP4_SSL(imap_host, imap_port)
+            imap.login(self.gmail_address, self.gmail_auth_code)
+            imap.logout()
+        except Exception as e:
+            log.warning(f"[Gmail] IMAP 连接测试失败，gmail skill 对 LLM 不可见: {e}")
+            self._skills.pop("gmail", None)
+            self._tool_classes.pop("gmail", None)
+            return
+        log.info("[Gmail] 连接测试通过，gmail skill 已启用")
 
     def clear_cache(self):
         """清除所有内部缓存，配合热重载使用。"""
@@ -545,6 +659,15 @@ class SkillManager:
                     default_model=self.image_gen_model,
                     provider=self.image_gen_provider,
                 )
+            elif tool_name == "generate_image_from_images":
+                # 图生图复用 image_gen 通道，按 provider 自动适配 payload
+                self._instances[tool_name] = cls(
+                    cwd=str(self.cwd),
+                    api_key=self.image_gen_api_key,
+                    base_url=self.image_gen_base_url,
+                    default_model=self.image_gen_model,
+                    provider=self.image_gen_provider,
+                )
             elif tool_name == "generate_music":
                 self._instances[tool_name] = cls(
                     cwd=str(self.cwd),
@@ -566,21 +689,12 @@ class SkillManager:
                     agent_manager=custom_agent_manager,
                 )
             elif tool_name == "read_pdf":
-                self._instances[tool_name] = cls(
-                    cwd=str(self.cwd),
-                    vision_api_key=self.vision_api_key,
-                    vision_model=self.vision_model,
-                    vision_base_url=self.vision_base_url,
-                )
+                self._instances[tool_name] = cls(cwd=str(self.cwd))
             elif tool_name == "read_image":
                 self._instances[tool_name] = cls(
                     cwd=str(self.cwd),
-                    vision_api_key=self.vision_api_key,
-                    vision_model=self.vision_model,
-                    vision_base_url=self.vision_base_url,
+                    llm_config=self.llm_config,
                 )
-            elif tool_name == "preview_image":
-                self._instances[tool_name] = cls(cwd=str(self.cwd))
             elif tool_name == "edit_docx":
                 self._instances[tool_name] = cls(
                     cwd=str(self.cwd),
@@ -604,6 +718,16 @@ class SkillManager:
                     llm_config=self.llm_config,
                     skill_manager=self,
                 )
+            elif tool_name == "video_card":
+                self._instances[tool_name] = cls(
+                    cwd=str(self.cwd),
+                    skill_manager=self,
+                )
+            elif tool_name == "video_shot":
+                self._instances[tool_name] = cls(
+                    cwd=str(self.cwd),
+                    skill_manager=self,
+                )
             elif tool_name == "video_cinematic_storyboard":
                 self._instances[tool_name] = cls(
                     cwd=str(self.cwd),
@@ -614,6 +738,23 @@ class SkillManager:
                     cwd=str(self.cwd),
                     llm_config=self.llm_config,
                     minimax_video_api_key=self.minimax_video_api_key,
+                )
+            elif tool_name == "opendesign_video":
+                self._instances[tool_name] = cls(
+                    cwd=str(self.cwd),
+                    llm_config=self.llm_config,
+                    opendesign_llm_config=self.opendesign_llm_config,
+                )
+            elif tool_name == "doubao_tts":
+                self._instances[tool_name] = cls(
+                    cwd=str(self.cwd),
+                    api_key=self.doubao_voice_api_key,
+                )
+            elif tool_name == "video_produce":
+                self._instances[tool_name] = cls(
+                    cwd=str(self.cwd),
+                    skill_manager=self,
+                    opendesign_llm_config=self.opendesign_llm_config,
                 )
             elif tool_name == "wechat_publish":
                 self._instances[tool_name] = cls(
@@ -642,6 +783,16 @@ class SkillManager:
                     smtp_port=self.wecom_email_smtp_port,
                     imap_host=self.wecom_email_imap_host,
                     imap_port=self.wecom_email_imap_port,
+                )
+            elif tool_name == "gmail":
+                self._instances[tool_name] = cls(
+                    cwd=str(self.cwd),
+                    address=self.gmail_address,
+                    auth_code=self.gmail_auth_code,
+                    smtp_host=self.gmail_smtp_host,
+                    smtp_port=self.gmail_smtp_port,
+                    imap_host=self.gmail_imap_host,
+                    imap_port=self.gmail_imap_port,
                 )
             elif tool_name in (
                 "fengniao_search", "fengniao_basic_info", "fengniao_shareholders",
@@ -722,7 +873,13 @@ class SkillManager:
             if text is None:
                 continue
             if skill_name not in self._header_cache:
-                self._header_cache[skill_name] = self._parse_header(text)
+                header = self._parse_header(text)
+                # 显式列出本 skill 对应的工具名，避免 LLM 把 skill 名（如 image_to_image）
+                # 当作工具名调用而触发"未知工具"
+                tool_names = self._skills.get(skill_name, {}).get("tool_names", [])
+                if tool_names:
+                    header = header.rstrip() + f"\n\n工具名: `{'`, `'.join(tool_names)}`"
+                self._header_cache[skill_name] = header
             headers[skill_name] = self._header_cache[skill_name]
         return headers
 

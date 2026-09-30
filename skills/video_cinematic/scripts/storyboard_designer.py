@@ -1,7 +1,7 @@
 """
 storyboard_designer - 电影分镜脚本设计模块
 
-使用 LLM（Anthropic Messages 协议）将用户意图拆解为结构化电影分镜。
+使用 LLM 将用户意图拆解为结构化电影分镜，支持 Anthropic / OpenAI 双协议。
 """
 import json
 import re
@@ -226,9 +226,10 @@ def call_llm_design_storyboard(
     model: str = "",
     max_tokens: int = 8192,
     timeout: int = 120,
+    protocol: str = "anthropic",
 ) -> dict:
     """
-    调用 LLM（Anthropic Messages 协议）设计电影分镜脚本。
+    调用 LLM（支持 Anthropic Messages / OpenAI Chat Completions 双协议）设计电影分镜脚本。
 
     参数:
         user_intent: 用户视频意图描述
@@ -240,6 +241,7 @@ def call_llm_design_storyboard(
         model: LLM 模型名称
         max_tokens: 最大输出 tokens
         timeout: 请求超时（秒）
+        protocol: "anthropic" 或 "openai"
 
     返回:
         结构化分镜脚本 dict
@@ -249,12 +251,7 @@ def call_llm_design_storyboard(
     if not base_url or not api_key or not model:
         raise ValueError("LLM 配置不完整: 需要 base_url, api_key, model")
 
-    # 构建 Anthropic Messages API URL
-    if "/v1" not in base_url:
-        api_url = f"{base_url.rstrip('/')}/v1/messages"
-    else:
-        api_url = f"{base_url.rstrip('/')}/messages"
-
+    base_url = base_url.rstrip("/")
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
@@ -269,14 +266,27 @@ def call_llm_design_storyboard(
     if scene_count:
         user_msg += f"分镜数量：{scene_count} 个\n"
 
-    payload = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "system": CINEMATIC_STORYBOARD_PROMPT,
-        "messages": [
-            {"role": "user", "content": user_msg},
-        ],
-    }
+    if protocol == "openai":
+        api_url = f"{base_url}/chat/completions" if "/v1" in base_url else f"{base_url}/v1/chat/completions"
+        payload = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": [
+                {"role": "system", "content": CINEMATIC_STORYBOARD_PROMPT},
+                {"role": "user", "content": user_msg},
+            ],
+        }
+    else:
+        api_url = f"{base_url}/messages" if "/v1" in base_url else f"{base_url}/v1/messages"
+        headers["anthropic-version"] = "2023-06-01"
+        payload = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": CINEMATIC_STORYBOARD_PROMPT,
+            "messages": [
+                {"role": "user", "content": user_msg},
+            ],
+        }
 
     try:
         with httpx.Client(timeout=timeout) as client:
@@ -289,14 +299,18 @@ def call_llm_design_storyboard(
         raise RuntimeError(f"LLM API 请求失败: {e}")
 
     # 提取响应文本
-    content_blocks = data.get("content", [])
-    response_text = ""
-    for block in content_blocks:
-        if isinstance(block, dict):
-            if block.get("type") == "text":
-                response_text += block.get("text", "")
-            elif block.get("type") == "content":
-                response_text += str(block.get("text", ""))
+    if protocol == "openai":
+        choices = data.get("choices", [])
+        response_text = choices[0].get("message", {}).get("content", "") if choices else ""
+    else:
+        content_blocks = data.get("content", [])
+        response_text = ""
+        for block in content_blocks:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    response_text += block.get("text", "")
+                elif block.get("type") == "content":
+                    response_text += str(block.get("text", ""))
 
     if not response_text:
         raise RuntimeError(f"LLM 响应中未找到文本内容。响应 keys: {list(data.keys())}")

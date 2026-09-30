@@ -32,6 +32,28 @@ def _get_sigma_history_path() -> Path:
 
 def _ensure_sigma_memory_dir():
     SIGMA_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
+
+def _resolve_opendesign_llm_config(config: dict, skill_keys: dict) -> dict:
+    """根据 skill_keys.opendesignLlmId 从 config.llms 复用 LLM 配置。
+
+    返回空 dict 表示未配置（opendesign 将回退主 LLM）。
+    匹配规则：id / name / model 任一相等即可。
+    """
+    llm_id = (skill_keys.get("opendesignLlmId") or "").strip()
+    if not llm_id:
+        return {}
+    for llm in (config.get("llms") or []):
+        if not isinstance(llm, dict):
+            continue
+        if llm.get("id") == llm_id or llm.get("name") == llm_id or llm.get("model") == llm_id:
+            return {
+                "base_url": llm.get("baseUrl", ""),
+                "api_key": llm.get("apiKey", ""),
+                "model": llm.get("model", ""),
+                "protocol": llm.get("protocol", "anthropic"),
+            }
+    return {}
+
 from context_manager import SessionState, ContextTracker, apply_model_specific_params
 from tool_loop import ToolLoop, resolve_questionnaire, resolve_tool_timeout
 from file_watcher import get_watcher
@@ -391,6 +413,70 @@ async def test_llm(request: Request):
         return {"success": False, "error": str(e)}
 
 
+@app.post("/api/model-info")
+async def model_info(request: Request):
+    """获取模型上下文大小（优先从 API 获取，本地映射表仅作 fallback）"""
+    import httpx
+    body = await request.json()
+    base_url = (body.get("baseUrl") or "").rstrip("/")
+    api_key = body.get("apiKey") or ""
+    model = body.get("model") or ""
+    protocol = body.get("protocol") or "anthropic"
+
+    if not base_url or not api_key or not model:
+        return {"success": False, "error": "Missing baseUrl, apiKey, or model"}
+
+    # 优先尝试从 API 获取（大多数现代 API 都支持 /models 端点）
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            if protocol == "openai":
+                # OpenAI 协议：尝试 /models 端点
+                request_url = f"{base_url}/v1/models/{model}" if "/v1" not in base_url else f"{base_url}/models/{model}"
+                log.info(f"[ModelInfo] 尝试 OpenAI API: {request_url}")
+                resp = await client.get(
+                    request_url,
+                    headers={"Authorization": f"Bearer {api_key}"},
+                )
+                log.info(f"[ModelInfo] OpenAI API 响应: {resp.status_code}")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    log.info(f"[ModelInfo] OpenAI API 数据: {data}")
+                    # 尝试从响应中提取上下文大小
+                    context_size = data.get("context_window") or data.get("max_tokens") or data.get("context_length")
+                    if context_size:
+                        return {"success": True, "contextSize": int(context_size), "source": "api"}
+            else:
+                # Anthropic 协议：尝试 /models 端点（如果存在）
+                request_url = f"{base_url}/v1/models/{model}" if "/v1" not in base_url else f"{base_url}/models/{model}"
+                log.info(f"[ModelInfo] 尝试 Anthropic API: {request_url}")
+                resp = await client.get(
+                    request_url,
+                    headers={"Authorization": f"Bearer {api_key}", "anthropic-version": "2023-06-01"},
+                )
+                log.info(f"[ModelInfo] Anthropic API 响应: {resp.status_code}")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    log.info(f"[ModelInfo] Anthropic API 数据: {data}")
+                    context_size = data.get("context_window") or data.get("max_tokens")
+                    if context_size:
+                        return {"success": True, "contextSize": int(context_size), "source": "api"}
+    except Exception as e:
+        log.warning(f"[ModelInfo] API 获取失败: {e}")
+
+    # API 获取失败，尝试本地映射表（仅作为 fallback）
+    from context_manager import get_context_size, DEFAULT_CONTEXT_SIZE
+    local_size = get_context_size(model)
+
+    # 如果本地映射表返回的不是默认值，说明找到了
+    if local_size != DEFAULT_CONTEXT_SIZE:
+        log.info(f"[ModelInfo] 本地映射表命中: {model} -> {local_size}")
+        return {"success": True, "contextSize": local_size, "source": "local"}
+    
+    # 都没找到，返回默认值
+    log.info(f"[ModelInfo] 未找到模型 {model}，使用默认值 {local_size}")
+    return {"success": True, "contextSize": local_size, "source": "default"}
+
+
 @app.post("/api/llm-balance")
 async def llm_balance(request: Request):
     """查询 LLM 供应商账户实时余额或用量。支持 DeepSeek、Kimi Code、MiniMax。
@@ -540,6 +626,62 @@ async def _query_volc_balance(client: httpx.AsyncClient, ak: str, sk: str):
     }
 
 
+@app.post("/api/test-opendesign")
+async def test_opendesign(request: Request):
+    """测试 opendesign 专用 LLM 连接（从 llms 列表选中的模型）。"""
+    import httpx
+
+    body = await request.json()
+    base_url = (body.get("baseUrl") or "").rstrip("/")
+    api_key = body.get("apiKey") or ""
+    model = body.get("model") or ""
+    protocol = body.get("protocol") or "anthropic"
+
+    if not base_url or not api_key or not model:
+        return {"success": True, "text": "（未选择，将跟随主 LLM）"}
+
+    log.info(f"[TestOpenDesign] 测试: model={model}, base_url={base_url[:60]}, protocol={protocol}")
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            if protocol == "anthropic":
+                payload = {"model": model, "max_tokens": 50, "messages": [{"role": "user", "content": "Hi"}]}
+                apply_model_specific_params(payload, model, protocol)
+                request_url = f"{base_url}/v1/messages" if "/v1" not in base_url else f"{base_url}/messages"
+                resp = await client.post(
+                    request_url,
+                    headers={"Authorization": f"Bearer {api_key}", "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                    json=payload,
+                )
+            else:
+                payload = {"model": model, "max_tokens": 50, "messages": [{"role": "user", "content": "Hi"}]}
+                apply_model_specific_params(payload, model, protocol)
+                request_url = f"{base_url}/v1/chat/completions" if "/v1" not in base_url else f"{base_url}/chat/completions"
+                resp = await client.post(
+                    request_url,
+                    headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
+                    json=payload,
+                )
+
+            if resp.status_code != 200:
+                error_text = await resp.aread()
+                return {"success": False, "error": f"HTTP {resp.status_code}: {error_text.decode()[:200]}"}
+
+            data = resp.json()
+            if protocol == "anthropic":
+                content = data.get("content", [])
+                text = "".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+            else:
+                choices = data.get("choices", [])
+                text = choices[0].get("message", {}).get("content", "") if choices else ""
+
+            if text.strip():
+                return {"success": True, "text": text.strip()}
+            return {"success": False, "error": "返回内容为空"}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
 @app.post("/api/test-music")
 async def test_music(request: Request):
     """测试 MiniMax 音乐模型是否可调用，不保存生成音频。"""
@@ -574,60 +716,6 @@ async def test_music(request: Request):
         return {"success": False, "error": f"{model}: request timeout"}
     except Exception as error:
         return {"success": False, "error": f"{model}: {error}"}
-
-
-@app.post("/api/test-vision")
-async def test_vision(request: Request):
-    """测试 Vision API 连接，发送简单请求验证 Key 是否有效"""
-    import httpx
-    body = await request.json()
-    api_key = body.get("apiKey") or ""
-    model = body.get("model") or "kimi-for-coding"
-    base_url = (body.get("baseUrl") or "https://api.moonshot.cn/anthropic").rstrip("/")
-
-    # debug: 打印实际请求参数
-    full_url = f"{base_url}/v1/messages"
-    print(f"[test-vision] URL: {full_url}")
-    print(f"[test-vision] Model: {model}")
-    print(f"[test-vision] Key prefix: {api_key[:12]}...")
-
-    if not api_key:
-        return {"success": False, "error": "Missing API Key"}
-    if not base_url:
-        return {"success": False, "error": "Missing Base URL"}
-    if not model:
-        return {"success": False, "error": "Missing Model"}
-
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            payload = {
-                "model": model,
-                "max_tokens": 50,
-                "messages": [{"role": "user", "content": "Hi"}],
-            }
-            apply_model_specific_params(payload, model, "anthropic")
-            resp = await client.post(
-                full_url,
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json=payload,
-            )
-            print(f"[test-vision] Status: {resp.status_code}")
-            if resp.status_code != 200:
-                error_text = await resp.aread()
-                print(f"[test-vision] Error body: {error_text.decode()[:300]}")
-                return {"success": False, "error": f"HTTP {resp.status_code}: {error_text.decode()[:200]}"}
-            data = resp.json()
-            content = data.get("content", [])
-            text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
-            print(f"[test-vision] Response: {text[:100]}")
-            return {"success": True} if text.strip() else {"success": False, "error": "Vision API returned empty response"}
-    except Exception as e:
-        print(f"[test-vision] Exception: {e}")
-        return {"success": False, "error": str(e)}
 
 
 def _check_mail163_smtp(address: str, auth_code: str, host: str, port: int):
@@ -780,6 +868,69 @@ async def test_wecom_email(request: Request):
 
     if smtp_ok and imap_ok:
         return {"success": True, "detail": "SMTP 与 IMAP 均连接成功，凭据有效"}
+    if smtp_ok:
+        return {"success": True, "detail": f"SMTP 连接成功，但 IMAP 失败: {imap_err}"}
+    if imap_ok:
+        return {"success": True, "detail": f"IMAP 连接成功，但 SMTP 失败: {smtp_err}"}
+    return {"success": False, "error": f"SMTP 与 IMAP 均连接失败。SMTP: {smtp_err}。IMAP: {imap_err}"}
+
+
+def _check_gmail_smtp(address: str, auth_code: str, host: str, port: int):
+    """同步测试 Gmail SMTP 登录，返回 (ok, error)。"""
+    import smtplib
+    try:
+        server = smtplib.SMTP_SSL(host, port, timeout=15)
+        server.login(address, auth_code)
+        server.quit()
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+def _check_gmail_imap(address: str, auth_code: str, host: str, port: int):
+    """同步测试 Gmail IMAP 登录，返回 (ok, error)。"""
+    import imaplib
+    try:
+        imap = imaplib.IMAP4_SSL(host, port)
+        imap.login(address, auth_code)
+        typ, _ = imap.select("INBOX", readonly=True)
+        imap.logout()
+        if typ != "OK":
+            return False, "登录成功但打开收件箱失败"
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+@app.post("/api/test-gmail")
+async def test_gmail(request: Request):
+    """测试 Gmail 连接，验证应用专用密码及 SMTP/IMAP 服务是否可用"""
+    body = await request.json()
+    address = body.get("address") or ""
+    auth_code = body.get("authCode") or ""
+    smtp_host = body.get("smtpHost") or "smtp.gmail.com"
+    imap_host = body.get("imapHost") or "imap.gmail.com"
+
+    def _to_port(value, default: int) -> int:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    smtp_port = _to_port(body.get("smtpPort"), 465)
+    imap_port = _to_port(body.get("imapPort"), 993)
+
+    if not address or not auth_code:
+        return {"success": False, "error": "缺少邮箱地址或应用专用密码"}
+
+    smtp_ok, smtp_err = await asyncio.to_thread(_check_gmail_smtp, address, auth_code, smtp_host, smtp_port)
+    imap_ok, imap_err = await asyncio.to_thread(_check_gmail_imap, address, auth_code, imap_host, imap_port)
+
+    print(f"[test-gmail] SMTP ok={smtp_ok} err={smtp_err}")
+    print(f"[test-gmail] IMAP ok={imap_ok} err={imap_err}")
+
+    if smtp_ok and imap_ok:
+        return {"success": True, "detail": "SMTP 与 IMAP 均连接成功，应用专用密码有效"}
     if smtp_ok:
         return {"success": True, "detail": f"SMTP 连接成功，但 IMAP 失败: {imap_err}"}
     if imap_ok:
@@ -1146,9 +1297,8 @@ async def _execute_custom_agent_chat(
         music_gen_base_url=skill_keys.get("musicGenBaseUrl", "https://api.minimaxi.com/v1"),
         music_gen_model=skill_keys.get("musicGenModel", "music-3.0"),
         minimax_video_api_key=skill_keys.get("minimaxVideoApiKey", ""),
-        vision_api_key=skill_keys.get("visionApiKey", ""),
-        vision_model=skill_keys.get("visionModel", "kimi-for-coding"),
-        vision_base_url=skill_keys.get("visionBaseUrl", "https://api.moonshot.cn/anthropic"),
+        doubao_voice_api_key=skill_keys.get("doubaoVoiceApiKey", ""),
+        opendesign_llm_config=_resolve_opendesign_llm_config(config, skill_keys),
         wechat_appid=skill_keys.get("wechatAppId", ""),
         wechat_appsecret=skill_keys.get("wechatAppSecret", ""),
         wechat_relay_url=skill_keys.get("wechatRelayUrl", ""),
@@ -1168,11 +1318,19 @@ async def _execute_custom_agent_chat(
         wecom_email_smtp_port=skill_keys.get("wecomEmailSmtpPort", ""),
         wecom_email_imap_host=skill_keys.get("wecomEmailImapHost", ""),
         wecom_email_imap_port=skill_keys.get("wecomEmailImapPort", ""),
+        gmail_address=skill_keys.get("gmailAddress", ""),
+        gmail_auth_code=skill_keys.get("gmailAuthCode", ""),
+        gmail_smtp_host=skill_keys.get("gmailSmtpHost", ""),
+        gmail_smtp_port=skill_keys.get("gmailSmtpPort", ""),
+        gmail_imap_host=skill_keys.get("gmailImapHost", ""),
+        gmail_imap_port=skill_keys.get("gmailImapPort", ""),
         llm_config={
             "base_url": base_url,
             "api_key": api_key,
             "model": model,
             "protocol": protocol,
+            "provider": provider,
+            "thinking": config.get("thinking") or "adaptive",
         },
         todo_manager=todo_manager,
         backup_enabled=backup_enabled,
@@ -1241,12 +1399,15 @@ async def _execute_custom_agent_chat(
                     "status": "thinking",
                 })
 
-                # 构建工具 schema（包含 todo_write 等基础工具）
+                # 构建工具 schema（按协议分流；包含 todo_write 等基础工具）
                 tools_schema = []
                 for tool_name in effective_tools:
                     try:
                         inst = skill_manager._get_instance(tool_name)
-                        tools_schema.append(inst.to_anthropic_tool())
+                        if protocol == "openai":
+                            tools_schema.append(inst.to_openai_tool())
+                        else:
+                            tools_schema.append(inst.to_anthropic_tool())
                     except Exception:
                         pass
 
@@ -1292,8 +1453,9 @@ async def _execute_custom_agent_chat(
                     }
                     if tools_schema:
                         body["tools"] = tools_schema
+                    openai_url = f"{base_url}/v1/chat/completions" if "/v1" not in base_url else f"{base_url}/chat/completions"
                     resp = await client.post(
-                        f"{base_url}/chat/completions",
+                        openai_url,
                         headers={
                             "Authorization": f"Bearer {api_key}",
                             "Content-Type": "application/json",
@@ -1412,8 +1574,9 @@ async def _execute_custom_agent_chat(
                             "max_tokens": 4096,
                             "messages": _convert_agent_messages_openai(messages),
                         }
+                        summary_openai_url = f"{base_url}/v1/chat/completions" if "/v1" not in base_url else f"{base_url}/chat/completions"
                         summary_resp = await client.post(
-                            f"{base_url}/chat/completions",
+                            summary_openai_url,
                             headers={
                                 "Authorization": f"Bearer {api_key}",
                                 "Content-Type": "application/json",
@@ -1548,19 +1711,30 @@ def _convert_agent_messages_anthropic(messages: list) -> list:
 
 
 def _convert_agent_messages_openai(messages: list) -> list:
-    """将内部消息格式转换为 OpenAI API 格式"""
+    """将内部消息格式转换为 OpenAI API 格式。
+
+    关键约束：
+    - 每个 tool_result 必须独立成一条 role=tool 消息，且必须带 tool_call_id
+    - assistant 消息若有 tool_calls，content 可为空字符串（OpenAI 接受 null/空串）
+    """
     result = []
     for m in messages:
         role = m["role"]
         if role == "assistant":
             entry = {"role": "assistant", "content": m.get("content") or ""}
             if m.get("tool_calls"):
+                # 内部存储的 tool_calls 已是 OpenAI 格式 [{id, type, function:{name, arguments}}]
                 entry["tool_calls"] = m["tool_calls"]
             result.append(entry)
         elif role == "user" and isinstance(m.get("content"), list):
+            # 每个 tool_result 独立一条 role=tool 消息，必须带 tool_call_id
             for item in m["content"]:
                 if isinstance(item, dict) and item.get("type") == "tool_result":
-                    result.append({"role": "tool", "content": item["content"]})
+                    result.append({
+                        "role": "tool",
+                        "tool_call_id": item.get("tool_use_id", ""),
+                        "content": item.get("content", ""),
+                    })
         else:
             result.append({"role": role, "content": str(m.get("content", ""))})
     return result
@@ -1598,7 +1772,7 @@ async def _execute_chat(
     provider = config.get("provider") or "generic"
     llm_params = {
         "provider": provider,
-        "thinking": config.get("thinking") or ("enabled" if provider == "minimax" else None),
+        "thinking": config.get("thinking") or "adaptive",
         "context_size": config.get("contextSize") or (1_000_000 if provider == "minimax" else None),
         "max_tokens": config.get("maxTokens") or (32768 if provider == "minimax" else None),
         "temperature": config.get("temperature") if config.get("temperature") is not None else (1.0 if provider == "minimax" else None),
@@ -1618,6 +1792,8 @@ async def _execute_chat(
         model=model,
         protocol=protocol,
         active=True,
+        provider=provider,
+        thinking=config.get("thinking") or "adaptive",
     )
     # 推送最新配置到已连接的浏览器扩展
     asyncio.create_task(bridge_manager._push_llm_configs())
@@ -1625,18 +1801,6 @@ async def _execute_chat(
     # 同步 skillKeys，供浏览器扩展复用主程序完整配置
     skill_keys = config.get("skillKeys", {}) or {}
     bridge_manager.register_skill_keys(skill_keys)
-
-    # ── 同步 vision 配置，供 network_bridge analyze_screenshot 使用 ──
-    vision_api_key = skill_keys.get("visionApiKey", "")
-    vision_model = skill_keys.get("visionModel", "")
-    vision_base_url = skill_keys.get("visionBaseUrl", "")
-    if vision_api_key:
-        bridge_manager.register_vision_config(
-            api_key=vision_api_key,
-            model=vision_model or "kimi-for-coding",
-            base_url=vision_base_url or "https://api.moonshot.cn/anthropic",
-        )
-        log.info(f"[Vision] 已同步 vision 配置到 Bridge: model={vision_model or 'kimi-for-coding'}")
 
     # ── 同步自定义 Agent：从每次请求的 config 中读取并同步到内存 ──
     custom_agents_raw = config.get("customAgents", [])
@@ -1707,9 +1871,8 @@ async def _execute_chat(
         music_gen_base_url=skill_keys.get("musicGenBaseUrl", "https://api.minimaxi.com/v1"),
         music_gen_model=skill_keys.get("musicGenModel", "music-3.0"),
         minimax_video_api_key=skill_keys.get("minimaxVideoApiKey", ""),
-        vision_api_key=skill_keys.get("visionApiKey", ""),
-        vision_model=skill_keys.get("visionModel", "kimi-for-coding"),
-        vision_base_url=skill_keys.get("visionBaseUrl", "https://api.moonshot.cn/anthropic"),
+        doubao_voice_api_key=skill_keys.get("doubaoVoiceApiKey", ""),
+        opendesign_llm_config=_resolve_opendesign_llm_config(config, skill_keys),
         wechat_appid=skill_keys.get("wechatAppId", ""),
         wechat_appsecret=skill_keys.get("wechatAppSecret", ""),
         wechat_relay_url=skill_keys.get("wechatRelayUrl", ""),
@@ -1729,11 +1892,19 @@ async def _execute_chat(
         wecom_email_smtp_port=skill_keys.get("wecomEmailSmtpPort", ""),
         wecom_email_imap_host=skill_keys.get("wecomEmailImapHost", ""),
         wecom_email_imap_port=skill_keys.get("wecomEmailImapPort", ""),
+        gmail_address=skill_keys.get("gmailAddress", ""),
+        gmail_auth_code=skill_keys.get("gmailAuthCode", ""),
+        gmail_smtp_host=skill_keys.get("gmailSmtpHost", ""),
+        gmail_smtp_port=skill_keys.get("gmailSmtpPort", ""),
+        gmail_imap_host=skill_keys.get("gmailImapHost", ""),
+        gmail_imap_port=skill_keys.get("gmailImapPort", ""),
         llm_config={
             "base_url": base_url,
             "api_key": api_key,
             "model": model,
             "protocol": config.get("protocol", "anthropic"),
+            "provider": provider,
+            "thinking": config.get("thinking") or "adaptive",
         },
         todo_manager=todo_manager,
         backup_enabled=backup_enabled,
@@ -1813,6 +1984,10 @@ async def _execute_chat(
         except Exception as e:
             log.error(f"[Chat Error] {e}")
         finally:
+            # 任务被中断/取消时也要保存当前上下文，避免下一次任务丢失中断后的内容
+            if tool_loop.messages:
+                tool_loop._strip_dangling_tool_use(tool_loop.messages)
+                _session_messages[session_id] = tool_loop.messages
             await queue.put({"type": "chat_complete"})
             log.info("[Chat Complete]")
             _cancel_events.pop(session_id, None)
@@ -1905,6 +2080,8 @@ async def panel_chat(request: Request):
         "apiKey": cfg["apiKey"],
         "model": cfg["model"],
         "protocol": cfg.get("protocol", "anthropic"),
+        "provider": cfg.get("provider", "generic"),
+        "thinking": cfg.get("thinking", "adaptive"),
     }
 
     # 注入浏览器标签页上下文 + 插件专用强制规则
@@ -2045,6 +2222,8 @@ async def network_bridge_sync_configs(request: Request):
         api_key = entry.get("apiKey", "")
         model = entry.get("model", "")
         protocol = entry.get("protocol", "anthropic")
+        provider = entry.get("provider", "generic")
+        thinking = entry.get("thinking", "adaptive")
         if name and api_key and base_url:
             bridge_manager.register_llm_config(
                 name=name,
@@ -2052,6 +2231,8 @@ async def network_bridge_sync_configs(request: Request):
                 api_key=api_key,
                 model=model,
                 protocol=protocol,
+                provider=provider,
+                thinking=thinking,
             )
             count += 1
 

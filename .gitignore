@@ -16,6 +16,7 @@ venv/
 # IDE
 .idea/
 .vscode/
+*.code-workspace
 
 # Build output
 dist/
@@ -43,3 +44,29 @@ page_*.ppage
 _dump_*.py
 _inspect_*.txt
 _panel_*.txt
+
+# WeChat research artifacts (local experiments, not part of the program)
+wx_*.py
+wechat_key_scan_demo.py
+wechat-cli原理深度解析.md
+key_info_copy.db
+
+# Local / personal docs
+Gmail第三方客户端配置信息.md
+未完待办.md
+Sigma图片阅读性能分析.md
+VISION_SUPPORT.md
+debug-*.md
+视频制作要点/
+
+# Local tooling & scratch output
+.trae/
+.dbg/
+test_output/
+video_work/
+_tmp_tracks_test.py
+skill_routing_e2e.py
+
+# Large reference media
+*.pdf
+长美产品介绍_视频TEMP_MPY_wvf_snd.mp4

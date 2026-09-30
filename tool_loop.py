@@ -20,7 +20,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import httpx
-from skills.manager import SkillManager, ALL_SKILLS
+from skills.manager import SkillManager, ALL_SKILLS, _norm_path
 from skills.project_memory import _get_overview_path, _get_history_path
 from skills.todo_manager import TodoManager
 from custom_agent_manager import custom_agent_manager, is_agent_tool
@@ -180,9 +180,15 @@ class ToolLoop:
             else None
         )
         if protocol == "openai":
-            self.messages_url = f"{self.base_url}/chat/completions"
+            self.messages_url = (
+                f"{self.base_url}/chat/completions" if "/v1" in self.base_url
+                else f"{self.base_url}/v1/chat/completions"
+            )
         else:
-            self.messages_url = f"{self.base_url}/v1/messages"
+            self.messages_url = (
+                f"{self.base_url}/messages" if "/v1" in self.base_url
+                else f"{self.base_url}/v1/messages"
+            )
         self.session_id = session_id
         self.tool_timeout = tool_timeout  # 工具执行超时秒数，默认 300s
 
@@ -349,13 +355,17 @@ class ToolLoop:
         except Exception:
             return ""
 
-    async def run(self, user_message: str, queue: asyncio.Queue,
+    async def run(self, user_message: str | list, queue: asyncio.Queue,
                   existing_messages: list[dict] | None = None,
                   cancel_event: asyncio.Event | None = None):
         """
         运行 tool use 循环，所有 SSE 事件通过 queue 发出。
         如果提供 existing_messages，则从已有对话历史继续。
         cancel_event 用于外部取消任务。
+        
+        user_message 可以是:
+          - str: 纯文本消息
+          - list: anthropic/openai 格式的 content 块 (包含文本和图片)
 
         事件类型:
           - {"type": "text", "content": "...", "contentType": "text"|"thinking"}
@@ -371,14 +381,18 @@ class ToolLoop:
         # 从已有对话历史继续，或从新对话开始
         messages = existing_messages.copy() if existing_messages else []
         messages.append({"role": "user", "content": user_message})
+        # 让 self.messages 与 messages 指向同一列表，确保任意 return 路径（含取消）都能保存最新上下文
+        self.messages = messages
         # Build tools: SkillManager pool + CustomAgentManager pool (separate pools)
         tools = self.skill_manager.get_openai_tools() if self.protocol == "openai" else self.skill_manager.get_anthropic_tools()
         agent_tools = custom_agent_manager.get_agent_tools_openai() if self.protocol == "openai" else custom_agent_manager.get_agent_tools_anthropic()
         tools.extend(agent_tools)
         last_had_tool_calls = False
 
+        # 提取纯文本用于日志（如果是 content 块则取第一个 text）
+        log_message = user_message if isinstance(user_message, str) else next((b["text"] for b in user_message if b.get("type") == "text"), "")
         log.info(f"[Chat Start] model={self.model}, max_iterations={self.max_iterations}")
-        log.debug(f"[User Message] {user_message[:200]}...")
+        log.debug(f"[User Message] {log_message[:200]}...")
 
         # ── Pre-loop: 将未完成的 TodoList 注入上下文 ──
         self._inject_unfinished_todos(messages, queue)
@@ -391,6 +405,7 @@ class ToolLoop:
             # ── 检查取消信号 ──
             if cancel_event and cancel_event.is_set():
                 log.info("[Cancelled] User stopped task")
+                self._strip_dangling_tool_use(messages)
                 return
 
             # ── 检查后台任务完成情况，注入到上下文 ──
@@ -456,6 +471,7 @@ class ToolLoop:
                         all_results.append({
                             "id": normal_tools[i]["id"],
                             "name": normal_tools[i]["name"],
+                            "success": False,
                             "content": f"Tool execution error: {result}",
                         })
                     else:
@@ -484,7 +500,7 @@ class ToolLoop:
                         },
                     }, ensure_ascii=False)
                     log.warning(f"[AskUser] 参数校验失败: {validation_error}")
-                    all_results.append({"id": tc["id"], "name": "ask_user", "content": result_content})
+                    all_results.append({"id": tc["id"], "name": "ask_user", "success": False, "content": result_content})
                     await queue.put({
                         "type": "tool_start",
                         "tool_name": "ask_user",
@@ -554,6 +570,7 @@ class ToolLoop:
                 all_results.append({
                     "id": tc["id"],
                     "name": "ask_user",
+                    "success": True,
                     "content": result_content,
                 })
 
@@ -606,12 +623,17 @@ class ToolLoop:
             await self._detect_and_push_file_diffs(queue)
 
             # ── 连续相同错误检测 ──
+            # 同一工具连续返回 success=False 且错误消息一致时累计；达到 3 次则中断任务，避免死循环
             consecutive_error_key = None
             for tr in all_results:
+                if tr.get("success") is not False:
+                    continue
                 err = tr.get("content", "")
-                if "参数校验失败" in err or "缺少必填参数" in err:
-                    consecutive_error_key = f"{tr['name']}:{err[:80]}"
-                    break
+                if not err:
+                    continue
+                # 用「工具名 + 错误消息前 80 字符」作为指纹
+                consecutive_error_key = f"{tr['name']}:{err[:80]}"
+                break
             if consecutive_error_key:
                 if consecutive_error_key == self._last_consecutive_error:
                     self._consecutive_error_count += 1
@@ -647,6 +669,24 @@ class ToolLoop:
             await self._call_llm(messages, [], queue)
 
         self.messages = messages
+
+    @staticmethod
+    def _strip_dangling_tool_use(messages: list) -> None:
+        """原地移除末尾因取消而悬挂的 assistant tool_use 消息（缺少配对 tool_result）。
+
+        取消发生在工具执行中时，assistant 已写入 tool_use，但对应 tool_result 尚未追加，
+        若直接保留会导致下次 LLM 调用报错（tool_use 缺少 tool_result 配对）。
+        """
+        while messages:
+            last = messages[-1]
+            if last.get("role") == "assistant" and isinstance(last.get("content"), list):
+                if any(
+                    isinstance(b, dict) and b.get("type") == "tool_use"
+                    for b in last["content"]
+                ):
+                    messages.pop()
+                    continue
+            break
 
     # ─── 上下文压缩 ───
 
@@ -1029,7 +1069,27 @@ class ToolLoop:
                 async with client.stream("POST", self.messages_url, json=payload, headers=headers) as resp:
                     if resp.status_code != 200:
                         error_text = await resp.aread()
-                        await queue.put({"type": "error", "message": f"API Error {resp.status_code}: {error_text.decode()}"})
+                        error_msg = error_text.decode()
+                        
+                        # 检测是否为视觉能力不支持的错误
+                        vision_keywords = ["image", "vision", "visual", "multimodal", "base64", "image_url", "media_type"]
+                        has_images = any(
+                            isinstance(m.get("content"), list) and 
+                            any(b.get("type") in ("image", "image_url") for b in m.get("content", []))
+                            for m in messages
+                        )
+                        
+                        if has_images and any(kw in error_msg.lower() for kw in vision_keywords):
+                            friendly_msg = (
+                                f"API Error {resp.status_code}: 当前模型不支持直接读取图片。\n\n"
+                                "解决方案：\n"
+                                "1. 换用支持视觉的模型（如 deepseek-flash、deepseek-v4-pro、claude-sonnet-4、gpt-4o）\n"
+                                "2. 或配置独立的 Vision API（Settings → Skill Keys → PDF Vision OCR），然后使用 read_image skill\n\n"
+                                f"原始错误: {error_msg}"
+                            )
+                            await queue.put({"type": "error", "message": friendly_msg})
+                        else:
+                            await queue.put({"type": "error", "message": f"API Error {resp.status_code}: {error_msg}"})
                         return None
 
                     blocks: dict[int, dict] = {}
@@ -1209,7 +1269,27 @@ class ToolLoop:
                 async with client.stream("POST", self.messages_url, json=payload, headers=headers) as resp:
                     if resp.status_code != 200:
                         error_text = await resp.aread()
-                        await queue.put({"type": "error", "message": f"API Error {resp.status_code}: {error_text.decode()}"})
+                        error_msg = error_text.decode()
+                        
+                        # 检测是否为视觉能力不支持的错误
+                        vision_keywords = ["image", "vision", "visual", "multimodal", "base64", "image_url", "media_type"]
+                        has_images = any(
+                            isinstance(m.get("content"), list) and 
+                            any(b.get("type") in ("image", "image_url") for b in m.get("content", []))
+                            for m in messages
+                        )
+                        
+                        if has_images and any(kw in error_msg.lower() for kw in vision_keywords):
+                            friendly_msg = (
+                                f"API Error {resp.status_code}: 当前模型不支持直接读取图片。\n\n"
+                                "解决方案：\n"
+                                "1. 换用支持视觉的模型（如 deepseek-flash、deepseek-v4-pro、claude-sonnet-4、gpt-4o）\n"
+                                "2. 或配置独立的 Vision API（Settings → Skill Keys → PDF Vision OCR），然后使用 read_image skill\n\n"
+                                f"原始错误: {error_msg}"
+                            )
+                            await queue.put({"type": "error", "message": friendly_msg})
+                        else:
+                            await queue.put({"type": "error", "message": f"API Error {resp.status_code}: {error_msg}"})
                         return None
 
                     tool_calls: list[dict] = []
@@ -1297,7 +1377,13 @@ class ToolLoop:
             return None
 
     def _convert_to_openai_messages(self, messages: list) -> list:
-        """将内部消息格式转为 OpenAI Chat Completions 格式。"""
+        """将内部消息格式转为 OpenAI Chat Completions 格式。
+
+        关键约束：
+        - assistant 消息若携带 tool_calls，content 可为 None；但同一轮的文本内容必须保留
+        - role=tool 消息必须携带 tool_call_id 且每个 tool_call 独立一条
+        - user 消息含多模态内容时保持 list 结构
+        """
         result = []
         # system prompt 作为第一条 system 消息
         result.append({"role": "system", "content": self.system_prompt})
@@ -1305,38 +1391,91 @@ class ToolLoop:
             role = m["role"]
             content = m.get("content", "")
             if role == "assistant":
-                entry: dict = {"role": "assistant", "content": content if isinstance(content, str) else None}
-                # tool_calls
                 if isinstance(content, list):
-                    entry["content"] = None
-                    entry["tool_calls"] = []
+                    # 含 tool_use 的 assistant 消息：拆出文本与 tool_calls
+                    text_parts = []
+                    tool_calls = []
                     for block in content:
-                        if isinstance(block, dict) and block.get("type") == "tool_use":
-                            entry["tool_calls"].append({
+                        if not isinstance(block, dict):
+                            continue
+                        if block.get("type") == "tool_use":
+                            tool_calls.append({
                                 "id": block["id"],
                                 "type": "function",
                                 "function": {
                                     "name": block["name"],
-                                    "arguments": json.dumps(block["input"]),
+                                    "arguments": json.dumps(block["input"], ensure_ascii=False),
                                 },
                             })
-                result.append(entry)
+                        elif block.get("type") == "text":
+                            text_parts.append(block.get("text", ""))
+                    entry: dict = {
+                        "role": "assistant",
+                        # OpenAI 规范：有 tool_calls 时 content 可为 null；这里保留文本以兼容更多实现
+                        "content": "".join(text_parts) if text_parts else None,
+                    }
+                    if tool_calls:
+                        entry["tool_calls"] = tool_calls
+                    result.append(entry)
+                else:
+                    # 纯文本 assistant 消息
+                    result.append({"role": "assistant", "content": content})
             elif role == "user" and isinstance(content, list):
-                # tool results
-                for item in content:
-                    if isinstance(item, dict) and item.get("type") == "tool_result":
-                        result.append({
-                            "role": "tool",
-                            "tool_call_id": item["tool_use_id"],
-                            "content": item["content"],
-                        })
+                # 分离 tool_result 与普通多模态 content
+                tool_results = [b for b in content if isinstance(b, dict) and b.get("type") == "tool_result"]
+                other_blocks = [b for b in content if not (isinstance(b, dict) and b.get("type") == "tool_result")]
+                # 每个 tool_result 独立一条 role=tool 消息（OpenAI 协议要求）
+                for item in tool_results:
+                    result.append({
+                        "role": "tool",
+                        "tool_call_id": item["tool_use_id"],
+                        "content": item["content"] if isinstance(item["content"], str) else json.dumps(item["content"], ensure_ascii=False),
+                    })
+                # 其余 content（文本/图片）保留为 user 消息
+                if other_blocks:
+                    # 转换为 OpenAI 多模态格式
+                    openai_content = []
+                    for block in other_blocks:
+                        if not isinstance(block, dict):
+                            openai_content.append({"type": "text", "text": str(block)})
+                            continue
+                        btype = block.get("type")
+                        if btype == "text":
+                            openai_content.append({"type": "text", "text": block.get("text", "")})
+                        elif btype == "image":
+                            # Anthropic image 格式转 OpenAI image_url 格式
+                            source = block.get("source", {})
+                            if source.get("type") == "base64":
+                                data_url = f"data:{source.get('media_type', 'image/jpeg')};base64,{source.get('data', '')}"
+                                openai_content.append({"type": "image_url", "image_url": {"url": data_url}})
+                        elif btype == "image_url":
+                            openai_content.append(block)
+                    if openai_content:
+                        result.append({"role": "user", "content": openai_content})
             elif role == "user":
                 result.append({"role": "user", "content": str(content)})
         return result
 
+    def _guard_direct_script_call(self, command: str):
+        """通用护栏：检测 bash/sandbox 是否在直调已注册技能的 scripts 脚本。
+        命中返回提示信息 dict，否则返回 None。由 SkillManager._skill_scripts 通用判定，不硬编码技能名。"""
+        cmd = _norm_path(command or "")
+        if "python" not in cmd:
+            return None
+        index = getattr(self.skill_manager, "_skill_scripts", {})
+        for key, (label, tools) in index.items():
+            if key in cmd:
+                tool_hint = ", ".join(tools) if tools else "技能内工具"
+                msg = (
+                    f"检测到你正直接执行技能脚本「{key}」。请勿用 bash/sandbox 直接执行技能内置脚本，"
+                    f"请改用对应技能工具完成（{label} 技能可用工具：{tool_hint}）。"
+                )
+                return {"path": key, "message": msg}
+        return None
+
     async def _execute_tool(self, tool_call: dict, queue: asyncio.Queue) -> dict:
         """执行单个工具调用并发送事件（可由 asyncio.gather 并行调用）。
-        
+
         支持超时处理：超过 tool_timeout 秒后弹出选择框（继续等待/后台运行/取消）。
         后台运行的任务会在后续迭代中自动汇报结果。
         """
@@ -1346,11 +1485,25 @@ class ToolLoop:
             return {
                 "id": tool_call["id"],
                 "name": tool_call["name"],
+                "success": False,
                 "content": "用户已取消任务",
             }
 
         tool_name = tool_call["name"]
         tool_input = tool_call["input"]
+
+        # ── 通用护栏：禁止 bash/sandbox 直调技能 scripts 脚本，强制走技能工具 ──
+        if tool_name in ("bash", "sandbox_run"):
+            payload = tool_input.get("command") if tool_name == "bash" else tool_input.get("code")
+            blocked = self._guard_direct_script_call(payload)
+            if blocked:
+                log.warning(f"[script-block] 拦截 {tool_name} 直调技能脚本: {blocked['path']}")
+                return {
+                    "id": tool_call["id"],
+                    "name": tool_name,
+                    "success": False,
+                    "content": blocked["message"],
+                }
 
         # 构建 tool_start 事件，Agent 工具额外附带显示名称
         tool_start_event = {"type": "tool_start", "tool_name": tool_name, "tool_input": tool_input}
@@ -1409,10 +1562,20 @@ class ToolLoop:
 
             timeout = self.tool_timeout
             # 长耗时工具：视频生成 / PPT 转换 / 深度研究 / 子 Agent 等
-            if tool_name in ("video_auto", "video_compose"):
+            if tool_name == "video_produce":
+                # 完整流水线（旁白→画面→合成），最耗时，给足余量
+                timeout = max(timeout, 1800)
+            elif tool_name == "opendesign_video":
+                # LLM 写 HTML + hyperframes 渲染，最耗时，给足余量
+                timeout = max(timeout, 900)
+            elif tool_name == "pdoom_render":
+                # animation_painter 逐帧水彩渲染，串行/并行均较慢，给足余量
+                timeout = max(timeout, 900)
+            elif tool_name in ("video_auto", "video_compose"):
                 timeout = max(timeout, 600)
             elif tool_name in ("video_scene", "convert_pptx", "deep_research",
-                               "generate_image", "sandbox_run", "batch_read"):
+                               "generate_image", "sandbox_run", "batch_read",
+                               "doubao_tts"):
                 timeout = max(timeout, 300)
             elif tool_name in ("sub_agent", "custom_agent"):
                 timeout = max(timeout, 600)
@@ -1434,6 +1597,17 @@ class ToolLoop:
                     result = type("R", (), {
                         "success": False,
                         "content": f"{getattr(result, 'content', '')}\n\n─── 工具参数说明 ───\n{spec}",
+                        "truncated": getattr(result, "truncated", False),
+                    })()
+
+            # ── 未知工具检测：LLM 误把 skill 名当工具名调用时，自动注入匹配 skill 的 spec 帮其纠错 ──
+            if (not getattr(result, "success", False)
+                    and "未知工具" in getattr(result, "content", "")):
+                hint = self._suggest_skill_for_unknown_tool(tool_name)
+                if hint:
+                    result = type("R", (), {
+                        "success": False,
+                        "content": f"{getattr(result, 'content', '')}\n\n─── 你可能想调用的是 ───\n{hint}",
                         "truncated": getattr(result, "truncated", False),
                     })()
 
@@ -1467,8 +1641,60 @@ class ToolLoop:
         return {
             "id": tool_call["id"],
             "name": tool_name,
+            "success": success,  # 供熔断器识别失败结果
             "content": content[:80000] if len(content) > 80000 else content,  # LLM 上下文上限 80K 字符
         }
+
+    def _suggest_skill_for_unknown_tool(self, tool_name: str) -> str:
+        """
+        LLM 把 skill 名当工具名调用时，给它推荐最相似的 skill 一级摘要 + 完整 spec。
+        优先匹配同名 skill，其次按包含关系 / 字串相似度匹配。
+        """
+        sm = self.skill_manager
+        if not sm:
+            return ""
+
+        # 1. 完全同名 skill → 直接用
+        if tool_name in sm._skills:
+            header = sm.get_skill_headers().get(tool_name, "")
+            spec = sm.get_skill_spec(tool_name)
+            tools = sm._skills[tool_name].get("tool_names", [])
+            tool_hint = ", ".join(f"`{t}`" for t in tools) if tools else "(无)"
+            return f"skill: `{tool_name}` → 工具: {tool_hint}\n\n{header}\n\n---\n\n{spec}"
+
+        # 2. 字串包含 / 共同子串 → 找最相似
+        norm = tool_name.replace("_", "").replace("-", "").lower()
+        best_skill = None
+        best_score = 0
+        for skill_name, info in sm._skills.items():
+            if not info.get("tool_names"):
+                continue
+            s_norm = skill_name.replace("_", "").replace("-", "").lower()
+            for t in info["tool_names"]:
+                t_norm = t.replace("_", "").replace("-", "").lower()
+                # 简单相似度：共同子串长度 / 较长者
+                if not norm or not t_norm:
+                    continue
+                common = 0
+                shorter, longer = (norm, t_norm) if len(norm) <= len(t_norm) else (t_norm, norm)
+                for size in range(min(len(shorter), 6), 2, -1):
+                    if shorter in longer or any(shorter[i:i+size] in longer for i in range(len(shorter) - size + 1)):
+                        common = max(common, size)
+                        break
+                if common > best_score:
+                    best_score = common
+                    best_skill = skill_name
+        if best_skill and best_score >= 3:
+            header = sm.get_skill_headers().get(best_skill, "")
+            spec = sm.get_skill_spec(best_skill)
+            tools = sm._skills[best_skill].get("tool_names", [])
+            tool_hint = ", ".join(f"`{t}`" for t in tools) if tools else "(无)"
+            return (
+                f"你似乎想调用 skill `{tool_name}`，但这不是工具名。"
+                f"最接近的 skill 是 `{best_skill}`，对应工具: {tool_hint}。"
+                f"\n\n{header}\n\n---\n\n{spec}"
+            )
+        return ""
 
     async def _handle_tool_timeout(
         self, tool_call: dict, tool_name: str, tool_input: dict,

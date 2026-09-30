@@ -15,20 +15,91 @@ from typing import Any
 CHARS_PER_TOKEN = 1.8  # 中英混合估算（中文约1.3字符/token, 英文约4字符/token）
 
 # 各模型上下文窗口大小（tokens）
+# 注意：这些只是本地缓存，实际应通过 /api/model-info 从 API 动态获取
+# 只有当 API 不支持 /models 端点时才需要在这里添加
 MODEL_CONTEXT_SIZES: dict[str, int] = {
-    "kimi-for-coding": 200_000,
-    "kimi-for-coding-thinking": 200_000,
+    "kimi-for-coding": 1_000_000,
+    "kimi-for-coding-thinking": 1_000_000,
     "k3": 1_048_576,
-    "deepseek-chat": 1_000_000,
-    "deepseek-reasoner": 1_000_000,
+    # MiniMax 系列（API 不支持 /models 端点，需要手动配置）
+    "MiniMax-M3": 1_000_000,
+    "minimax-m3": 1_000_000,
 }
 DEFAULT_CONTEXT_SIZE = 200_000
+
+# 前缀匹配规则（仅作为 fallback，实际应通过 API 获取）
+MODEL_CONTEXT_PREFIXES: dict[str, int] = {}
 
 # 模型上下文窗口和显式推理模式由每个 LLM 配置传入；表内保留旧模型默认值。
 MODEL_THINKING_CONFIGS: dict[str, dict] = {
     "k3": {"type": "enabled", "effort": "max", "budget_tokens": 16000},
 }
 THINKING_OUTPUT_PAD = 4096
+
+# 思考模式映射表：(provider, protocol) → {adaptive, enabled, disabled} 对应的请求参数
+# 值为 None 表示不注入任何 thinking 相关参数
+THINKING_PARAM_MAP: dict[tuple[str, str], dict[str, dict | None]] = {
+    # MiniMax Anthropic 协议
+    ("minimax", "anthropic"): {
+        "adaptive": {"thinking": {"type": "adaptive"}},
+        "enabled":  {"thinking": {"type": "adaptive"}},
+        "disabled": {"thinking": {"type": "disabled"}},
+    },
+    # MiniMax OpenAI 协议（M3 默认开启 adaptive，关闭需显式 disabled）
+    ("minimax", "openai"): {
+        "adaptive": None,  # 默认即为 adaptive，无需注入
+        "enabled":  None,  # 同上
+        "disabled": {"thinking": {"type": "disabled"}},
+    },
+    # Kimi Code（K2.7-code 强制开启，无法关闭；K3 用 reasoning_effort）
+    ("kimi-code", "openai"): {
+        "adaptive": {"reasoning_effort": "high"},
+        "enabled":  {"reasoning_effort": "high"},
+        "disabled": None,  # K2.7-code 不支持关闭，静默降级为不注入（保持默认开启）
+    },
+    # Kimi 标准模型（K2.6 等，OpenAI 协议）
+    ("kimi", "openai"): {
+        "adaptive": {"thinking": {"type": "enabled"}},
+        "enabled":  {"thinking": {"type": "enabled"}},
+        "disabled": {"thinking": {"type": "disabled"}},
+    },
+    # DeepSeek OpenAI 协议
+    ("deepseek", "openai"): {
+        "adaptive": {"thinking": {"type": "enabled"}},
+        "enabled":  {"thinking": {"type": "enabled"}},
+        "disabled": None,  # DeepSeek 默认关闭，无需注入
+    },
+    # 火山引擎 Ark（豆包）OpenAI 协议
+    ("ark", "openai"): {
+        "adaptive": {"thinking": {"type": "enabled"}},
+        "enabled":  {"thinking": {"type": "enabled"}},
+        "disabled": {"thinking": {"type": "disabled"}},
+    },
+    # 通用 Anthropic 协议（Claude 等）
+    ("generic", "anthropic"): {
+        "adaptive": {"thinking": {"type": "adaptive"}},
+        "enabled":  {"thinking": {"type": "enabled", "budget_tokens": 16000}},
+        "disabled": None,
+    },
+    # 通用 OpenAI 协议（兼容端点，保守策略）
+    # 注：reasoning_effort 合法值仅 low/medium/high（OpenAI 规范），不能使用 max/xhigh
+    ("generic", "openai"): {
+        "adaptive": {"reasoning_effort": "medium"},
+        "enabled":  {"reasoning_effort": "high"},
+        "disabled": {"reasoning_effort": "low"},
+    },
+}
+
+
+def _inject_thinking_params(payload: dict, provider: str, protocol: str, thinking_mode: str) -> None:
+    """按 provider + protocol + thinking_mode 注入对应的 thinking 控制参数。"""
+    mapping = THINKING_PARAM_MAP.get((provider, protocol))
+    if mapping is None:
+        # 未覆盖的 provider+protocol 组合，fallback 到 generic
+        mapping = THINKING_PARAM_MAP.get(("generic", protocol), {})
+    params = mapping.get(thinking_mode)
+    if params:
+        payload.update(params)
 
 # 压缩触发阈值（上下文 50% 时触发压缩，防止 LLM 在大上下文下失焦漏参数）
 COMPACT_THRESHOLD = 0.50
@@ -52,10 +123,22 @@ def estimate_tokens(msgs: list[dict]) -> int:
 
 
 def get_context_size(model: str, configured_size: int | None = None) -> int:
-    """获取模型上下文窗口大小（优先使用显式配置的窗口）。"""
+    """获取模型上下文窗口大小（优先使用显式配置的窗口）。
+    
+    查找顺序：
+    1. 显式配置的 configured_size
+    2. 精确匹配 MODEL_CONTEXT_SIZES
+    3. 前缀匹配 MODEL_CONTEXT_PREFIXES
+    4. 默认值 DEFAULT_CONTEXT_SIZE
+    """
     if configured_size:
         return int(configured_size)
-    return MODEL_CONTEXT_SIZES.get(model, DEFAULT_CONTEXT_SIZE)
+    
+    # 精确匹配（仅作为本地缓存，实际应通过 API 获取）
+    if model in MODEL_CONTEXT_SIZES:
+        return MODEL_CONTEXT_SIZES[model]
+    
+    return DEFAULT_CONTEXT_SIZE
 
 
 def get_compact_threshold(model: str, configured_size: int | None = None) -> int:
@@ -64,31 +147,28 @@ def get_compact_threshold(model: str, configured_size: int | None = None) -> int
 
 
 def apply_model_specific_params(payload: dict, model: str, protocol: str, llm_params: dict | None = None) -> dict:
-    """Inject explicitly configured model capabilities without guessing by model name."""
+    """按 provider + protocol + thinking_mode 注入模型特定参数。"""
     params = llm_params or {}
-    if params.get("provider") == "minimax":
-        if protocol == "openai":
-            payload["reasoning_split"] = params.get("reasoning_split", True)
-        elif params.get("thinking"):
-            payload["thinking"] = {"type": params["thinking"]}
+    provider = params.get("provider", "generic")
+    thinking_mode = params.get("thinking", "adaptive")
+
+    # MiniMax 特殊参数（temperature/top_p/max_tokens）
+    if provider == "minimax":
         if params.get("temperature") is not None:
             payload["temperature"] = params["temperature"]
         if params.get("top_p") is not None:
             payload["top_p"] = params["top_p"]
         if params.get("max_tokens") is not None:
             payload["max_tokens"] = params["max_tokens"]
-        return payload
 
+    # 注入 thinking 参数
+    _inject_thinking_params(payload, provider, protocol, thinking_mode)
+
+    # 旧模型兼容：k3 的 budget_tokens 调整 max_tokens
     cfg = MODEL_THINKING_CONFIGS.get(model)
-    if not cfg:
-        return payload
-
-    if protocol == "anthropic":
-        payload["thinking"] = cfg.copy()
+    if cfg and protocol == "anthropic" and thinking_mode == "enabled":
         min_tokens = cfg["budget_tokens"] + THINKING_OUTPUT_PAD
         payload["max_tokens"] = max(payload.get("max_tokens", 0), min_tokens)
-    elif protocol == "openai":
-        payload["reasoning_effort"] = cfg.get("effort", "max")
 
     return payload
 

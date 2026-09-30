@@ -184,6 +184,39 @@
   opacity: 0.7;
 }
 
+/* Custom answer input (fallback when none of the options fit) */
+
+.questionnaire-custom {
+  margin-top: 10px;
+}
+
+.questionnaire-custom-input {
+  width: 100%;
+  padding: 9px 12px;
+  border: 1px dashed var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.12s;
+  box-sizing: border-box;
+}
+
+.questionnaire-custom-input:focus {
+  border-color: var(--accent);
+  border-style: solid;
+}
+
+.questionnaire-custom-input::placeholder {
+  color: var(--text-muted);
+}
+
+.questionnaire-custom-input:disabled {
+  opacity: 0.7;
+}
+
 /* Footer */
 
 .questionnaire-footer {

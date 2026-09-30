@@ -168,7 +168,7 @@ class CustomAgentTool(BaseTool):
                         "status": "thinking",
                     })
 
-                tools_schema = self._build_tools_schema(allowed_tools) if allowed_tools else None
+                tools_schema = self._build_tools_schema(allowed_tools, protocol) if allowed_tools else None
 
                 t_start = time.time()
                 if protocol == "anthropic":
@@ -322,14 +322,17 @@ class CustomAgentTool(BaseTool):
 
     # ── 以下方法复用 SubAgentTool 的 LLM 调用逻辑 ──
 
-    def _build_tools_schema(self, tool_names: set) -> list:
+    def _build_tools_schema(self, tool_names: set, protocol: str = "anthropic") -> list:
         if not self._skill_manager:
             return []
         tools = []
         for name in tool_names:
             try:
                 inst = self._skill_manager._get_instance(name)
-                tools.append(inst.to_anthropic_tool())
+                if protocol == "openai":
+                    tools.append(inst.to_openai_tool())
+                else:
+                    tools.append(inst.to_anthropic_tool())
             except Exception:
                 pass
         return tools
@@ -378,7 +381,7 @@ class CustomAgentTool(BaseTool):
         if tools_schema:
             body["tools"] = tools_schema
 
-        url = f"{base_url}/chat/completions"
+        url = f"{base_url}/v1/chat/completions" if "/v1" not in base_url else f"{base_url}/chat/completions"
         try:
             resp = client.post(
                 url,
@@ -430,6 +433,7 @@ class CustomAgentTool(BaseTool):
         return result
 
     def _convert_messages_openai(self, messages: list) -> list:
+        """内部消息转 OpenAI 格式。关键：每个 tool_result 独立成一条 role=tool 消息。"""
         result = []
         for m in messages:
             role = m["role"]
@@ -439,11 +443,14 @@ class CustomAgentTool(BaseTool):
                     entry["tool_calls"] = m["tool_calls"]
                 result.append(entry)
             elif role == "user" and isinstance(m.get("content"), list):
-                entry = {"role": "tool", "content": ""}
+                # 每个 tool_result 独立一条 role=tool 消息，必须带 tool_call_id
                 for item in m["content"]:
-                    if item.get("type") == "tool_result":
-                        entry["content"] = item["content"]
-                result.append(entry)
+                    if isinstance(item, dict) and item.get("type") == "tool_result":
+                        result.append({
+                            "role": "tool",
+                            "tool_call_id": item.get("tool_use_id", ""),
+                            "content": item.get("content", ""),
+                        })
             else:
                 result.append({"role": m["role"], "content": str(m.get("content", ""))})
         return result

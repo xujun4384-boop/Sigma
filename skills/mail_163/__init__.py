@@ -34,6 +34,7 @@ VALID_ACTIONS = [
     "list",          # 列出收件箱邮件
     "read",          # 读取单封邮件
     "search",        # 搜索邮件
+    "download",      # 下载邮件附件到本地
     "delete",        # 删除邮件
     "mark_read",     # 标记已读
     "mark_unread",   # 标记未读
@@ -104,9 +105,10 @@ class Mail163Tool(BaseTool):
         ToolParameter("folder", "string", "邮箱文件夹（list/read/search 时使用），默认 INBOX", required=False, default="INBOX"),
         ToolParameter("limit", "integer", "返回邮件数量上限（list 时使用），默认 20", required=False, default=20),
         ToolParameter("offset", "integer", "分页偏移（list 时使用），默认 0", required=False, default=0),
-        ToolParameter("mail_id", "string", "邮件 UID（read/delete/mark_read/mark_unread/move 时使用）", required=False),
+        ToolParameter("mail_id", "string", "邮件 UID（read/download/delete/mark_read/mark_unread/move 时使用）", required=False),
         ToolParameter("query", "string", "IMAP 搜索条件（search 时使用），如 'SUBJECT \"报告\"' / 'UNSEEN' / 'FROM \"xxx@163.com\"'", required=False),
         ToolParameter("target_folder", "string", "目标文件夹（move 时使用）", required=False),
+        ToolParameter("attachment_name", "string", "要下载的附件文件名（download 时使用），留空则下载全部附件", required=False),
     ]
 
     def __init__(
@@ -412,8 +414,77 @@ class Mail163Tool(BaseTool):
             ]
             if info["attachments"]:
                 lines.append(f"附件: {', '.join(info['attachments'])}")
+                lines.append("提示: 使用 action=download 可将附件下载到本地项目目录")
             lines.append("\n正文:\n" + (info["body"] or "(无正文)"))
             return ToolResult.ok("\n".join(lines))
+        finally:
+            self._logout(imap)
+
+    def _sanitize_filename(self, filename: str) -> str:
+        """清理文件名，移除 Windows/macOS/Linux 不允许的字符，并处理换行/回车。"""
+        cleaned = filename.replace("\n", " ").replace("\r", " ").replace("\t", " ")
+        illegal_chars = '<>:"/\\|?*'
+        for ch in illegal_chars:
+            cleaned = cleaned.replace(ch, "_")
+        cleaned = cleaned.strip(" .")
+        if not cleaned:
+            cleaned = "未命名附件"
+        return cleaned
+
+    def _handle_download(self, folder: str, mail_id: str, attachment_name: str) -> ToolResult:
+        """下载邮件附件到当前工作目录的 downloads/mail163/<uid>/ 下。"""
+        if not mail_id:
+            return ToolResult.fail("缺少邮件 UID 参数 mail_id")
+        imap, err = self._imap_connect(folder)
+        if err:
+            return ToolResult.fail(err)
+        try:
+            raw = self._fetch_raw(imap, mail_id, "(RFC822)")
+            if not raw:
+                return ToolResult.fail(f"未找到邮件: {mail_id}")
+            from email import message_from_bytes
+            msg = message_from_bytes(raw)
+
+            from pathlib import Path
+            save_dir = Path(self.cwd) / "downloads" / "mail163" / mail_id
+            save_dir.mkdir(parents=True, exist_ok=True)
+
+            downloaded: list[str] = []
+            skipped: list[str] = []
+            errors: list[str] = []
+            for part in msg.walk():
+                if part.get_content_disposition() != "attachment" and not part.get_filename():
+                    continue
+                raw_filename = _decode_header_value(part.get_filename()) or "未命名附件"
+                filename = self._sanitize_filename(raw_filename)
+                if attachment_name and raw_filename != attachment_name and filename != attachment_name:
+                    skipped.append(raw_filename)
+                    continue
+                payload = part.get_payload(decode=True)
+                if payload is None:
+                    skipped.append(f"{raw_filename} (无法解码)")
+                    continue
+                try:
+                    save_path = save_dir / filename
+                    with open(save_path, "wb") as f:
+                        f.write(payload)
+                    downloaded.append(f"{raw_filename} -> {save_path}")
+                except OSError as e:
+                    errors.append(f"{raw_filename} (保存失败: {e})")
+
+            if not downloaded and not errors:
+                if attachment_name:
+                    return ToolResult.fail(f"未找到附件: {attachment_name}，可用附件: {', '.join(skipped)}")
+                return ToolResult.ok("该邮件没有附件")
+
+            result = f"已下载 {len(downloaded)} 个附件到 {save_dir}"
+            if downloaded:
+                result += "\n" + "\n".join(downloaded)
+            if errors:
+                result += f"\n失败 {len(errors)} 个:\n" + "\n".join(errors)
+            if skipped and attachment_name:
+                result += f"\n跳过: {', '.join(skipped)}"
+            return ToolResult.ok(result)
         finally:
             self._logout(imap)
 
@@ -544,6 +615,7 @@ class Mail163Tool(BaseTool):
         mail_id: str = "",
         query: str = "",
         target_folder: str = "",
+        attachment_name: str = "",
         **kwargs,
     ) -> ToolResult:
         if action not in VALID_ACTIONS:
@@ -554,6 +626,7 @@ class Mail163Tool(BaseTool):
             "list": lambda: self._handle_list(folder, limit, offset),
             "read": lambda: self._handle_read(folder, mail_id),
             "search": lambda: self._handle_search(folder, query, limit),
+            "download": lambda: self._handle_download(folder, mail_id, attachment_name),
             "delete": lambda: self._handle_delete(folder, mail_id),
             "mark_read": lambda: self._handle_mark(folder, mail_id, True),
             "mark_unread": lambda: self._handle_mark(folder, mail_id, False),
@@ -587,6 +660,7 @@ if __name__ == "__main__":
     parser.add_argument("--mail-id", dest="mail_id", help="邮件 UID")
     parser.add_argument("--query", help="IMAP 搜索条件")
     parser.add_argument("--target-folder", dest="target_folder", help="移动目标文件夹")
+    parser.add_argument("--attachment-name", dest="attachment_name", help="要下载的附件名（download 时使用）")
     args = parser.parse_args()
 
     tool = Mail163Tool()
@@ -610,6 +684,7 @@ if __name__ == "__main__":
         mail_id=args.mail_id or "",
         query=args.query or "",
         target_folder=args.target_folder or "",
+        attachment_name=args.attachment_name or "",
     )
     print(result.content)
     sys.exit(0 if result.success else 1)

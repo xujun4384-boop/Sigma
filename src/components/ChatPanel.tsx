@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
-import { ChevronDown, ChevronRight, Send, Wrench, CheckCircle2, XCircle, Menu, X, StopCircle, AlertCircle, Bot } from 'lucide-react'
+import { ChevronDown, ChevronRight, Send, Wrench, CheckCircle2, XCircle, Menu, X, StopCircle, AlertCircle, Bot, RotateCcw } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { useTranslation } from '../i18n/I18nContext'
@@ -11,6 +11,13 @@ import ContextUsageIndicator, { type ContextUsageData } from './ContextUsageIndi
 import ThinkingAnimation from './ThinkingAnimation'
 import QuestionnaireDisplay, { type QuestionnaireData } from './QuestionnaireDisplay'
 import './ChatPanel.css'
+
+// 生成新的会话 ID，用于隔离后端上下文；重置对话时换新 ID 即可清空上下文
+function newSessionId(): string {
+  return typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `session-${Date.now()}-${Math.random().toString(36).slice(2)}`
+}
 
 // ── 系统通知工具 ──
 
@@ -184,6 +191,7 @@ function resolveActiveLLM(config: KimiConfig): { name: string; baseUrl: string; 
 export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKey, onFileDiffUpdate, onFileModificationStart, onFileModificationComplete, onCanvasPatch, onOpenTerminal }: ChatPanelProps) {
   const { t, lang } = useTranslation()
   const [messages, setMessages] = useState<Message[]>([])
+  const [sessionId, setSessionId] = useState<string>(() => newSessionId())
   const [input, setInput] = useState('')
   const [attachedFiles, setAttachedFiles] = useState<{ name: string; path: string }[]>([])
   const [isDropActive, setIsDropActive] = useState(false)
@@ -227,6 +235,7 @@ export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKe
     setAttachedFiles([])
     setIsLoading(false)
     setContextUsage(null)
+    setSessionId(newSessionId())
   }, [resetKey])
 
   useEffect(() => {
@@ -358,11 +367,12 @@ export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKe
     const currentAgent = selectedAgent
     setSelectedAgent(null)
 
-    // 拼接附件路径
+    // 所有附件（包括图片）都拼接路径，让主 LLM 通过 batch_read 读取
     const filePaths = attachedFiles.map(f => f.path).join('\n')
     const fullMessage = filePaths
       ? `I have attached the following files. Please read them first:\n\n${filePaths}\n\n---\n${text}`
       : text
+    
     setAttachedFiles([])
     setIsLoading(true)
 
@@ -384,6 +394,7 @@ export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKe
       const baseUrl = await getBackendUrl()
       const requestBody: Record<string, unknown> = {
         message: fullMessage,
+        sessionId,
         maxIterations: systemSettings.maxIterations || 10,
         subAgentMaxTurns: systemSettings.subAgentMaxTurns || 8,
         backupEnabled: systemSettings.backupEnabled ?? true,
@@ -492,6 +503,19 @@ export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKe
     }
   }, [input, isLoading, config])
 
+  const handleResetChat = useCallback(() => {
+    abortRef.current?.abort()
+    setMessages([])
+    setInput('')
+    setAttachedFiles([])
+    setIsLoading(false)
+    setContextUsage(null)
+    setQuestionnaire(null)
+    questionnaireRef.current = null
+    setToolTimeout(null)
+    setSessionId(newSessionId())
+  }, [])
+
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const value = e.target.value
     setInput(value)
@@ -584,7 +608,7 @@ export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKe
     }
   }, [toolTimeout])
 
-  const handleChatDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+  const handleChatDrop = useCallback(async (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault()
     e.stopPropagation()
     setIsDropActive(false)
@@ -636,6 +660,9 @@ export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKe
         </button>
         <h2>{t("chat.assistant")}</h2>
         <div className="chat-header-actions">
+          <button className="chat-reset-btn" onClick={handleResetChat} title={t("chat.reset_chat")}>
+            <RotateCcw size={16} />
+          </button>
           <span className="backend-status">
             <span className={`dot ${backendConnected ? 'connected' : 'disconnected'}`} />
             {backendConnected ? t("chat.connected") : t("chat.disconnected")}

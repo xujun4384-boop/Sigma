@@ -777,7 +777,7 @@ class WriteDocxTool(BaseTool):
         """调用 OpenAI 协议 LLM，SSE 流式读取并拼接文本。"""
         import httpx
 
-        url = f"{base_url}/chat/completions"
+        url = f"{base_url}/v1/chat/completions" if "/v1" not in base_url else f"{base_url}/chat/completions"
         body = {
             "model": model,
             "max_tokens": 16384,

@@ -154,12 +154,15 @@ function ApiTab({ config, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLL
   const [saved, setSaved] = useState(false)
   const [llmName, setLlmName] = useState('')
   const [provider, setProvider] = useState<'generic' | 'deepseek' | 'kimi-code' | 'minimax' | 'ark'>('generic')
+  const [thinkingMode, setThinkingMode] = useState<'adaptive' | 'enabled' | 'disabled'>('adaptive')
   const [testingIds, setTestingIds] = useState<Record<string, 'testing' | 'success' | 'error'>>({})
   const [balances, setBalances] = useState<Record<string, { loading: boolean; data?: any; error?: string }>>({})
   const [view, setView] = useState<'list' | 'add' | 'edit'>('list')
   const [editingLLM, setEditingLLM] = useState<LLMEntry | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<LLMEntry | null>(null)
   const [dragOverId, setDragOverId] = useState<string | null>(null)
+  const [isFetchingContext, setIsFetchingContext] = useState(false)
+  const [contextSize, setContextSize] = useState<number | null>(null)
 
   // 进入列表时自动查询一次支持余额查询的 LLM
   useEffect(() => {
@@ -182,6 +185,7 @@ function ApiTab({ config, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLL
     setForm({ ...config })
     setLlmName('')
     setProvider('generic')
+    setThinkingMode('adaptive')
     setEditingLLM(null)
     setShowKey(false)
   }
@@ -192,10 +196,42 @@ function ApiTab({ config, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLL
     setEditingLLM(entry)
     setLlmName(entry.name)
     setProvider(entry.provider || 'generic')
+    setThinkingMode(entry.thinking || 'adaptive')
     setForm(prev => ({ ...prev, baseUrl: entry.baseUrl, apiKey: entry.apiKey, model: entry.model, protocol: entry.protocol }))
+    setContextSize(entry.contextSize || null)  // 恢复已保存的上下文大小
     setView('edit')
   }
-  const backToList = () => { setView('list'); setEditingLLM(null) }
+  const backToList = () => { setView('list'); setEditingLLM(null); setContextSize(null) }
+
+  // 从 API 获取模型上下文大小
+  const fetchModelContext = async () => {
+    if (!form.baseUrl || !form.apiKey || !form.model) return
+    
+    setIsFetchingContext(true)
+    try {
+      const baseUrl = await getBackendUrl()
+      const resp = await fetch(`${baseUrl}/api/model-info`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          baseUrl: form.baseUrl,
+          apiKey: form.apiKey,
+          model: form.model,
+          protocol: form.protocol,
+        }),
+      })
+      const data = await resp.json()
+      if (data.success && data.contextSize) {
+        setContextSize(data.contextSize)
+      } else {
+        console.warn('获取模型上下文失败:', data.error)
+      }
+    } catch (err) {
+      console.error('获取模型上下文失败:', err)
+    } finally {
+      setIsFetchingContext(false)
+    }
+  }
 
   const handleAddLLM = () => {
     if (!form.apiKey || !form.model) return
@@ -207,7 +243,9 @@ function ApiTab({ config, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLL
       model: form.model,
       protocol: form.protocol,
       provider,
-      ...(provider === 'minimax' ? { thinking: 'enabled' as const, contextSize: 1_000_000, maxTokens: 32768, temperature: 1.0, topP: 0.95 } : {}),
+      thinking: thinkingMode,
+      ...(contextSize ? { contextSize } : {}),
+      ...(provider === 'minimax' ? { maxTokens: 32768, temperature: 1.0, topP: 0.95 } : {}),
     }
     onAddLLM(entry)
     backToList()
@@ -223,7 +261,9 @@ function ApiTab({ config, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLL
       model: form.model,
       protocol: form.protocol,
       provider,
-      ...(provider === 'minimax' ? { thinking: 'enabled' as const, contextSize: 1_000_000, maxTokens: 32768, temperature: 1.0, topP: 0.95 } : {}),
+      thinking: thinkingMode,
+      ...(contextSize ? { contextSize } : {}),
+      ...(provider === 'minimax' ? { maxTokens: 32768, temperature: 1.0, topP: 0.95 } : {}),
     }
     onUpdateLLM(entry)
     backToList()
@@ -576,6 +616,16 @@ function ApiTab({ config, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLL
           </div>
         </div>
 
+        <div className="config-section">
+          <h3>{t("api.thinking_mode")}</h3>
+          <div className="toggle-group">
+            <button className={thinkingMode === 'adaptive' ? 'active' : ''} onClick={() => setThinkingMode('adaptive')}>{t("api.thinking_adaptive")}</button>
+            <button className={thinkingMode === 'enabled' ? 'active' : ''} onClick={() => setThinkingMode('enabled')}>{t("api.thinking_enabled")}</button>
+            <button className={thinkingMode === 'disabled' ? 'active' : ''} onClick={() => setThinkingMode('disabled')}>{t("api.thinking_disabled")}</button>
+          </div>
+          <div className="config-hint">{t("api.thinking_hint")}</div>
+        </div>
+
         <div className="config-field">
           <label>{t("api.llm_name")}</label>
           <input type="text" value={llmName} onChange={e => setLlmName(e.target.value)} placeholder={t("api.llm_name_placeholder")} />
@@ -588,7 +638,22 @@ function ApiTab({ config, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLL
 
         <div className="config-field">
           <label>{t("api.model")}</label>
-          <input type="text" value={form.model} onChange={e => update({ model: e.target.value })} placeholder={t("api.model_placeholder")} />
+          <div className="model-input-row">
+            <input type="text" value={form.model} onChange={e => update({ model: e.target.value })} placeholder={t("api.model_placeholder")} />
+            <button 
+              className="fetch-context-btn" 
+              onClick={fetchModelContext}
+              disabled={!form.baseUrl || !form.apiKey || !form.model}
+              title="从 API 获取模型上下文大小"
+            >
+              {isFetchingContext ? '获取中...' : '获取上下文'}
+            </button>
+          </div>
+          {contextSize && (
+            <div className="context-size-hint">
+              上下文: {(contextSize / 1000).toFixed(0)}k tokens
+            </div>
+          )}
         </div>
 
         <div className="config-field">
@@ -616,7 +681,7 @@ function ApiTab({ config, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLL
 
 // ── Skill Keys Tab ──
 
-type SkillFieldType = 'text' | 'password' | 'toggle'
+type SkillFieldType = 'text' | 'password' | 'toggle' | 'select'
 
 interface SkillFieldDef {
   key: keyof SkillKeysConfig
@@ -631,7 +696,7 @@ interface SkillFieldDef {
 interface SkillTestDef {
   labelKey: string
   endpoint: string
-  buildBody: (sk: SkillKeysConfig) => Record<string, unknown>
+  buildBody: (sk: SkillKeysConfig, config: KimiConfig) => Record<string, unknown>
 }
 
 interface SkillDef {
@@ -793,23 +858,36 @@ const SKILL_DEFS: SkillDef[] = [
     ],
   },
   {
-    id: 'vision_ocr',
-    titleKey: 'skill_keys.vision_ocr',
-    descKey: 'skill_keys.vision_desc',
-    requiredKeys: ['visionApiKey'],
+    id: 'doubao_tts',
+    titleKey: 'skill_keys.doubao_tts',
+    descKey: 'skill_keys.doubao_tts_desc',
+    requiredKeys: ['doubaoVoiceApiKey'],
     fields: [
-      { key: 'visionApiKey', type: 'password', labelKey: 'skill_keys.vision_api_key', placeholder: 'Vision API Key (e.g. Kimi)...' },
-      { key: 'visionModel', type: 'text', labelKey: 'skill_keys.vision_model', placeholder: 'kimi-for-coding', hintKey: 'skill_keys.vision_model_hint' },
-      { key: 'visionBaseUrl', type: 'text', labelKey: 'skill_keys.vision_base_url', placeholder: 'https://api.moonshot.cn/anthropic', hintKey: 'skill_keys.vision_url_hint' },
+      {
+        key: 'doubaoVoiceApiKey',
+        type: 'password',
+        labelKey: 'skill_keys.doubao_voice_api_key',
+        placeholder: '豆包语音 API Key',
+        hintKey: 'skill_keys.doubao_voice_api_key_hint',
+      },
+    ],
+  },
+  {
+    id: 'opendesign',
+    titleKey: 'skill_keys.opendesign',
+    descKey: 'skill_keys.opendesign_desc',
+    requiredKeys: [],
+    fields: [
+      { key: 'opendesignLlmId', type: 'select', labelKey: 'skill_keys.opendesign_llm_id', hintKey: 'skill_keys.opendesign_llm_id_hint' },
     ],
     test: {
-      labelKey: 'skill_keys.test_vision',
-      endpoint: '/api/test-vision',
-      buildBody: (sk) => ({
-        apiKey: sk.visionApiKey || '',
-        model: sk.visionModel || 'kimi-for-coding',
-        baseUrl: sk.visionBaseUrl || 'https://api.moonshot.cn/anthropic',
-      }),
+      labelKey: 'skill_keys.test_opendesign',
+      endpoint: '/api/test-opendesign',
+      buildBody: (sk, config) => {
+        const llm = (config.llms || []).find(l => l.id === sk.opendesignLlmId)
+        if (!llm) return { llmId: sk.opendesignLlmId || '' }
+        return { baseUrl: llm.baseUrl, apiKey: llm.apiKey, model: llm.model, protocol: llm.protocol }
+      },
     },
   },
   {
@@ -911,6 +989,32 @@ const SKILL_DEFS: SkillDef[] = [
       }),
     },
   },
+  {
+    id: 'gmail',
+    titleKey: 'skill_keys.gmail',
+    descKey: 'skill_keys.gmail_desc',
+    requiredKeys: ['gmailAddress', 'gmailAuthCode'],
+    fields: [
+      { key: 'gmailAddress', type: 'text', labelKey: 'skill_keys.gmail_address', placeholder: 'yourname@gmail.com' },
+      { key: 'gmailAuthCode', type: 'password', labelKey: 'skill_keys.gmail_auth_code', placeholder: 'App Password (16 digits)' },
+      { key: 'gmailSmtpHost', type: 'text', labelKey: 'skill_keys.gmail_smtp_host', placeholder: 'smtp.gmail.com' },
+      { key: 'gmailSmtpPort', type: 'text', labelKey: 'skill_keys.gmail_smtp_port', placeholder: '465' },
+      { key: 'gmailImapHost', type: 'text', labelKey: 'skill_keys.gmail_imap_host', placeholder: 'imap.gmail.com' },
+      { key: 'gmailImapPort', type: 'text', labelKey: 'skill_keys.gmail_imap_port', placeholder: '993' },
+    ],
+    test: {
+      labelKey: 'skill_keys.test_gmail',
+      endpoint: '/api/test-gmail',
+      buildBody: (sk) => ({
+        address: sk.gmailAddress || '',
+        authCode: sk.gmailAuthCode || '',
+        smtpHost: sk.gmailSmtpHost || 'smtp.gmail.com',
+        smtpPort: sk.gmailSmtpPort || '465',
+        imapHost: sk.gmailImapHost || 'imap.gmail.com',
+        imapPort: sk.gmailImapPort || '993',
+      }),
+    },
+  },
 ]
 
 function isSkillConfigured(sk: SkillKeysConfig | undefined, skill: SkillDef): boolean {
@@ -986,7 +1090,7 @@ function SkillKeysTab({ config, onSave }: { config: KimiConfig; onSave: (c: Kimi
       const resp = await fetch(`${baseUrl}${skill.test.endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(skill.test.buildBody(sk)),
+        body: JSON.stringify(skill.test.buildBody(sk, config)),
       })
       const data = await resp.json()
       setTestResults(prev => ({ ...prev, [skill.id]: data }))
@@ -1045,6 +1149,16 @@ function SkillKeysTab({ config, onSave }: { config: KimiConfig; onSave: (c: Kimi
                     {visibleSecrets[field.key] ? <EyeOff size={14} /> : <Eye size={14} />}
                   </button>
                 </div>
+              ) : field.type === 'select' ? (
+                <select
+                  value={value}
+                  onChange={e => setField(field.key, e.target.value)}
+                >
+                  <option value="">{t("skill_keys.llm_follow_main")}</option>
+                  {(config.llms || []).map(llm => (
+                    <option key={llm.id} value={llm.id}>{llm.name} ({llm.model})</option>
+                  ))}
+                </select>
               ) : (
                 <input
                   type="text"

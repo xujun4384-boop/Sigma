@@ -15,7 +15,7 @@ from skills.base import BaseTool, ToolParameter, ToolResult
 DEFAULT_PROVIDER = "ark"
 DEFAULT_MODEL = "doubao-seedream-4-5-251128"
 DEFAULT_MINIMAX_MODEL = "image-01"
-DEFAULT_SIZE = "2K"
+DEFAULT_SIZE = "2k"
 
 
 class ImageGenerateTool(BaseTool):
@@ -27,7 +27,7 @@ class ImageGenerateTool(BaseTool):
     parameters = [
         ToolParameter("prompt", "string", "图片生成提示词，描述想要的画面内容"),
         ToolParameter("save_dir", "string", "图片保存目录（LLM 应根据项目目标文件夹自行决定）"),
-        ToolParameter("size", "string", "输出尺寸或比例，默认 2K（MiniMax 可使用 1:1、16:9 等比例）", required=False, default="2K"),
+        ToolParameter("size", "string", "输出尺寸或比例，默认 2k（可选 1k/2k/4k 或 WIDTHxHEIGHT）", required=False, default="2k"),
         ToolParameter("model", "string", "模型名称，不填则使用 Settings 中配置的模型", required=False),
         ToolParameter("watermark", "boolean", "是否添加水印，默认 true", required=False, default=True),
     ]

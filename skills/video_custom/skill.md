@@ -1,4 +1,5 @@
 # video_custom skill
+# 已并入 video_card(material_type=image, asset_source=user)。此入口不再对主 LLM 暴露，仅作为 video_card 内部委托实现。
 # ---------------------------------------------------------------------------
 # 摘要
 # 自定义竖版（9:16）视频生成。LLM 自行准备图片素材（本地文件/生图均可），

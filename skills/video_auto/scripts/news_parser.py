@@ -1,7 +1,7 @@
 """
 news_parser - 新闻脚本提炼模块
 
-使用 LLM（Anthropic Messages 协议）将新闻原文提炼为竖屏短视频结构化脚本。
+使用 LLM 将新闻原文提炼为竖屏短视频结构化脚本，支持 Anthropic / OpenAI 双协议。
 """
 import json
 import re
@@ -12,10 +12,13 @@ import re
 NEWS_PARSE_SYSTEM_PROMPT = (
     "你是一位资深短视频编导。请根据用户提供的【新闻内容】，提炼出适合竖屏短视频脚本的结构化数据。\n\n"
     "要求：\n"
-    "1. 大标题（title）：10-18个字，抓人眼球，口语化\n"
+    "1. 大标题（title）：10-18个字，抓人眼球，口语化，像真人刷到会想点开的标题。\n"
+    "   可用钩子写法：打破认知（越懂行的人越不告诉你这3件事）、戳情绪（开店100天差点撑不下去）、"
+    "替用户说心里话（当妈的都懂）。避免报告腔/AI味。\n"
     "2. 副标题（subtitle）：一句话金句，点出核心观点或警示，不超过20个字\n"
     "3. 场景分镜（scenes）：把新闻内容拆成 4-6 个场景，每个场景：\n"
     "   - text：一段口播/字幕文案，信息密度高、节奏紧凑、口语化。总字数约 60-120 字。\n"
+    "     第一个场景作为钩子，前3秒抓住注意力（悬念/冲突/反差/直击痛点），别平铺直叙。\n"
     "   - duration：该场景时长（秒），推荐 4-6 秒，总时长控制在 18-24 秒\n"
     "   - transition：该场景进入时的图片切换动画效果，从以下选项中根据内容风格选择：\n"
     "     · fade —— 柔和淡入淡出，适合平缓叙述、过渡性内容\n"
@@ -185,9 +188,10 @@ def call_llm_parse_news(
     model: str,
     max_tokens: int = 8192,
     timeout: int = 120,
+    protocol: str = "anthropic",
 ) -> dict:
     """
-    调用 LLM（Anthropic Messages 协议）解析新闻内容为结构化脚本。
+    调用 LLM（支持 Anthropic Messages / OpenAI Chat Completions 双协议）解析新闻内容为结构化脚本。
 
     参数:
         news_content: 新闻原文
@@ -196,6 +200,7 @@ def call_llm_parse_news(
         model: 模型名称
         max_tokens: 最大输出 tokens
         timeout: 请求超时（秒）
+        protocol: "anthropic" 或 "openai"
 
     返回:
         {"title": str, "subtitle": str, "scenes": [{"text": str, "duration": float}]}
@@ -205,25 +210,33 @@ def call_llm_parse_news(
     if not base_url or not api_key or not model:
         raise ValueError("LLM 配置不完整: 需要 base_url, api_key, model")
 
-    # 构建 Anthropic Messages API URL
-    if "/v1" not in base_url:
-        api_url = f"{base_url.rstrip('/')}/v1/messages"
-    else:
-        api_url = f"{base_url.rstrip('/')}/messages"
-
+    base_url = base_url.rstrip("/")
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
     }
 
-    payload = {
-        "model": model,
-        "max_tokens": max_tokens,
-        "system": NEWS_PARSE_SYSTEM_PROMPT,
-        "messages": [
-            {"role": "user", "content": news_content},
-        ],
-    }
+    if protocol == "openai":
+        api_url = f"{base_url}/chat/completions" if "/v1" in base_url else f"{base_url}/v1/chat/completions"
+        payload = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": [
+                {"role": "system", "content": NEWS_PARSE_SYSTEM_PROMPT},
+                {"role": "user", "content": news_content},
+            ],
+        }
+    else:
+        api_url = f"{base_url}/messages" if "/v1" in base_url else f"{base_url}/v1/messages"
+        headers["anthropic-version"] = "2023-06-01"
+        payload = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "system": NEWS_PARSE_SYSTEM_PROMPT,
+            "messages": [
+                {"role": "user", "content": news_content},
+            ],
+        }
 
     try:
         with httpx.Client(timeout=timeout) as client:
@@ -236,14 +249,18 @@ def call_llm_parse_news(
         raise RuntimeError(f"LLM API 请求失败: {e}")
 
     # 提取响应文本
-    content_blocks = data.get("content", [])
-    response_text = ""
-    for block in content_blocks:
-        if isinstance(block, dict):
-            if block.get("type") == "text":
-                response_text += block.get("text", "")
-            elif block.get("type") == "content":
-                response_text += str(block.get("text", ""))
+    if protocol == "openai":
+        choices = data.get("choices", [])
+        response_text = choices[0].get("message", {}).get("content", "") if choices else ""
+    else:
+        content_blocks = data.get("content", [])
+        response_text = ""
+        for block in content_blocks:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    response_text += block.get("text", "")
+                elif block.get("type") == "content":
+                    response_text += str(block.get("text", ""))
 
     if not response_text:
         raise RuntimeError(f"LLM 响应中未找到文本内容。响应 keys: {list(data.keys())}")

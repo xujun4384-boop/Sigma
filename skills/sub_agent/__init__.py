@@ -173,6 +173,8 @@ class SubAgentTool(BaseTool):
         api_key = config.get("api_key", "")
         model = config.get("model", "kimi-for-coding")
         protocol = config.get("protocol", "anthropic")
+        provider = config.get("provider", "generic")
+        thinking_mode = config.get("thinking", "adaptive")
 
         log.info(
             f"[SubAgent {agent_id}] 启动 | desc={description[:60]} | type={subagent_type} "
@@ -229,16 +231,16 @@ class SubAgentTool(BaseTool):
                     cb({"type": "subagent_progress", "agent_id": agent_id, "turn": turn_count,
                         "status": "thinking", "description": description})
 
-                # 构建工具 schema
-                tools_schema = self._build_tools_schema(allowed_tools) if allowed_tools else None
+                # 构建工具 schema（根据协议使用不同格式）
+                tools_schema = self._build_tools_schema(allowed_tools, protocol) if allowed_tools else None
 
                 # 调用 LLM
                 t_start = time.time()
                 log.info(f"[SubAgent {agent_id}] turn={turn_count} 请求 LLM | msg_count={len(messages)}")
                 if protocol == "anthropic":
-                    resp_data = self._call_anthropic(client, base_url, api_key, model, messages, tools_schema)
+                    resp_data = self._call_anthropic(client, base_url, api_key, model, messages, tools_schema, provider, thinking_mode)
                 else:
-                    resp_data = self._call_openai(client, base_url, api_key, model, messages, tools_schema)
+                    resp_data = self._call_openai(client, base_url, api_key, model, messages, tools_schema, provider, thinking_mode)
                 elapsed = time.time() - t_start
                 log.info(f"[SubAgent {agent_id}] turn={turn_count} LLM 响应 | elapsed={elapsed:.1f}s | ok={resp_data is not None}")
 
@@ -354,9 +356,9 @@ class SubAgentTool(BaseTool):
                 log.info(f"[SubAgent {agent_id}] 请求总结 | errors={errors}")
                 t_start = time.time()
                 if protocol == "anthropic":
-                    resp_data = self._call_anthropic(client, base_url, api_key, model, messages, tools_schema=None)
+                    resp_data = self._call_anthropic(client, base_url, api_key, model, messages, tools_schema=None, provider=provider, thinking_mode=thinking_mode)
                 else:
-                    resp_data = self._call_openai(client, base_url, api_key, model, messages, tools_schema=None)
+                    resp_data = self._call_openai(client, base_url, api_key, model, messages, tools_schema=None, provider=provider, thinking_mode=thinking_mode)
                 elapsed = time.time() - t_start
                 if resp_data:
                     content = resp_data.get("content", "")
@@ -401,7 +403,7 @@ class SubAgentTool(BaseTool):
             if client:
                 client.close()
 
-    def _call_anthropic(self, client, base_url, api_key, model, messages, tools_schema) -> dict | None:
+    def _call_anthropic(self, client, base_url, api_key, model, messages, tools_schema, provider="generic", thinking_mode="adaptive") -> dict | None:
         """Anthropic Messages API"""
         body = {
             "model": model,
@@ -411,7 +413,12 @@ class SubAgentTool(BaseTool):
         if tools_schema:
             body["tools"] = tools_schema
 
+        # 注入 thinking 参数
+        from context_manager import _inject_thinking_params
+        _inject_thinking_params(body, provider, "anthropic", thinking_mode)
+
         url = f"{base_url}/v1/messages" if "/v1" not in base_url else f"{base_url}/messages"
+        log.info(f"[SubAgent API] Anthropic 请求 | url={url} | model={model} | msg_count={len(messages)}")
         try:
             resp = client.post(
                 url,
@@ -422,10 +429,11 @@ class SubAgentTool(BaseTool):
                 },
                 json=body,
             )
+            log.info(f"[SubAgent API] Anthropic 响应 | status={resp.status_code}")
             if resp.status_code != 200:
                 log.warning(
                     f"[SubAgent API] Anthropic HTTP {resp.status_code} | "
-                    f"url={url} | body={resp.text[:300]}"
+                    f"url={url} | body={resp.text[:500]}"
                 )
                 return None
             data = resp.json()
@@ -434,7 +442,7 @@ class SubAgentTool(BaseTool):
             log.warning(f"[SubAgent API] Anthropic 异常: {type(e).__name__}: {e} | url={url}")
             return None
 
-    def _call_openai(self, client, base_url, api_key, model, messages, tools_schema) -> dict | None:
+    def _call_openai(self, client, base_url, api_key, model, messages, tools_schema, provider="generic", thinking_mode="adaptive") -> dict | None:
         """OpenAI Chat Completions API"""
         openai_msgs = self._convert_messages_openai(messages)
         body = {
@@ -445,7 +453,12 @@ class SubAgentTool(BaseTool):
         if tools_schema:
             body["tools"] = tools_schema
 
-        url = f"{base_url}/chat/completions"
+        # 注入 thinking 参数
+        from context_manager import _inject_thinking_params
+        _inject_thinking_params(body, provider, "openai", thinking_mode)
+
+        url = f"{base_url}/v1/chat/completions" if "/v1" not in base_url else f"{base_url}/chat/completions"
+        log.info(f"[SubAgent API] OpenAI 请求 | url={url} | model={model} | msg_count={len(messages)}")
         try:
             resp = client.post(
                 url,
@@ -455,10 +468,11 @@ class SubAgentTool(BaseTool):
                 },
                 json=body,
             )
+            log.info(f"[SubAgent API] OpenAI 响应 | status={resp.status_code}")
             if resp.status_code != 200:
                 log.warning(
                     f"[SubAgent API] OpenAI HTTP {resp.status_code} | "
-                    f"url={url} | body={resp.text[:300]}"
+                    f"url={url} | body={resp.text[:500]}"
                 )
                 return None
             data = resp.json()
@@ -467,15 +481,28 @@ class SubAgentTool(BaseTool):
             log.warning(f"[SubAgent API] OpenAI 异常: {type(e).__name__}: {e} | url={url}")
             return None
 
-    def _build_tools_schema(self, tool_names: set) -> list:
-        """从 tool_names 构建 Anthropic 格式的 tools schema"""
+    def _build_tools_schema(self, tool_names: set, protocol: str = "anthropic") -> list:
+        """从 tool_names 构建 tools schema（根据协议返回不同格式）"""
         if not self._skill_manager:
             return []
         tools = []
         for name in tool_names:
             try:
                 inst = self._skill_manager._get_instance(name)
-                tools.append(inst.to_anthropic_tool())
+                if protocol == "openai":
+                    # OpenAI 格式：{"type": "function", "function": {...}}
+                    anthropic_tool = inst.to_anthropic_tool()
+                    tools.append({
+                        "type": "function",
+                        "function": {
+                            "name": anthropic_tool["name"],
+                            "description": anthropic_tool["description"],
+                            "parameters": anthropic_tool["input_schema"],
+                        }
+                    })
+                else:
+                    # Anthropic 格式
+                    tools.append(inst.to_anthropic_tool())
             except Exception:
                 pass
         return tools
@@ -525,11 +552,14 @@ class SubAgentTool(BaseTool):
                     entry["tool_calls"] = m["tool_calls"]
                 result.append(entry)
             elif role == "user" and isinstance(m.get("content"), list):
-                entry = {"role": "tool", "content": ""}
+                # 处理 tool_result 消息（Anthropic 格式转 OpenAI 格式）
                 for item in m["content"]:
                     if item.get("type") == "tool_result":
-                        entry["content"] = item["content"]
-                result.append(entry)
+                        result.append({
+                            "role": "tool",
+                            "tool_call_id": item["tool_use_id"],  # OpenAI 需要 tool_call_id
+                            "content": item["content"]
+                        })
             else:
                 result.append({"role": m["role"], "content": str(m.get("content", ""))})
         return result

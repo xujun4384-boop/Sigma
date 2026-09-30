@@ -26,35 +26,57 @@ export default function QuestionnaireDisplay({ data, onSubmit }: Props) {
   const { t } = useTranslation()
   const [currentIndex, setCurrentIndex] = useState(0)
   const [answers, setAnswers] = useState<Record<string, string | string[]>>({})
+  // 选项之外的自定义文本答案：当用户觉得选项都不合适时，可自行输入
+  const [customText, setCustomText] = useState<Record<string, string>>({})
   const [submitted, setSubmitted] = useState(false)
 
   const questions = Array.isArray(data.questions) ? data.questions : []
   const currentQuestion = questions[currentIndex]
   const options = Array.isArray(currentQuestion?.options) ? currentQuestion.options.filter((option): option is string => typeof option === 'string') : []
   const isLast = currentIndex === questions.length - 1
+  const currentCustom = (typeof customText[currentQuestion?.id ?? ''] === 'string' ? customText[currentQuestion?.id ?? ''] : '') || ''
 
   // 检查当前题目是否已填写
   const isCurrentAnswered = (() => {
     if (!currentQuestion) return false
     const a = answers[currentQuestion.id]
-    if (currentQuestion.type === 'open') return typeof a === 'string' && a.trim().length > 0
-    if (currentQuestion.type === 'multi_choice') return Array.isArray(a) && a.length > 0
-    return typeof a === 'string' && a.length > 0
+    // 选项或自定义文本任一填写即视为已答
+    const hasCustom = currentCustom.trim().length > 0
+    if (currentQuestion.type === 'single_choice') return (typeof a === 'string' && a.length > 0) || hasCustom
+    if (currentQuestion.type === 'multi_choice') return (Array.isArray(a) && a.length > 0) || hasCustom
+    return typeof a === 'string' && a.trim().length > 0
   })()
 
   // 检查全部必填题是否已填写
   const allRequiredAnswered = questions.every(q => {
     if (q.required === false) return true
     const a = answers[q.id]
-    if (q.type === 'open') return typeof a === 'string' && a.trim().length > 0
-    if (q.type === 'multi_choice') return Array.isArray(a) && a.length > 0
-    return typeof a === 'string' && a.length > 0
+    const hasCustom = (customText[q.id] || '').trim().length > 0
+    if (q.type === 'single_choice') return (typeof a === 'string' && a.length > 0) || hasCustom
+    if (q.type === 'multi_choice') return (Array.isArray(a) && a.length > 0) || hasCustom
+    return typeof a === 'string' && a.trim().length > 0
   })
 
   const handleNext = () => {
     if (isLast) {
       setSubmitted(true)
-      onSubmit(data.request_id, answers)
+      // 把每题的自定义文本合并进最终答案
+      const finalAnswers: Record<string, string | string[]> = {}
+      questions.forEach(q => {
+        const a = answers[q.id]
+        const custom = (customText[q.id] || '').trim()
+        if (q.type === 'single_choice') {
+          // 自定义文本优先；否则用所选选项
+          finalAnswers[q.id] = custom || (typeof a === 'string' && a ? a : '')
+        } else if (q.type === 'multi_choice') {
+          const arr = Array.isArray(a) ? [...a] : []
+          if (custom && !arr.includes(custom)) arr.push(custom)
+          finalAnswers[q.id] = arr
+        } else {
+          finalAnswers[q.id] = typeof a === 'string' ? a : ''
+        }
+      })
+      onSubmit(data.request_id, finalAnswers)
     } else {
       setCurrentIndex(i => Math.min(i + 1, questions.length - 1))
     }
@@ -66,6 +88,8 @@ export default function QuestionnaireDisplay({ data, onSubmit }: Props) {
 
   const handleSingleChoice = (value: string) => {
     setAnswers(prev => ({ ...prev, [currentQuestion.id]: prev[currentQuestion.id] === value ? '' : value }))
+    // 选择了选项则清空自定义文本，保持单选语义
+    setCustomText(prev => ({ ...prev, [currentQuestion.id]: '' }))
   }
 
   const handleMultiChoice = (value: string) => {
@@ -74,6 +98,14 @@ export default function QuestionnaireDisplay({ data, onSubmit }: Props) {
       const next = current.includes(value) ? current.filter(v => v !== value) : [...current, value]
       return { ...prev, [currentQuestion.id]: next }
     })
+  }
+
+  const handleCustomChange = (value: string) => {
+    setCustomText(prev => ({ ...prev, [currentQuestion.id]: value }))
+    // 单选题输入自定义文本时，清除已选中项，二者互斥
+    if (currentQuestion?.type === 'single_choice') {
+      setAnswers(prev => ({ ...prev, [currentQuestion.id]: '' }))
+    }
   }
 
   const handleOpenChange = (value: string) => {
@@ -108,45 +140,67 @@ export default function QuestionnaireDisplay({ data, onSubmit }: Props) {
         </label>
 
         {currentQuestion?.type === 'single_choice' && (
-          <div className="questionnaire-options">
-            {options.map((opt, i) => {
-              const selected = answers[currentQuestion.id] === opt
-              return (
-                <button
-                  key={i}
-                  className={`questionnaire-option ${selected ? 'selected' : ''}`}
-                  onClick={() => handleSingleChoice(opt)}
-                  disabled={submitted}
-                >
-                  <span className={`questionnaire-radio ${selected ? 'checked' : ''}`}>
-                    {selected && <span className="questionnaire-radio-dot" />}
-                  </span>
-                  <span>{opt}</span>
-                </button>
-              )
-            })}
-          </div>
+          <>
+            <div className="questionnaire-options">
+              {options.map((opt, i) => {
+                const selected = answers[currentQuestion.id] === opt
+                return (
+                  <button
+                    key={i}
+                    className={`questionnaire-option ${selected ? 'selected' : ''}`}
+                    onClick={() => handleSingleChoice(opt)}
+                    disabled={submitted}
+                  >
+                    <span className={`questionnaire-radio ${selected ? 'checked' : ''}`}>
+                      {selected && <span className="questionnaire-radio-dot" />}
+                    </span>
+                    <span>{opt}</span>
+                  </button>
+                )
+              })}
+            </div>
+            <div className="questionnaire-custom">
+              <input
+                className="questionnaire-custom-input"
+                value={currentCustom}
+                onChange={e => handleCustomChange(e.target.value)}
+                placeholder={t("questionnaire.customPlaceholder")}
+                disabled={submitted}
+              />
+            </div>
+          </>
         )}
 
         {currentQuestion?.type === 'multi_choice' && (
-          <div className="questionnaire-options">
-            {options.map((opt, i) => {
-              const selected = ((answers[currentQuestion.id] as string[]) || []).includes(opt)
-              return (
-                <button
-                  key={i}
-                  className={`questionnaire-option ${selected ? 'selected' : ''}`}
-                  onClick={() => handleMultiChoice(opt)}
-                  disabled={submitted}
-                >
-                  <span className={`questionnaire-checkbox ${selected ? 'checked' : ''}`}>
-                    {selected && <Check size={12} />}
-                  </span>
-                  <span>{opt}</span>
-                </button>
-              )
-            })}
-          </div>
+          <>
+            <div className="questionnaire-options">
+              {options.map((opt, i) => {
+                const selected = ((answers[currentQuestion.id] as string[]) || []).includes(opt)
+                return (
+                  <button
+                    key={i}
+                    className={`questionnaire-option ${selected ? 'selected' : ''}`}
+                    onClick={() => handleMultiChoice(opt)}
+                    disabled={submitted}
+                  >
+                    <span className={`questionnaire-checkbox ${selected ? 'checked' : ''}`}>
+                      {selected && <Check size={12} />}
+                    </span>
+                    <span>{opt}</span>
+                  </button>
+                )
+              })}
+            </div>
+            <div className="questionnaire-custom">
+              <input
+                className="questionnaire-custom-input"
+                value={currentCustom}
+                onChange={e => handleCustomChange(e.target.value)}
+                placeholder={t("questionnaire.customPlaceholder")}
+                disabled={submitted}
+              />
+            </div>
+          </>
         )}
 
         {currentQuestion?.type === 'open' && (

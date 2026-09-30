@@ -380,7 +380,7 @@ class NetworkBridgeTool(BaseTool):
     # ─── Vision 截图分析 ───
 
     def _handle_analyze_screenshot(self, params: dict) -> dict:
-        """截图并调用 vision API 分析。"""
+        """截图并返回文件路径，由主 LLM 通过 batch_read 读取。"""
         source = params.get("source", "visible")  # visible | full
         screenshot_action = "screenshot" if source == "visible" else "cdp_screenshot"
         # 透传 format/quality 等截图参数
@@ -397,125 +397,24 @@ class NetworkBridgeTool(BaseTool):
             }
 
         data = screenshot_result.get("data", {})
-        analysis = self._analyze_screenshot_from_result(data, params.get("prompt"))
-        if not analysis.get("success"):
+        screenshot_path = data.get("path", "")
+
+        if not screenshot_path:
             return {
                 "action": "analyze_screenshot",
                 "success": False,
-                "error": analysis.get("error", "视觉分析失败"),
+                "error": "截图结果中没有文件路径",
             }
 
+        # 返回文件路径，由主 LLM 通过 batch_read 读取
         return {
             "action": "analyze_screenshot",
             "success": True,
             "data": {
-                "analysis": analysis.get("analysis", ""),
+                "analysis": f"[截图已完成，文件路径: {screenshot_path}。可使用 batch_read 读取]",
+                "screenshot_path": screenshot_path,
             },
         }
-
-    def _analyze_screenshot_from_result(self, data: dict, prompt: str | None = None) -> dict:
-        """从截图结果中提取 base64 并调用 vision API。"""
-        screenshot = data.get("screenshot", "")
-        mime_type = data.get("mimeType", "image/jpeg")
-        if not screenshot:
-            return {"success": False, "error": "截图结果中没有图片数据"}
-
-        # 移除 data URI 前缀
-        if "," in screenshot:
-            base64_data = screenshot.split(",", 1)[1]
-        else:
-            base64_data = screenshot
-
-        return self._analyze_screenshot(base64_data, mime_type, prompt)
-
-    def _get_vision_config(self) -> dict | None:
-        """从服务端获取 vision 配置。"""
-        try:
-            resp = requests.get(f"{SIGMA_BRIDGE_URL}/vision-config", timeout=5)
-            result = resp.json()
-            if result.get("success") and result.get("config"):
-                return result["config"]
-        except Exception as e:
-            print(f"[NetworkBridge] 获取 vision 配置失败: {e}")
-        return None
-
-    def _analyze_screenshot(self, base64_image: str, mime_type: str = "image/jpeg", prompt: str | None = None) -> dict:
-        """调用 vision API 分析截图。当前实现基于 Anthropic 兼容协议。"""
-        config = self._get_vision_config()
-        if not config:
-            return {
-                "success": False,
-                "error": "未配置 vision key，请在主程序 Settings 中配置 visionApiKey/visionModel/visionBaseUrl",
-            }
-
-        api_key = config.get("apiKey", "")
-        base_url = config.get("baseUrl", "").rstrip("/")
-        model = config.get("model", "")
-
-        if not api_key or not base_url or not model:
-            return {"success": False, "error": "vision 配置不完整"}
-
-        default_prompt = (
-            "请详细描述这张网页截图。包括："
-            "1. 页面整体布局和主要内容；"
-            "2. 是否有弹窗、下拉菜单、提示框等浮动层，以及它们的内容和位置；"
-            "3. 页面上可见的可操作元素（按钮、输入框、链接）及其文字；"
-            "4. 任何错误提示、加载状态或异常信息。"
-        )
-
-        # Anthropic image source 只接受有限的 media_type
-        media_type = mime_type if mime_type.startswith("image/") else "image/jpeg"
-        if media_type not in ("image/jpeg", "image/png", "image/gif", "image/webp"):
-            media_type = "image/jpeg"
-
-        payload = {
-            "model": model,
-            "max_tokens": 2048,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt or default_prompt},
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": media_type,
-                                "data": base64_image,
-                            },
-                        },
-                    ],
-                }
-            ],
-        }
-
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        }
-
-        try:
-            resp = requests.post(
-                f"{base_url}/v1/messages",
-                json=payload,
-                headers=headers,
-                timeout=60,
-            )
-            resp.raise_for_status()
-            result = resp.json()
-            content = result.get("content", [])
-            text = ""
-            for block in content:
-                if block.get("type") == "text":
-                    text += block.get("text", "")
-            return {"success": True, "analysis": text.strip()}
-        except requests.HTTPError as e:
-            return {
-                "success": False,
-                "error": f"vision API 请求失败: {e.response.status_code} {e.response.text[:300]}",
-            }
-        except Exception as e:
-            return {"success": False, "error": f"vision API 调用异常: {str(e)}"}
 
 
 skill = NetworkBridgeTool()
