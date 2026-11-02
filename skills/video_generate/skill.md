@@ -145,7 +145,7 @@
 # 2. video_scene/opendesign_video 返回的 output_path 是绝对路径，后续直接使用
 # 3. 配图统一放 video_work/<项目名>/assets/，opendesign_video 通过 assets_dir 引用
 # 4. 自定义 HTML 也请写入 video_work/<项目名>/ 目录内
-# 5. 旁白用 doubao_tts（不生成 BGM），合成时 video_compose 传 scene_audios，bgm_enabled 保持 false
+# 5. 旁白用 doubao_tts，合成时 video_compose 传 scene_audios
 
 # ═══ 依赖要求 ═══
 
@@ -171,7 +171,7 @@
 #   height (integer, 可选, 默认1080) 视频高度
 
 # ── video_compose ──
-# 多场景拼接合成，叠加旁白音频和字幕。无 BGM。
+# 多场景拼接合成，叠加旁白音频和字幕。
 #
 # 参数:
 #   output_path (string, 必填) 最终输出 mp4 路径
@@ -181,7 +181,6 @@
 #   width (integer, 可选, 默认1920)
 #   height (integer, 可选, 默认1080)
 #   fps (integer, 可选, 默认30)
-#   （bgm_enabled 保持 false，不生成 BGM）
 
 # ── doubao_tts（独立 skill，此处列关键参数） ──
 # 旁白生成。详见 doubao_tts skill。
@@ -190,7 +189,7 @@
 #   text (string, 必填) 旁白文本
 #   output_path (string, 必填) 输出 mp3 路径
 #   project (string, 可选) 项目名
-#   speaker (string, 可选) 音色ID，默认广告解说2.0
+#   speaker (string, 可选) 音色ID，留空则用 Settings「配音音色」，再空则内置默认（广告解说2.0）
 #   speech_rate (integer, 可选) 语速 -50~100
 #   loudness_rate (integer, 可选) 音量 -50~100
 # 输出: output_path + duration（旁白时长）+ words（字级时间戳）

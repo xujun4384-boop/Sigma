@@ -12,92 +12,69 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
+from model_presets import (
+    find_preset,
+    family_for,
+    keep_thinking_history as _keep_thinking_history,
+    max_tokens_field,
+    normalize_thinking,
+    resolve_effective_protocol as _resolve_effective_protocol,
+    resolve_vision_request as _resolve_vision_request,
+    thinking_params,
+)
+
 CHARS_PER_TOKEN = 1.8  # 中英混合估算（中文约1.3字符/token, 英文约4字符/token）
 
-# 各模型上下文窗口大小（tokens）
-# 注意：这些只是本地缓存，实际应通过 /api/model-info 从 API 动态获取
-# 只有当 API 不支持 /models 端点时才需要在这里添加
-MODEL_CONTEXT_SIZES: dict[str, int] = {
-    "kimi-for-coding": 1_000_000,
-    "kimi-for-coding-thinking": 1_000_000,
-    "k3": 1_048_576,
-    # MiniMax 系列（API 不支持 /models 端点，需要手动配置）
-    "MiniMax-M3": 1_000_000,
-    "minimax-m3": 1_000_000,
-}
 DEFAULT_CONTEXT_SIZE = 200_000
 
-# 前缀匹配规则（仅作为 fallback，实际应通过 API 获取）
-MODEL_CONTEXT_PREFIXES: dict[str, int] = {}
-
-# 模型上下文窗口和显式推理模式由每个 LLM 配置传入；表内保留旧模型默认值。
-MODEL_THINKING_CONFIGS: dict[str, dict] = {
-    "k3": {"type": "enabled", "effort": "max", "budget_tokens": 16000},
-}
-THINKING_OUTPUT_PAD = 4096
-
-# 思考模式映射表：(provider, protocol) → {adaptive, enabled, disabled} 对应的请求参数
-# 值为 None 表示不注入任何 thinking 相关参数
-THINKING_PARAM_MAP: dict[tuple[str, str], dict[str, dict | None]] = {
-    # MiniMax Anthropic 协议
-    ("minimax", "anthropic"): {
-        "adaptive": {"thinking": {"type": "adaptive"}},
-        "enabled":  {"thinking": {"type": "adaptive"}},
-        "disabled": {"thinking": {"type": "disabled"}},
-    },
-    # MiniMax OpenAI 协议（M3 默认开启 adaptive，关闭需显式 disabled）
-    ("minimax", "openai"): {
-        "adaptive": None,  # 默认即为 adaptive，无需注入
-        "enabled":  None,  # 同上
-        "disabled": {"thinking": {"type": "disabled"}},
-    },
-    # Kimi Code（K2.7-code 强制开启，无法关闭；K3 用 reasoning_effort）
-    ("kimi-code", "openai"): {
-        "adaptive": {"reasoning_effort": "high"},
-        "enabled":  {"reasoning_effort": "high"},
-        "disabled": None,  # K2.7-code 不支持关闭，静默降级为不注入（保持默认开启）
-    },
-    # Kimi 标准模型（K2.6 等，OpenAI 协议）
-    ("kimi", "openai"): {
-        "adaptive": {"thinking": {"type": "enabled"}},
-        "enabled":  {"thinking": {"type": "enabled"}},
-        "disabled": {"thinking": {"type": "disabled"}},
-    },
-    # DeepSeek OpenAI 协议
-    ("deepseek", "openai"): {
-        "adaptive": {"thinking": {"type": "enabled"}},
-        "enabled":  {"thinking": {"type": "enabled"}},
-        "disabled": None,  # DeepSeek 默认关闭，无需注入
-    },
-    # 火山引擎 Ark（豆包）OpenAI 协议
-    ("ark", "openai"): {
-        "adaptive": {"thinking": {"type": "enabled"}},
-        "enabled":  {"thinking": {"type": "enabled"}},
-        "disabled": {"thinking": {"type": "disabled"}},
-    },
-    # 通用 Anthropic 协议（Claude 等）
-    ("generic", "anthropic"): {
-        "adaptive": {"thinking": {"type": "adaptive"}},
-        "enabled":  {"thinking": {"type": "enabled", "budget_tokens": 16000}},
-        "disabled": None,
-    },
-    # 通用 OpenAI 协议（兼容端点，保守策略）
-    # 注：reasoning_effort 合法值仅 low/medium/high（OpenAI 规范），不能使用 max/xhigh
-    ("generic", "openai"): {
-        "adaptive": {"reasoning_effort": "medium"},
-        "enabled":  {"reasoning_effort": "high"},
-        "disabled": {"reasoning_effort": "low"},
-    },
-}
+# 思考参数约定已经迁移到 model_presets.py 的 FAMILIES / MODELS。
+# 这里只保留对外的兼容封装，供 tool_loop / sub_agent / image_reader 复用。
 
 
-def _inject_thinking_params(payload: dict, provider: str, protocol: str, thinking_mode: str) -> None:
-    """按 provider + protocol + thinking_mode 注入对应的 thinking 控制参数。"""
-    mapping = THINKING_PARAM_MAP.get((provider, protocol))
-    if mapping is None:
-        # 未覆盖的 provider+protocol 组合，fallback 到 generic
-        mapping = THINKING_PARAM_MAP.get(("generic", protocol), {})
-    params = mapping.get(thinking_mode)
+# 视觉识别（读图 / 抽帧复审）的低耗思考参数登记在 model_presets.VISION_THINKING_PARAMS，
+# 这里转发一层，保持 image_reader 等调用方无需感知注册表位置。
+def resolve_vision_request(
+    provider: str, protocol: str, model: str | None = None
+) -> tuple[str, list[dict]]:
+    return _resolve_vision_request(provider, protocol, model)
+
+
+# 长输出生成（视频代码 / HTML / TSX / 蓝图 / 脚本）的统一输出预算。
+# 思考 token 与正文共用 max_tokens，且实际经常是思考量超过正文；若只按正文估算，
+# 思考会先把额度吃光并触发截断。因此统一按整体给足，并保证回退档位仍是"正文能写完"的水位。
+LONG_OUTPUT_MAX_TOKENS = 128_000
+LONG_OUTPUT_TOKEN_FALLBACKS = (96_000, 64_000, 32_000)
+
+
+def resolve_effective_protocol(
+    provider: str, protocol: str, thinking_mode: str, model: str | None = None
+) -> str:
+    """返回实际应使用的协议（当前协议无法让该档位生效时自动切换）。"""
+    return _resolve_effective_protocol(provider, protocol, thinking_mode, model)
+
+
+def keep_thinking_history(provider: str, model: str | None = None) -> bool:
+    """该模型是否需要把思考内容随历史回传（由模型家族声明）。"""
+    return _keep_thinking_history(provider, model)
+
+
+def thinking_preview(
+    provider: str, protocol: str, thinking_mode: str, model: str | None = None
+) -> str:
+    """给前端显示「这一档实际会发什么」，避免设置是黑箱。"""
+    effective = resolve_effective_protocol(provider, protocol, thinking_mode, model)
+    params = thinking_params(provider, effective, thinking_mode, model)
+    prefix = "" if effective == protocol else f"[{protocol} 端点不支持该档位，实际改用 {effective} 协议] "
+    if params is None:
+        return prefix + "不注入 thinking 参数（跟随模型默认）"
+    return prefix + json.dumps(params, ensure_ascii=False)
+
+
+def _inject_thinking_params(
+    payload: dict, provider: str, protocol: str, thinking_mode: str, model: str | None = None
+) -> None:
+    """按模型家族注入该档位对应的 thinking 控制参数。"""
+    params = thinking_params(provider, protocol, thinking_mode, model)
     if params:
         payload.update(params)
 
@@ -122,53 +99,84 @@ def estimate_tokens(msgs: list[dict]) -> int:
     return int(chars / CHARS_PER_TOKEN)
 
 
-def get_context_size(model: str, configured_size: int | None = None) -> int:
-    """获取模型上下文窗口大小（优先使用显式配置的窗口）。
-    
+def get_context_size(
+    model: str, configured_size: int | None = None, provider: str | None = None
+) -> int:
+    """获取模型上下文窗口大小（优先使用用户显式配置的窗口）。
+
     查找顺序：
-    1. 显式配置的 configured_size
-    2. 精确匹配 MODEL_CONTEXT_SIZES
-    3. 前缀匹配 MODEL_CONTEXT_PREFIXES
-    4. 默认值 DEFAULT_CONTEXT_SIZE
+    1. 用户配置的 configured_size
+    2. 模型预设注册表（model_presets）
+    3. 默认值 DEFAULT_CONTEXT_SIZE
     """
     if configured_size:
         return int(configured_size)
-    
-    # 精确匹配（仅作为本地缓存，实际应通过 API 获取）
-    if model in MODEL_CONTEXT_SIZES:
-        return MODEL_CONTEXT_SIZES[model]
-    
+
+    preset = find_preset(provider, model)
+    if preset:
+        return int(preset.context)
+
     return DEFAULT_CONTEXT_SIZE
 
 
-def get_compact_threshold(model: str, configured_size: int | None = None) -> int:
+def get_compact_threshold(
+    model: str, configured_size: int | None = None, provider: str | None = None
+) -> int:
     """获取触发压缩的 token 阈值"""
-    return int(get_context_size(model, configured_size) * COMPACT_THRESHOLD)
+    return int(get_context_size(model, configured_size, provider) * COMPACT_THRESHOLD)
 
 
 def apply_model_specific_params(payload: dict, model: str, protocol: str, llm_params: dict | None = None) -> dict:
-    """按 provider + protocol + thinking_mode 注入模型特定参数。"""
+    """按模型预设注入请求参数。
+
+    优先级：用户显式传值 > 预设默认值 > 不注入。
+    模型不支持的采样参数不会出现在请求体里，避免把 400 抛给用户。
+    """
     params = llm_params or {}
     provider = params.get("provider", "generic")
-    thinking_mode = params.get("thinking", "adaptive")
+    thinking = normalize_thinking(params.get("thinking"))
 
-    # MiniMax 特殊参数（temperature/top_p/max_tokens）
-    if provider == "minimax":
-        if params.get("temperature") is not None:
-            payload["temperature"] = params["temperature"]
-        if params.get("top_p") is not None:
-            payload["top_p"] = params["top_p"]
-        if params.get("max_tokens") is not None:
-            payload["max_tokens"] = params["max_tokens"]
+    # 思考档位（协议切换已由 resolve_effective_protocol 在构造请求前完成）
+    _inject_thinking_params(payload, provider, protocol, thinking, model)
 
-    # 注入 thinking 参数
-    _inject_thinking_params(payload, provider, protocol, thinking_mode)
+    # 采样参数：只在模型声明支持时才注入
+    preset = find_preset(provider, model)
+    family = family_for(provider, model, protocol)
+    specs = {
+        "temperature": family.temperature,
+        "top_p": family.top_p,
+        "top_k": family.top_k,
+    }
+    for key, spec in specs.items():
+        if not spec.supported:
+            continue
+        value = params.get(key)
+        if value is None:
+            # 调用方已显式设置的值优先于预设默认值
+            if key in payload:
+                continue
+            value = spec.default
+        if value is None:
+            continue
+        if spec.minimum is not None and value < spec.minimum:
+            value = spec.minimum
+        if spec.maximum is not None and value > spec.maximum:
+            value = spec.maximum
+        payload[key] = value
 
-    # 旧模型兼容：k3 的 budget_tokens 调整 max_tokens
-    cfg = MODEL_THINKING_CONFIGS.get(model)
-    if cfg and protocol == "anthropic" and thinking_mode == "enabled":
-        min_tokens = cfg["budget_tokens"] + THINKING_OUTPUT_PAD
-        payload["max_tokens"] = max(payload.get("max_tokens", 0), min_tokens)
+    # 输出上限：用户显式值 > 调用方已设置的值 > 预设推荐值；同时受模型最大输出约束
+    field = max_tokens_field(provider, protocol, model)
+    alt_field = "max_tokens" if field == "max_completion_tokens" else "max_completion_tokens"
+    value = params.get("max_tokens")
+    if value is None:
+        value = payload.get(field, payload.get(alt_field))
+    if value is None and preset:
+        value = preset.recommended_max_tokens
+    if value is not None:
+        if preset and preset.max_output:
+            value = min(int(value), int(preset.max_output))
+        payload.pop(alt_field, None)
+        payload[field] = int(value)
 
     return payload
 
@@ -182,11 +190,12 @@ class ContextTracker:
     - 支持持久化到 session 文件
     """
 
-    def __init__(self, model: str = "", context_size: int | None = None):
+    def __init__(self, model: str = "", context_size: int | None = None, provider: str | None = None):
         self.model = model
+        self.provider = provider
         self._configured_context_size = context_size
         self.current_tokens: int = 0
-        self.max_tokens: int = get_context_size(model, context_size)
+        self.max_tokens: int = get_context_size(model, context_size, provider)
 
     @property
     def usage_ratio(self) -> float:
@@ -210,7 +219,7 @@ class ContextTracker:
     def set_model(self, model: str):
         """切换模型时更新上下文窗口大小"""
         self.model = model
-        self.max_tokens = get_context_size(model, self._configured_context_size)
+        self.max_tokens = get_context_size(model, self._configured_context_size, self.provider)
 
     def to_dict(self) -> dict:
         return {

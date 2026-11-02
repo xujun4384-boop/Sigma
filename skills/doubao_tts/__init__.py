@@ -1,11 +1,12 @@
 """
-doubao_tts skill - 豆包语音合成大模型 2.0 旁白生成
+doubao_tts skill - 豆包语音合成大模型旁白生成
 
 提供工具:
   doubao_tts - 文本 → 旁白 mp3，并返回字级时间戳，用于对齐视频字幕/分镜。
 
 设计要点:
   - 使用火山引擎语音技术（openspeech）的单向流式合成接口。
+  - 音色按注册表解析其所属模型代次资源 ID（1.0 / 2.0 必须与音色匹配）。
   - key 复用前端 SkillKeys 配置（doubaoVoiceApiKey），与 image_generate 同模式。
   - 字级时间戳是「旁白时间与视频内容契合」的关键。
 """
@@ -13,8 +14,7 @@ import os
 from pathlib import Path
 
 from skills.base import BaseTool, ToolParameter, ToolResult
-
-DEFAULT_SPEAKER = "zh_male_guanggaojieshuo_uranus_bigtts"  # 广告解说 2.0
+from .voices import resolve_voice, resolve_resource
 
 
 def _auto_output_path(output_path: str, project: str, cwd: str) -> Path:
@@ -32,7 +32,7 @@ def _auto_output_path(output_path: str, project: str, cwd: str) -> Path:
 class DoubaoTTS(BaseTool):
     name = "doubao_tts"
     description = (
-        "用豆包语音合成大模型 2.0 生成视频旁白（mp3）。"
+        "用豆包语音合成大模型生成视频旁白（mp3）。"
         "返回字级时间戳（每个字的起止时间），可用于精确对齐视频字幕和分镜时长。"
         "适合为宣传片、新闻资讯等视频生成高质量旁白配音。"
     )
@@ -40,21 +40,23 @@ class DoubaoTTS(BaseTool):
         ToolParameter("text", "string", "待合成的旁白文本"),
         ToolParameter("output_path", "string", "输出 mp3 文件路径（相对路径自动放在 video_work/<project>/ 下）"),
         ToolParameter("project", "string", "项目名，与视频工具保持一致", required=False),
-        ToolParameter("speaker", "string", "音色ID，默认「广告解说2.0」", required=False, default=DEFAULT_SPEAKER),
+        ToolParameter("speaker", "string", "音色ID。留空则使用用户在 Settings 中配置的旁白音色。", required=False),
         ToolParameter("speech_rate", "integer", "语速 -50~100（100=2倍速，-50=0.5倍速）", required=False, default=0),
         ToolParameter("loudness_rate", "integer", "音量 -50~100", required=False, default=0),
     ]
 
-    def __init__(self, cwd: str = ".", api_key: str = "", **kwargs):
+    def __init__(self, cwd: str = ".", api_key: str = "", default_speaker: str = "", **kwargs):
         super().__init__(cwd)
         self.api_key = api_key
+        # Settings 中配置的旁白音色；留空则回落内置默认
+        self.default_speaker = (default_speaker or "").strip()
 
     def execute(
         self,
         text: str,
         output_path: str,
         project: str = None,
-        speaker: str = DEFAULT_SPEAKER,
+        speaker: str = None,
         speech_rate: int = 0,
         loudness_rate: int = 0,
         **kwargs,
@@ -63,6 +65,11 @@ class DoubaoTTS(BaseTool):
             return ToolResult.fail(
                 "未配置豆包语音 API Key。请在 Settings → Skill Keys 中配置豆包语音生成 Key。"
             )
+
+        # 音色优先级：调用方显式传入 > Settings 配置 > 内置默认
+        speaker = resolve_voice(speaker, self.default_speaker)
+        # 资源 ID（模型代次）必须与音色匹配，否则会鉴权失败
+        resource_id = resolve_resource(speaker)
 
         out = _auto_output_path(output_path, project, self.cwd)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -75,6 +82,7 @@ class DoubaoTTS(BaseTool):
                 api_key=self.api_key,
                 speaker=speaker,
                 output_path=str(out),
+                resource_id=resource_id,
                 speech_rate=speech_rate,
                 loudness_rate=loudness_rate,
             )

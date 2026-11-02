@@ -146,6 +146,8 @@ class FileWatcher:
                 ".ts": "typescript", ".tsx": "typescript", ".jsx": "javascript",
                 ".html": "html", ".css": "css", ".json": "json",
                 ".yaml": "yaml", ".yml": "yaml", ".xml": "xml",
+                ".mp3": "audio", ".wav": "audio", ".m4a": "audio", ".aac": "audio",
+                ".flac": "audio", ".ogg": "audio", ".opus": "audio", ".wma": "audio", ".aiff": "audio",
             }.get(suffix, suffix.lstrip("."))
             file_name = os.path.basename(path_str)
 

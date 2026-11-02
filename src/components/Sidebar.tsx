@@ -1,6 +1,8 @@
-import { useState, useEffect, type ReactNode } from 'react'
+import { useState, useEffect, Fragment, type ReactNode } from 'react'
 import { X, Settings2, Wrench, Key, Eye, EyeOff, Plus, Trash2, Play, CheckCircle2, XCircle, Loader2, Moon, Sun, Monitor, Palette, Bot, ChevronLeft, Pencil, Check, Wallet, GripVertical } from 'lucide-react'
-import type { KimiConfig, LLMEntry, SigmaConfig, SkillKeysConfig } from '../types/electron'
+import type { KimiConfig, LLMEntry, ModelRegistry, SigmaConfig, SkillKeysConfig } from '../types/electron'
+import ModelConfigForm from './ModelConfigForm'
+import { describeEntry, THINKING_LABEL_KEYS } from '../utils/modelPresets'
 import type { ThemeMode } from '../App'
 import { getBackendUrl, getSigmaConfig, saveSigmaConfig } from '../utils/config'
 import './Sidebar.css'
@@ -19,6 +21,7 @@ interface SystemSettings {
 
 interface SidebarProps {
   config: KimiConfig
+  modelRegistry: ModelRegistry | null
   system: SystemSettings
   themeMode: ThemeMode
   language: string
@@ -67,7 +70,7 @@ export function resolveActiveLLMForAgent(config: KimiConfig): { baseUrl: string;
   return null
 }
 
-export default function Sidebar({ config, system, themeMode, language, onSaveConfig, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLLM, onSaveSystem, onThemeChange, onLanguageChange }: SidebarProps) {
+export default function Sidebar({ config, modelRegistry, system, themeMode, language, onSaveConfig, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLLM, onSaveSystem, onThemeChange, onLanguageChange }: SidebarProps) {
   const [open, setOpen] = useState(false)
   const [tab, setTab] = useState<Tab>('api')
   const { t } = useTranslation()
@@ -114,7 +117,7 @@ export default function Sidebar({ config, system, themeMode, language, onSaveCon
         {/* Tab Content */}
         <div className="sidebar-body">
           <div style={{ display: tab === 'api' ? 'block' : 'none' }}>
-            <ApiTab config={config} onSave={onSaveConfig} onAddLLM={onAddLLM} onUpdateLLM={onUpdateLLM} onRemoveLLM={onRemoveLLM} onSelectLLM={onSelectLLM} />
+            <ApiTab config={config} registry={modelRegistry} onSave={onSaveConfig} onAddLLM={onAddLLM} onUpdateLLM={onUpdateLLM} onRemoveLLM={onRemoveLLM} onSelectLLM={onSelectLLM} />
           </div>
           <div style={{ display: tab === 'skill_keys' ? 'block' : 'none' }}>
             <SkillKeysTab config={config} onSave={onSaveConfig} />
@@ -140,8 +143,9 @@ export default function Sidebar({ config, system, themeMode, language, onSaveCon
 
 // ── API Config Tab ──
 
-function ApiTab({ config, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLLM }: {
+function ApiTab({ config, registry, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLLM }: {
   config: KimiConfig
+  registry: ModelRegistry | null
   onSave: (c: KimiConfig) => void
   onAddLLM: (e: LLMEntry) => void
   onUpdateLLM: (e: LLMEntry) => void
@@ -149,25 +153,19 @@ function ApiTab({ config, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLL
   onSelectLLM: (id: string) => void
 }) {
   const { t } = useTranslation()
-  const [form, setForm] = useState<KimiConfig>({ ...config })
-  const [showKey, setShowKey] = useState(false)
-  const [saved, setSaved] = useState(false)
-  const [llmName, setLlmName] = useState('')
-  const [provider, setProvider] = useState<'generic' | 'deepseek' | 'kimi-code' | 'minimax' | 'ark'>('generic')
-  const [thinkingMode, setThinkingMode] = useState<'adaptive' | 'enabled' | 'disabled'>('adaptive')
   const [testingIds, setTestingIds] = useState<Record<string, 'testing' | 'success' | 'error'>>({})
   const [balances, setBalances] = useState<Record<string, { loading: boolean; data?: any; error?: string }>>({})
   const [view, setView] = useState<'list' | 'add' | 'edit'>('list')
   const [editingLLM, setEditingLLM] = useState<LLMEntry | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<LLMEntry | null>(null)
   const [dragOverId, setDragOverId] = useState<string | null>(null)
-  const [isFetchingContext, setIsFetchingContext] = useState(false)
-  const [contextSize, setContextSize] = useState<number | null>(null)
 
   // 进入列表时自动查询一次支持余额查询的 LLM
   useEffect(() => {
     if (view !== 'list') return
-    const balanceEntries = config.llms.filter(l => l.provider && l.provider !== 'generic')
+    // 只有注册表声明支持余额查询的服务商才自动查询，避免给 Claude / 自定义中转误报错误
+    const balanceProviders = new Set((registry?.providers || []).filter(p => p.supportsBalance).map(p => p.id))
+    const balanceEntries = config.llms.filter(l => l.provider && balanceProviders.has(l.provider))
     balanceEntries.forEach(entry => {
       if (!balances[entry.id]) {
         handleFetchBalance(entry)
@@ -176,98 +174,23 @@ function ApiTab({ config, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLL
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, config.llms])
 
-  const update = (patch: Partial<KimiConfig>) => {
-    setForm(prev => ({ ...prev, ...patch }))
-    setSaved(false)
-  }
-
-  const resetForm = () => {
-    setForm({ ...config })
-    setLlmName('')
-    setProvider('generic')
-    setThinkingMode('adaptive')
-    setEditingLLM(null)
-    setShowKey(false)
-  }
-
-  const openAdd = () => { resetForm(); setView('add') }
+  const openAdd = () => { setEditingLLM(null); setView('add') }
   const openEdit = (entry: LLMEntry, e: React.MouseEvent) => {
     e.stopPropagation()
     setEditingLLM(entry)
-    setLlmName(entry.name)
-    setProvider(entry.provider || 'generic')
-    setThinkingMode(entry.thinking || 'adaptive')
-    setForm(prev => ({ ...prev, baseUrl: entry.baseUrl, apiKey: entry.apiKey, model: entry.model, protocol: entry.protocol }))
-    setContextSize(entry.contextSize || null)  // 恢复已保存的上下文大小
     setView('edit')
   }
-  const backToList = () => { setView('list'); setEditingLLM(null); setContextSize(null) }
+  const backToList = () => { setView('list'); setEditingLLM(null) }
 
-  // 从 API 获取模型上下文大小
-  const fetchModelContext = async () => {
-    if (!form.baseUrl || !form.apiKey || !form.model) return
-    
-    setIsFetchingContext(true)
-    try {
-      const baseUrl = await getBackendUrl()
-      const resp = await fetch(`${baseUrl}/api/model-info`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          baseUrl: form.baseUrl,
-          apiKey: form.apiKey,
-          model: form.model,
-          protocol: form.protocol,
-        }),
-      })
-      const data = await resp.json()
-      if (data.success && data.contextSize) {
-        setContextSize(data.contextSize)
-      } else {
-        console.warn('获取模型上下文失败:', data.error)
-      }
-    } catch (err) {
-      console.error('获取模型上下文失败:', err)
-    } finally {
-      setIsFetchingContext(false)
-    }
-  }
-
-  const handleAddLLM = () => {
-    if (!form.apiKey || !form.model) return
-    const entry: LLMEntry = {
-      id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6),
-      name: llmName.trim() ? llmName.trim() : `${form.protocol === 'anthropic' ? 'Anthropic' : 'OpenAI'} - ${form.model}`,
-      baseUrl: form.baseUrl,
-      apiKey: form.apiKey,
-      model: form.model,
-      protocol: form.protocol,
-      provider,
-      thinking: thinkingMode,
-      ...(contextSize ? { contextSize } : {}),
-      ...(provider === 'minimax' ? { maxTokens: 32768, temperature: 1.0, topP: 0.95 } : {}),
-    }
-    onAddLLM(entry)
+  const handleSubmitLLM = (entry: LLMEntry) => {
+    if (editingLLM) onUpdateLLM(entry)
+    else onAddLLM(entry)
     backToList()
   }
 
-  const handleUpdateLLM = () => {
-    if (!editingLLM || !form.apiKey || !form.model) return
-    const entry: LLMEntry = {
-      ...editingLLM,
-      name: llmName.trim() ? llmName.trim() : `${form.protocol === 'anthropic' ? 'Anthropic' : 'OpenAI'} - ${form.model}`,
-      baseUrl: form.baseUrl,
-      apiKey: form.apiKey,
-      model: form.model,
-      protocol: form.protocol,
-      provider,
-      thinking: thinkingMode,
-      ...(contextSize ? { contextSize } : {}),
-      ...(provider === 'minimax' ? { maxTokens: 32768, temperature: 1.0, topP: 0.95 } : {}),
-    }
-    onUpdateLLM(entry)
-    backToList()
-  }
+  // 余额查询能力由注册表声明，前端不维护厂商白名单
+  const canQueryBalance = (provider?: string) =>
+    Boolean(provider && registry?.providers.find(p => p.id === provider)?.supportsBalance)
 
   const formatResetIn = (resetTime?: string) => {
     if (!resetTime) return ''
@@ -288,6 +211,8 @@ function ApiTab({ config, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLL
     const limit = Number(detail.limit ?? 0)
     const used = Number(detail.used ?? 0)
     const usedPercent = limit > 0 ? Math.min(100, Math.max(0, (used / limit) * 100)) : 0
+    const remaining = Number(detail.remaining)
+    const hasCount = limit > 0 && Number.isFinite(remaining)
     let colorClass = 'good'
     if (usedPercent >= 80) colorClass = 'critical'
     else if (usedPercent >= 50) colorClass = 'warning'
@@ -295,6 +220,11 @@ function ApiTab({ config, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLL
       <div className="usage-block">
         <div className="usage-block-header">
           <span className="usage-block-title">{title}</span>
+          {hasCount && (
+            <span className="usage-block-count">
+              {t("api.usage_remaining")} {Math.max(0, Math.round(remaining))}/{Math.round(limit)}
+            </span>
+          )}
           <span className={`usage-block-percent ${colorClass}`}>{Math.round(usedPercent)}%</span>
           <span className="usage-block-reset">{formatResetIn(detail.resetTime)}</span>
         </div>
@@ -307,7 +237,7 @@ function ApiTab({ config, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLL
 
   const handleFetchBalance = async (entry: LLMEntry, e?: React.MouseEvent) => {
     e?.stopPropagation()
-    if (!entry.provider || entry.provider === 'generic') return
+    if (!canQueryBalance(entry.provider)) return
     setBalances(prev => ({ ...prev, [entry.id]: { loading: true } }))
     try {
       const baseUrl = await getBackendUrl()
@@ -471,7 +401,20 @@ function ApiTab({ config, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLL
                     {entry.protocol === 'anthropic' ? 'Anthropic' : 'OpenAI'} &middot; {entry.model}
                   </div>
                   <div className="llm-card-detail llm-card-url">{entry.baseUrl}</div>
-                  {entry.provider && entry.provider !== 'generic' && (
+                  {(() => {
+                    const info = describeEntry(entry, registry)
+                    return (
+                      <div className="llm-card-caps">
+                        {info.familyLabel && <span className="cap-chip">{info.familyLabel}</span>}
+                        {info.context && <span className="cap-chip">{Math.round(info.context / 1000)}k</span>}
+                        <span className="cap-chip">
+                          {t(THINKING_LABEL_KEYS[info.thinking] || 'api.thinking_option_default')}
+                        </span>
+                        {info.vision && <span className="cap-chip">{t('api.cap_vision')}</span>}
+                      </div>
+                    )
+                  })()}
+                  {canQueryBalance(entry.provider) && (
                     <div
                       className={`llm-card-balance ${balances[entry.id]?.loading ? 'loading' : ''}`}
                       onClick={(e) => handleFetchBalance(entry, e)}
@@ -492,27 +435,70 @@ function ApiTab({ config, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLL
                       ) : entry.provider === 'minimax' && balances[entry.id]?.data ? (
                         <div className="usage-bars">
                           {(() => {
-                            const list: any[] = Array.isArray(balances[entry.id].data?.model_remains) ? balances[entry.id].data.model_remains : []
-                            const pick = (pred: (m: any) => boolean) => list.find(pred)
-                            const row =
-                              pick(m => typeof m?.model_name === 'string' && /minimax-m/i.test(m.model_name)) ||
-                              pick(m => m?.model_name === 'general') ||
-                              list[0] ||
-                              null
-                            if (!row) return null
-                            const toDetail = (pct: any, ms: any) => {
+                            const rows: any[] = Array.isArray(balances[entry.id].data?.model_remains)
+                              ? balances[entry.id].data.model_remains
+                              : []
+                            if (rows.length === 0) return null
+                            // 剩余毫秒 → 重置时刻 ISO 字符串
+                            const resetFromMs = (ms: any) => {
+                              const remain = Number(ms)
+                              return Number.isFinite(remain) ? new Date(Date.now() + remain).toISOString() : undefined
+                            }
+                            // 用量行分两类：带计数配额的模型行（total_count > 0）与仅百分比的共享池行
+                            const hasCounts = (r: any) =>
+                              Number(r?.current_interval_total_count) > 0 || Number(r?.current_weekly_total_count) > 0
+                            // 周期标签由窗口跨度推导：≥20h 视为「当日」，否则按 5 小时窗口
+                            const intervalLabel = (r: any) => {
+                              const span = Number(r?.end_time) - Number(r?.start_time)
+                              return Number.isFinite(span) && span >= 20 * 3600 * 1000
+                                ? t("api.usage_daily")
+                                : t("api.usage_5h")
+                            }
+                            // 模型名优先走 i18n，缺失时回退原始 model_name（不写死任何模型标识）
+                            const modelLabel = (r: any) => {
+                              const raw = String(r?.model_name ?? "")
+                              if (!raw) return ""
+                              const key = `api.minimax_model_${raw.toLowerCase()}`
+                              const label = t(key)
+                              return label === key ? raw : label
+                            }
+                            const toPercentDetail = (pct: any, ms: any) => {
                               const p = Number(pct)
                               const used = Number.isFinite(p) ? Math.max(0, Math.min(100, 100 - p)) : 0
-                              const remain = Number(ms)
-                              const resetTime = Number.isFinite(remain) ? new Date(Date.now() + remain).toISOString() : undefined
-                              return { limit: 100, used, resetTime }
+                              return { limit: 100, used, resetTime: resetFromMs(ms) }
                             }
-                            return (
-                              <>
-                                <UsageBlock title="5小时窗口" detail={toDetail(row.current_interval_remaining_percent, row.remains_time)} />
-                                <UsageBlock title="本周用量" detail={toDetail(row.current_weekly_remaining_percent, row.weekly_remains_time)} />
-                              </>
-                            )
+                            return rows.map((row, idx) => {
+                              const name = modelLabel(row)
+                              if (hasCounts(row)) {
+                                const total = Number(row.current_interval_total_count) || 0
+                                const used = Number(row.current_interval_usage_count) || 0
+                                const title = name ? `${name} · ${intervalLabel(row)}` : intervalLabel(row)
+                                return (
+                                  <UsageBlock
+                                    key={idx}
+                                    title={title}
+                                    detail={{
+                                      limit: total,
+                                      used,
+                                      remaining: Math.max(0, total - used),
+                                      resetTime: resetFromMs(row.remains_time),
+                                    }}
+                                  />
+                                )
+                              }
+                              return (
+                                <Fragment key={idx}>
+                                  <UsageBlock
+                                    title={name ? `${name} · ${t("api.usage_5h")}` : t("api.usage_5h")}
+                                    detail={toPercentDetail(row.current_interval_remaining_percent, row.remains_time)}
+                                  />
+                                  <UsageBlock
+                                    title={name ? `${name} · ${t("api.usage_weekly")}` : t("api.usage_weekly")}
+                                    detail={toPercentDetail(row.current_weekly_remaining_percent, row.weekly_remains_time)}
+                                  />
+                                </Fragment>
+                              )
+                            })
                           })()}
                         </div>
                       ) : balances[entry.id]?.data ? (
@@ -585,109 +571,43 @@ function ApiTab({ config, onSave, onAddLLM, onUpdateLLM, onRemoveLLM, onSelectLL
     )
   }
 
-  // 添加 / 编辑 LLM 表单
-  const isEdit = view === 'edit'
+  // 添加 / 编辑 LLM：表单由模型预设注册表驱动
   return (
-    <div className="tab-content">
-      <div className="llm-add-form">
-        <div className="llm-add-header">
-          <button className="llm-back-btn" onClick={backToList}>
-            <ChevronLeft size={16} />
-          </button>
-          <h3>{isEdit ? t("api.edit_llm") : t("api.add_llm")}</h3>
-        </div>
-
-        <div className="config-section">
-          <h3>{t("api.protocol")}</h3>
-          <div className="toggle-group">
-            <button className={form.protocol === 'anthropic' ? 'active' : ''} onClick={() => update({ protocol: 'anthropic' })}>Anthropic</button>
-            <button className={form.protocol === 'openai' ? 'active' : ''} onClick={() => update({ protocol: 'openai' })}>OpenAI</button>
-          </div>
-        </div>
-
-        <div className="config-section">
-          <h3>{t("api.provider")}</h3>
-          <div className="toggle-group">
-            <button className={provider === 'generic' ? 'active' : ''} onClick={() => setProvider('generic')}>{t("api.provider_generic")}</button>
-            <button className={provider === 'deepseek' ? 'active' : ''} onClick={() => setProvider('deepseek')}>{t("api.provider_deepseek")}</button>
-            <button className={provider === 'kimi-code' ? 'active' : ''} onClick={() => setProvider('kimi-code')}>{t("api.provider_kimi_code")}</button>
-            <button className={provider === 'minimax' ? 'active' : ''} onClick={() => setProvider('minimax')}>{t("api.provider_minimax")}</button>
-            <button className={provider === 'ark' ? 'active' : ''} onClick={() => setProvider('ark')}>火山引擎</button>
-          </div>
-        </div>
-
-        <div className="config-section">
-          <h3>{t("api.thinking_mode")}</h3>
-          <div className="toggle-group">
-            <button className={thinkingMode === 'adaptive' ? 'active' : ''} onClick={() => setThinkingMode('adaptive')}>{t("api.thinking_adaptive")}</button>
-            <button className={thinkingMode === 'enabled' ? 'active' : ''} onClick={() => setThinkingMode('enabled')}>{t("api.thinking_enabled")}</button>
-            <button className={thinkingMode === 'disabled' ? 'active' : ''} onClick={() => setThinkingMode('disabled')}>{t("api.thinking_disabled")}</button>
-          </div>
-          <div className="config-hint">{t("api.thinking_hint")}</div>
-        </div>
-
-        <div className="config-field">
-          <label>{t("api.llm_name")}</label>
-          <input type="text" value={llmName} onChange={e => setLlmName(e.target.value)} placeholder={t("api.llm_name_placeholder")} />
-        </div>
-
-        <div className="config-field">
-          <label>{t("api.base_url")}</label>
-          <input type="text" value={form.baseUrl} onChange={e => update({ baseUrl: e.target.value })} placeholder={t("api.base_url_placeholder")} />
-        </div>
-
-        <div className="config-field">
-          <label>{t("api.model")}</label>
-          <div className="model-input-row">
-            <input type="text" value={form.model} onChange={e => update({ model: e.target.value })} placeholder={t("api.model_placeholder")} />
-            <button 
-              className="fetch-context-btn" 
-              onClick={fetchModelContext}
-              disabled={!form.baseUrl || !form.apiKey || !form.model}
-              title="从 API 获取模型上下文大小"
-            >
-              {isFetchingContext ? '获取中...' : '获取上下文'}
-            </button>
-          </div>
-          {contextSize && (
-            <div className="context-size-hint">
-              上下文: {(contextSize / 1000).toFixed(0)}k tokens
-            </div>
-          )}
-        </div>
-
-        <div className="config-field">
-          <label>{t("api.api_key")}</label>
-          <div className="key-row">
-            <input type={showKey ? 'text' : 'password'} value={form.apiKey} onChange={e => update({ apiKey: e.target.value })} placeholder="sk-..." />
-            <button onClick={() => setShowKey(v => !v)}>{showKey ? <EyeOff size={14} /> : <Eye size={14} />}</button>
-          </div>
-        </div>
-
-        <div className="key-preview">
-          <code>{form.apiKey ? `${form.apiKey.slice(0, 12)}...${form.apiKey.slice(-4)}` : t("api.not_set")}</code>
-        </div>
-
-        <div className="config-actions">
-          <button className="add-llm-btn primary" onClick={isEdit ? handleUpdateLLM : handleAddLLM} disabled={!form.apiKey || !form.model}>
-            {isEdit ? <Check size={14} /> : <Plus size={14} />}
-            {isEdit ? t("api.save_changes") : t("api.add_key")}
-          </button>
-        </div>
-      </div>
-    </div>
+    <ModelConfigForm
+      registry={registry}
+      editing={editingLLM}
+      onCancel={backToList}
+      onSubmit={handleSubmitLLM}
+    />
   )
 }
+
+
+
+
 
 // ── Skill Keys Tab ──
 
 type SkillFieldType = 'text' | 'password' | 'toggle' | 'select'
 
+interface SkillFieldOption {
+  value: string
+  label: string
+}
+
+/** 供 select/toggle 动态取选项的上下文（如从后端拉取的音色列表） */
+interface SkillFieldOptionCtx {
+  voices: SkillFieldOption[]
+}
+
 interface SkillFieldDef {
   key: keyof SkillKeysConfig
   type: SkillFieldType
   labelKey: string
-  options?: { value: string; label: string }[]
+  /** 静态选项数组，或按上下文动态生成；不提供时 select 回退为 LLM 列表 */
+  options?: SkillFieldOption[] | ((ctx: SkillFieldOptionCtx) => SkillFieldOption[])
+  /** type=select 时空值选项的文案 key，默认「跟随主 LLM」 */
+  emptyLabelKey?: string
   placeholder?: string | ((sk: SkillKeysConfig) => string)
   hintKey?: string
   visibleIf?: (sk: SkillKeysConfig) => boolean
@@ -747,6 +667,21 @@ const SKILL_DEFS: SkillDef[] = [
     requiredKeys: ['tavilyApiKey'],
     fields: [
       { key: 'tavilyApiKey', type: 'password', labelKey: 'skill_keys.tavily_api_key', placeholder: 'tvly-...', hintKey: 'skill_keys.tavily_register' },
+    ],
+  },
+  {
+    id: 'image_reader',
+    titleKey: 'skill_keys.image_reader',
+    descKey: 'skill_keys.image_reader_desc',
+    requiredKeys: [],
+    fields: [
+      {
+        key: 'visionLlmId',
+        type: 'select',
+        labelKey: 'skill_keys.vision_llm',
+        emptyLabelKey: 'skill_keys.llm_follow_main',
+        hintKey: 'skill_keys.vision_llm_hint',
+      },
     ],
   },
   {
@@ -823,37 +758,50 @@ const SKILL_DEFS: SkillDef[] = [
     ],
   },
   {
-    id: 'music_generate',
-    titleKey: 'skill_keys.music_generate',
-    descKey: 'skill_keys.music_generate_desc',
-    requiredKeys: ['musicGenApiKey'],
-    fields: [
-      { key: 'musicGenApiKey', type: 'password', labelKey: 'skill_keys.music_gen_api_key', placeholder: 'MiniMax Token Plan subscription key' },
-      { key: 'musicGenBaseUrl', type: 'text', labelKey: 'skill_keys.music_gen_base_url', placeholder: 'https://api.minimaxi.com/v1', hintKey: 'skill_keys.music_gen_default' },
-      { key: 'musicGenModel', type: 'text', labelKey: 'skill_keys.music_gen_model', placeholder: 'music-3.0', hintKey: 'skill_keys.music_gen_model_hint' },
-    ],
-    test: {
-      labelKey: 'skill_keys.test_music',
-      endpoint: '/api/test-music',
-      buildBody: (sk) => ({
-        apiKey: sk.musicGenApiKey,
-        baseUrl: sk.musicGenBaseUrl,
-        model: sk.musicGenModel,
-      }),
-    },
-  },
-  {
     id: 'video_cinematic',
     titleKey: 'skill_keys.video_cinematic',
     descKey: 'skill_keys.video_cinematic_desc',
-    requiredKeys: ['minimaxVideoApiKey'],
+    requiredKeys: [],
     fields: [
+      {
+        key: 'cinematicVideoProvider',
+        type: 'toggle',
+        labelKey: 'skill_keys.video_provider',
+        options: [
+          { value: 'minimax', label: 'MiniMax Hailuo' },
+          { value: 'ark', label: '火山方舟 Seedance' },
+        ],
+      },
       {
         key: 'minimaxVideoApiKey',
         type: 'password',
         labelKey: 'skill_keys.minimax_video_api_key',
         placeholder: 'MiniMax Token Plan subscription key',
         hintKey: 'skill_keys.minimax_video_api_key_hint',
+        visibleIf: sk => (sk.cinematicVideoProvider || 'minimax') === 'minimax',
+      },
+      {
+        key: 'videoArkApiKey',
+        type: 'password',
+        labelKey: 'skill_keys.video_ark_api_key',
+        placeholder: 'ARK API key',
+        hintKey: 'skill_keys.video_ark_api_key_hint',
+        visibleIf: sk => sk.cinematicVideoProvider === 'ark',
+      },
+      {
+        key: 'videoArkBaseUrl',
+        type: 'text',
+        labelKey: 'skill_keys.video_ark_base_url',
+        placeholder: 'https://ark.cn-beijing.volces.com/api/v3',
+        visibleIf: sk => sk.cinematicVideoProvider === 'ark',
+      },
+      {
+        key: 'videoArkModel',
+        type: 'text',
+        labelKey: 'skill_keys.video_ark_model',
+        placeholder: 'doubao-seedance-1-0-pro-250528',
+        hintKey: 'skill_keys.video_ark_model_hint',
+        visibleIf: sk => sk.cinematicVideoProvider === 'ark',
       },
     ],
   },
@@ -870,25 +818,77 @@ const SKILL_DEFS: SkillDef[] = [
         placeholder: '豆包语音 API Key',
         hintKey: 'skill_keys.doubao_voice_api_key_hint',
       },
+      {
+        key: 'doubaoVoiceSpeaker',
+        type: 'select',
+        labelKey: 'skill_keys.doubao_voice_speaker',
+        options: ctx => ctx.voices,
+        emptyLabelKey: 'skill_keys.doubao_voice_default',
+        hintKey: 'skill_keys.doubao_voice_speaker_hint',
+      },
     ],
   },
   {
-    id: 'opendesign',
-    titleKey: 'skill_keys.opendesign',
-    descKey: 'skill_keys.opendesign_desc',
-    requiredKeys: [],
+    id: 'music_gen',
+    titleKey: 'skill_keys.music_gen',
+    descKey: 'skill_keys.music_gen_desc',
+    requiredKeys: ['musicGenApiKey'],
     fields: [
-      { key: 'opendesignLlmId', type: 'select', labelKey: 'skill_keys.opendesign_llm_id', hintKey: 'skill_keys.opendesign_llm_id_hint' },
-    ],
-    test: {
-      labelKey: 'skill_keys.test_opendesign',
-      endpoint: '/api/test-opendesign',
-      buildBody: (sk, config) => {
-        const llm = (config.llms || []).find(l => l.id === sk.opendesignLlmId)
-        if (!llm) return { llmId: sk.opendesignLlmId || '' }
-        return { baseUrl: llm.baseUrl, apiKey: llm.apiKey, model: llm.model, protocol: llm.protocol }
+      {
+        key: 'musicGenProvider',
+        type: 'toggle',
+        labelKey: 'skill_keys.music_gen_provider',
+        options: [
+          { value: 'tencent_tokenhub', label: '腾讯云 TokenHub' },
+          { value: 'minimax', label: 'MiniMax' },
+        ],
       },
-    },
+      {
+        key: 'musicGenApiKey',
+        type: 'password',
+        labelKey: 'skill_keys.music_gen_api_key',
+        placeholder: (sk) => (sk.musicGenProvider === 'minimax' ? 'MiniMax API Key' : 'TokenHub API Key'),
+        hintKey: 'skill_keys.music_gen_api_key_hint',
+      },
+      {
+        key: 'musicGenBaseUrl',
+        type: 'text',
+        labelKey: 'skill_keys.music_gen_base_url',
+        placeholder: (sk) => (sk.musicGenProvider === 'minimax'
+          ? 'https://api.minimaxi.com'
+          : 'https://tokenhub.tencentmaas.com'),
+      },
+      {
+        key: 'musicGenModel',
+        type: 'text',
+        labelKey: 'skill_keys.music_gen_model',
+        placeholder: (sk) => (sk.musicGenProvider === 'minimax'
+          ? 'music-3.0'
+          : 'minimax-music-v3.0'),
+      },
+    ],
+  },
+  {
+    id: 'amap',
+    titleKey: 'skill_keys.amap',
+    descKey: 'skill_keys.amap_desc',
+    requiredKeys: ['amapJsKey', 'amapSecurityCode'],
+    fields: [
+      {
+        key: 'amapJsKey',
+        type: 'password',
+        labelKey: 'skill_keys.amap_js_key',
+        placeholder: '高德 Web端(JS API) Key',
+        hintKey: 'skill_keys.amap_js_key_hint',
+      },
+      {
+        key: 'amapSecurityCode',
+        type: 'password',
+        labelKey: 'skill_keys.amap_security_code',
+        placeholder: '安全密钥 jscode',
+        hintKey: 'skill_keys.amap_security_code_hint',
+      },
+    ],
   },
   {
     id: 'wechat',
@@ -1039,8 +1039,12 @@ function normalizeImageGenConfig(config: KimiConfig): KimiConfig {
       imageMinimaxApiKey: current.imageMinimaxApiKey || (provider === 'minimax' ? legacyKey : ''),
       imageMinimaxBaseUrl: current.imageMinimaxBaseUrl || (provider === 'minimax' ? legacyBase : 'https://api.minimaxi.com/v1'),
       imageMinimaxModel: current.imageMinimaxModel || (provider === 'minimax' ? legacyModel : 'image-01'),
-      // 视频生成 Key 默认为空字符串（不强制复用 musicGenApiKey，避免误用订阅额度）
+      // 视频生成 Key 默认为空字符串（不强制复用其它订阅 Key，避免误用订阅额度）
       minimaxVideoApiKey: current.minimaxVideoApiKey || '',
+      cinematicVideoProvider: current.cinematicVideoProvider || 'minimax',
+      videoArkApiKey: current.videoArkApiKey || '',
+      videoArkBaseUrl: current.videoArkBaseUrl || 'https://ark.cn-beijing.volces.com/api/v3',
+      videoArkModel: current.videoArkModel || 'doubao-seedance-1-0-pro-250528',
     } as SkillKeysConfig,
   }
 }
@@ -1053,6 +1057,21 @@ function SkillKeysTab({ config, onSave }: { config: KimiConfig; onSave: (c: Kimi
   const [visibleSecrets, setVisibleSecrets] = useState<Record<string, boolean>>({})
   const [testing, setTesting] = useState<Record<string, boolean>>({})
   const [testResults, setTestResults] = useState<Record<string, { success: boolean; error?: string; detail?: string }>>({})
+  // 配音音色列表：单一数据源在后端 voices.py，通过 API 拉取，避免前后端各写一份
+  const [voices, setVoices] = useState<SkillFieldOption[]>([])
+
+  useEffect(() => {
+    let cancelled = false
+    getBackendUrl()
+      .then(baseUrl => fetch(`${baseUrl}/api/doubao-voices`))
+      .then(resp => resp.json())
+      .then(data => {
+        if (cancelled || !Array.isArray(data?.voices)) return
+        setVoices(data.voices.map((v: { id: string; label: string }) => ({ value: v.id, label: v.label })))
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [])
 
   const sk = (form.skillKeys || {}) as SkillKeysConfig
 
@@ -1120,6 +1139,9 @@ function SkillKeysTab({ config, onSave }: { config: KimiConfig; onSave: (c: Kimi
           if (field.visibleIf && !field.visibleIf(sk)) return null
           const value = sk[field.key] as string
           const placeholder = typeof field.placeholder === 'function' ? field.placeholder(sk) : field.placeholder
+          const fieldOptions = typeof field.options === 'function'
+            ? field.options({ voices })
+            : field.options
 
           return (
             <div className="config-field" key={field.key}>
@@ -1127,7 +1149,7 @@ function SkillKeysTab({ config, onSave }: { config: KimiConfig; onSave: (c: Kimi
 
               {field.type === 'toggle' ? (
                 <div className="toggle-group">
-                  {(field.options || []).map(opt => (
+                  {(fieldOptions || []).map(opt => (
                     <button
                       key={opt.value}
                       className={value === opt.value ? 'active' : ''}
@@ -1154,10 +1176,16 @@ function SkillKeysTab({ config, onSave }: { config: KimiConfig; onSave: (c: Kimi
                   value={value}
                   onChange={e => setField(field.key, e.target.value)}
                 >
-                  <option value="">{t("skill_keys.llm_follow_main")}</option>
-                  {(config.llms || []).map(llm => (
-                    <option key={llm.id} value={llm.id}>{llm.name} ({llm.model})</option>
-                  ))}
+                  <option value="">
+                    {field.emptyLabelKey ? t(field.emptyLabelKey) : t("skill_keys.llm_follow_main")}
+                  </option>
+                  {fieldOptions
+                    ? fieldOptions.map(opt => (
+                        <option key={opt.value} value={opt.value}>{opt.label}</option>
+                      ))
+                    : (config.llms || []).map(llm => (
+                        <option key={llm.id} value={llm.id}>{llm.name} ({llm.model})</option>
+                      ))}
                 </select>
               ) : (
                 <input

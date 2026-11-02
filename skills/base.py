@@ -16,6 +16,31 @@ class ToolParameter:
     required: bool = True
     enum: list[str] | None = None
     default: Any = None
+    # 条件必填：仅当 required=False 时生效。形如 {"engine": ["opendesign", "manim"]}，
+    # 表示"当 engine 取值为 opendesign 或 manim 时，本参数变为必填"。
+    # 用于一个工具按判别参数分派多种子能力、各子能力必填项不同的场景。
+    required_when: dict[str, list[Any]] | None = None
+
+    def condition_label(self) -> str:
+        """把 required_when 渲染成人类可读条件串，供 schema 描述与报错信息复用。"""
+        if not self.required_when:
+            return ""
+        return " 且 ".join(
+            f"{key} 为 {'/'.join(str(v) for v in vals)}"
+            for key, vals in self.required_when.items()
+        )
+
+    def is_required(self, kwargs: dict) -> bool:
+        """按当前入参判断本参数此刻是否必填（无条件参数恒用 required）。"""
+        if self.required:
+            return True
+        if not self.required_when:
+            return False
+        for key, allowed in self.required_when.items():
+            current = kwargs.get(key)
+            if not any(str(current) == str(v) for v in allowed):
+                return False
+        return True
 
 
 @dataclass
@@ -77,22 +102,52 @@ class BaseTool(ABC):
             return p
         return (Path(self.cwd) / p) if self.cwd else p
 
+    def is_cancelled(self) -> bool:
+        """当前会话是否已被用户取消。长循环应在每次迭代开始处检查并提前退出。"""
+        from cancellation import cancelled
+
+        return cancelled()
+
+    def raise_if_cancelled(self) -> None:
+        """取消时抛 ToolCancelledError，供循环内快速短路。"""
+        from cancellation import raise_if_cancelled
+
+        raise_if_cancelled()
+
     def validate_input(self, **kwargs) -> tuple[bool, str]:
-        """校验输入参数"""
+        """校验输入参数（含按 required_when 触发的条件必填）"""
         for param in self.parameters:
             value = kwargs.get(param.name)
-            if param.required and (value is None or value == ""):
-                # 列出所有必填参数帮助 LLM 修正
+            if param.is_required(kwargs) and (value is None or value == ""):
+                cond = param.condition_label()
+                hint = f"（条件: {cond}）" if cond else ""
+                # 列出「当前条件下」的必填参数，帮助 LLM 一次性补齐
                 required_params = ", ".join(
-                    f"{p.name} ({p.type})" for p in self.parameters if p.required
+                    f"{p.name}{('[' + p.condition_label() + ']') if p.condition_label() else ''}"
+                    for p in self.parameters if p.is_required(kwargs)
                 )
                 return False, (
-                    f"缺少必填参数: {param.name}。"
-                    f"该工具必填参数: {required_params}"
+                    f"缺少必填参数: {param.name}{hint}。"
+                    f"当前条件下所需参数: {required_params}"
                 )
             if value is not None and param.enum and value not in param.enum:
                 return False, f"参数 {param.name} 取值不在允许范围: {param.enum}"
         return True, ""
+
+    @staticmethod
+    def _param_property(p: "ToolParameter") -> dict:
+        """把参数导出为 JSON Schema 属性；条件必填写进 description，
+        保持标准 schema（不用 oneOf/anyOf，避免部分 provider 严格校验报错）。"""
+        desc = p.description
+        cond = p.condition_label()
+        if cond:
+            desc = f"{desc}（当 {cond} 时必填）"
+        prop: dict[str, Any] = {"type": p.type, "description": desc}
+        if p.enum:
+            prop["enum"] = p.enum
+        if p.default is not None:
+            prop["default"] = p.default
+        return prop
 
     def check_permission(self, **kwargs) -> tuple[bool, str]:
         """权限检查，默认允许，子类可覆盖"""
@@ -108,12 +163,7 @@ class BaseTool(ABC):
         properties = {}
         required = []
         for p in self.parameters:
-            prop: dict[str, Any] = {"type": p.type, "description": p.description}
-            if p.enum:
-                prop["enum"] = p.enum
-            if p.default is not None:
-                prop["default"] = p.default
-            properties[p.name] = prop
+            properties[p.name] = self._param_property(p)
             if p.required:
                 required.append(p.name)
 
@@ -132,12 +182,7 @@ class BaseTool(ABC):
         properties = {}
         required = []
         for p in self.parameters:
-            prop: dict[str, Any] = {"type": p.type, "description": p.description}
-            if p.enum:
-                prop["enum"] = p.enum
-            if p.default is not None:
-                prop["default"] = p.default
-            properties[p.name] = prop
+            properties[p.name] = self._param_property(p)
             if p.required:
                 required.append(p.name)
 

@@ -4,7 +4,7 @@ video_generate skill - 视频生成工具集
 提供三个工具:
   video_scene   - 单个场景录制（模板 or 自定义 HTML → mp4）
   video_tts     - 文本语音合成（text → mp3）
-  video_compose - 多场景拼接合成（video+audio+bgm+subtitle → mp4）
+  video_compose - 多场景拼接合成（video+audio+subtitle → mp4）
 
 LLM 可通过 sandbox 编写自定义 HTML 动画，然后调用 video_scene 录制。
 """
@@ -219,7 +219,7 @@ class VideoTTSTool(BaseTool):
 class VideoComposeTool(BaseTool):
     name = "video_compose"
     description = (
-        "将多个视频场景拼接为最终视频，叠加旁白音频、背景音乐和字幕。\n"
+        "将多个视频场景拼接为最终视频，叠加旁白音频和字幕。\n"
         "scene_videos 和 scene_audios 按索引一一对应（audio 可为空字符串表示无旁白）。\n"
         "subtitles 为 [(文本, 起始秒, 结束秒), ...] 列表。"
     )
@@ -229,8 +229,6 @@ class VideoComposeTool(BaseTool):
         ToolParameter("scene_videos", "array", "场景视频文件路径列表"),
         ToolParameter("scene_audios", "array", "场景旁白音频路径列表（与scene_videos一一对应，可含空字符串）", required=False),
         ToolParameter("subtitles", "array", "字幕列表 [[text, start_sec, end_sec], ...]，默认不叠加字幕", required=False),
-        ToolParameter("bgm_enabled", "boolean", "是否生成背景音乐，默认 false（不自动加 BGM）", required=False, default=False),
-        ToolParameter("bgm_volume", "number", "BGM 音量 (0-1)，仅在 bgm_enabled=true 时生效", required=False, default=0.18),
         ToolParameter("width", "integer", "视频宽度", required=False, default=1920),
         ToolParameter("height", "integer", "视频高度", required=False, default=1080),
         ToolParameter("fps", "integer", "帧率", required=False, default=30),
@@ -238,11 +236,9 @@ class VideoComposeTool(BaseTool):
 
     def execute(self, output_path: str, scene_videos: list,
                 project: str = None, scene_audios: list = None, subtitles: list = None,
-                bgm_enabled: bool = False, bgm_volume: float = 0.18,
                 width: int = 1920, height: int = 1080,
                 fps: int = 30, **kwargs) -> ToolResult:
         from .scripts.composer import compose
-        from .scripts.bgm import generate as generate_bgm
 
         out = _auto_output_path(output_path, project, self.cwd)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -274,31 +270,6 @@ class VideoComposeTool(BaseTool):
                 if isinstance(s, (list, tuple)) and len(s) >= 3:
                     sub_list.append((str(s[0]), float(s[1]), float(s[2])))
 
-        # BGM
-        bgm_path = None
-        if bgm_enabled:
-            self._emit_progress("正在生成背景音乐...")
-            try:
-                from .scripts.composer import get_video_duration
-                total_dur = 0
-                for v in scene_videos:
-                    try:
-                        total_dur += get_video_duration(str(v))
-                    except Exception:
-                        pass
-                if total_dur == 0:
-                    total_dur = 30
-                work_dir = Path(self.cwd) / "video_work"
-                if project:
-                    work_dir = work_dir / project
-                work_dir = work_dir / "output"
-                work_dir.mkdir(parents=True, exist_ok=True)
-                bgm_path = str(work_dir / "_bgm.wav")
-                generate_bgm(total_dur + 2, bgm_path)
-            except Exception as e:
-                # BGM 生成失败不阻塞
-                bgm_path = None
-
         try:
             self._emit_progress(f"正在合成最终视频 ({len(scene_videos)} 个场景)...")
             result = compose(
@@ -306,8 +277,6 @@ class VideoComposeTool(BaseTool):
                 scene_audios=audios,
                 output_path=str(out),
                 subtitles=sub_list,
-                bgm_path=bgm_path,
-                bgm_volume=bgm_volume,
                 width=width,
                 height=height,
                 fps=fps,
@@ -328,7 +297,6 @@ class VideoComposeTool(BaseTool):
             output_path=str(out.absolute()),
             scene_count=len(scene_videos),
             size_mb=round(size_mb, 1),
-            bgm_enabled=bgm_enabled and bgm_path is not None,
         )
 
 

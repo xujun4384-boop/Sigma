@@ -45,6 +45,6 @@
 # output_path (string, 必填) 最终输出 mp4 路径
 # script (string, 可选) 确认后的脚本 JSON（第二次调用时传，跳过脚本设计）
 # project (string, 可选) 项目名
-# speaker (string, 可选) 旁白音色ID，默认广告解说2.0
+# speaker (string, 可选) 旁白音色ID，留空则用 Settings「配音音色」，再空则内置默认（广告解说2.0）
 # fps / width / height (integer, 可选)
 # ---------------------------------------------------------------------------

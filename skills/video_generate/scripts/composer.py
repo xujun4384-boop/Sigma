@@ -154,8 +154,6 @@ def compose(
     scene_audios: list,
     output_path: str,
     subtitles: list = None,
-    bgm_path: str = None,
-    bgm_volume: float = 0.18,
     width: int = 1920,
     height: int = 1080,
     fps: int = 30,
@@ -164,7 +162,6 @@ def compose(
     scene_videos: [video_path, ...]  每个场景的视频文件
     scene_audios: [audio_path | None, ...]  每个场景的旁白音频（可为None）
     subtitles: [(text, start_sec, end_sec), ...] or None
-    bgm_path: 背景音乐路径 or None
     """
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     work_dir = Path(output_path).parent
@@ -227,35 +224,13 @@ def compose(
         video_only = pad
         total_dur = vo_total
 
-    # ── 3. 合成视频 + 旁白（+BGM）──
+    # ── 3. 合成视频 + 旁白 ──
     merged = f"{tmp_prefix}_av.mp4"
-    if vo_merged and bgm_path and os.path.exists(bgm_path):
-        # 视频 + 旁白 + BGM 三路混音
-        r = subprocess.run(
-            [ffmpeg, "-y",
-             "-i", video_only, "-i", vo_merged, "-i", bgm_path,
-             "-filter_complex",
-             f"[2:a]volume={bgm_volume}[bgm];[1:a][bgm]amix=inputs=2:duration=first[aout]",
-             "-map", "0:v", "-map", "[aout]",
-             "-c:v", "copy", "-c:a", "aac", "-t", f"{final_dur:.2f}",
-             merged],
-            capture_output=True, text=True, timeout=180,
-        )
-    elif vo_merged:
+    if vo_merged:
         r = subprocess.run(
             [ffmpeg, "-y",
              "-i", video_only, "-i", vo_merged,
              "-map", "0:v", "-map", "1:a",
-             "-c:v", "copy", "-c:a", "aac", "-t", f"{final_dur:.2f}",
-             merged],
-            capture_output=True, text=True, timeout=180,
-        )
-    elif bgm_path and os.path.exists(bgm_path):
-        r = subprocess.run(
-            [ffmpeg, "-y",
-             "-i", video_only, "-i", bgm_path,
-             "-filter_complex", f"[1:a]volume={bgm_volume}[aout]",
-             "-map", "0:v", "-map", "[aout]",
              "-c:v", "copy", "-c:a", "aac", "-t", f"{final_dur:.2f}",
              merged],
             capture_output=True, text=True, timeout=180,

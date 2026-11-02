@@ -2,8 +2,14 @@
 # ---------------------------------------------------------------------------
 # 摘要
 # 读取本地图片，并以压缩后的 Base64 图像调用视觉模型识别内容。
+# 优先使用 Settings → Skill Keys → 图片读取 中指定的「读图模型」；未指定时跟随主 LLM。
 # 根据识别目标选择三档处理策略，降低大图的网络传输与视觉 token 消耗。
-# 所有 Vision 请求已强制关闭 thinking，避免推理链拖慢识别速度。
+# Vision 请求统一给 8K 输出额度（思考与正文共用），并强制压低思考：
+# 各 provider 先尝试彻底关闭思考（thinking: disabled），端点拒绝（4xx）再退到低强度：
+# MiniMax 关闭失败时退 output_config.effort=low（Anthropic）或 reasoning_effort=low（OpenAI）；
+# Kimi Code 的 Anthropic 兼容端点无法关闭思考，自动切到同 host 的 OpenAI 端点 + reasoning_effort=low；
+# Kimi 标准 / DeepSeek / 火山方舟 直接 thinking: disabled。
+# 若端点拒绝思考字段（4xx），自动按候选列表降级重试；默认视觉超时 120 秒。
 # 需要配置支持 Anthropic 协议的多模态模型（MiniMax M3 / Claude / GLM-4V / 豆包等）。
 #
 # 包含 2 种子操作:

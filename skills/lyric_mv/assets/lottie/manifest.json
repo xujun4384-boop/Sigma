@@ -1,0 +1,6 @@
+{
+  "character": {
+    "dir": "character_frames",
+    "w": 480, "h": 361, "frames": 168, "fps": 24
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "name": "sigma-remotion-hook",
+  "version": "1.0.0",
+  "description": "Sigma Remotion opening-hook templates",
+  "private": true,
+  "license": "UNLICENSED",
+  "engines": {
+    "node": "^20.19.0 || ^22.13.0 || >=24"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.536",
+    "@remotion/effects": "4.0.536",
+    "@remotion/motion-blur": "4.0.536",
+    "@remotion/paths": "4.0.536",
+    "@remotion/shapes": "4.0.536",
+    "react": "19.2.3",
+    "react-dom": "19.2.3",
+    "remotion": "4.0.536"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.7",
+    "@types/web": "0.0.166",
+    "typescript": "5.9.3"
+  },
+  "scripts": {
+    "render": "remotion render src/index.ts Hook",
+    "lint": "tsc"
+  }
+}

@@ -1,0 +1,575 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>animation_painter runtime</title>
+<script src="p5.min.js"></script>
+<script src="p5.brush.js"></script>
+</head>
+<body>
+<canvas id="out" width="1920" height="1080"></canvas>
+<script>
+/* ============================================================================
+   animation_painter 通用运行时（engine/painter.html）
+   ----------------------------------------------------------------------------
+   移植自 PDoomVideo 的 core.js + timeline.js 核心，但做了通用化改造：
+   - 所有 PDoom 特有绑定（P(doom) 角落表、固定转场时间、Clawd 角色）
+     均已移除；改为通过 window.PAINT_CONFIG 注入。
+   - 一切核心绘制能力保留：paint / 几何 / 相机 / 文字 / 纸张 / 笔刷 / 节拍 / 章节注册。
+   - 形状绘制 API 与 PDoomVideo 的 ANIMATION_GUIDE 保持一致，便于 AI 创作。
+
+   模式约定（两种录制皆可）:
+   - 逐帧截图(保真, 推荐)：
+       page.evaluate("window.renderAt(3,'image/jpeg',0.94)") -> dataURL
+   - 实时录屏(兼容 video_scene/recorder.py)：
+       期望 window.CURRENT_FRAME + window.updateAnimation()
+   ============================================================================ */
+
+// ---------- 全局可注入配置（不硬编码：BPM/时长/分辨率/调色板/转场全部可配） ----------
+  const q = new URLSearchParams(location.search);
+  const DEFAULTS = {
+    W: 1920, H: 1080, DUR: 8, FPS: 24,
+    BPM: 88, beatOffset: 0.21,             // 节拍相位偏移（秒）
+    PAL: {
+      paper: '#F3EBDC', ink: '#2B2233', cream: '#FFF5E2',
+      clay: '#D97757', clayDk: '#A84D33', clayLt: '#F2A283',
+      night: '#1F2550', indigo: '#2F3C7A', rose: '#E27A92',
+      ochre: '#E8AA38', sap: '#6E9F58', teal: '#3A9C98',
+      violet: '#7B5CA8', sky: '#8EC3E6'
+    },
+    wipes: [],       // 转场边界秒 [[t0],...] 或省略；来自场景章节边界自动推断
+    wipeDuration: 0.3,
+    placeholder: true,  // 无命中章节时绘制占位（纯背景 + 时间水印）
+  };
+  function mergeCfg(src, def) {
+    const out = {};
+    for (const k in def) {
+      if (src && src[k] !== undefined && src[k] !== null) out[k] = src[k];
+      else if (src && typeof def[k] === 'object' && def[k] !== null && typeof src[k] === 'object') out[k] = mergeCfg(src[k], def[k]);
+      else out[k] = def[k];
+    }
+    return out;
+  }
+  const CFG = mergeCfg(window.PAINT_CONFIG || {}, DEFAULTS);
+  // 允许通过 URL query 覆盖 W/H/DUR/FPS/BPM（录制器不注入 PAINT_CONFIG 时用）
+  if (q.get('w')) CFG.W = +q.get('w');
+  if (q.get('h')) CFG.H = +q.get('h');
+  if (q.get('dur')) CFG.DUR = +q.get('dur');
+  if (q.get('fps')) CFG.FPS = +q.get('fps');
+  if (q.get('bpm')) CFG.BPM = +q.get('bpm');
+  window.PAINT_CONFIG = CFG;
+
+  const W = CFG.W, H = CFG.H, DUR = CFG.DUR;
+  const BPM = CFG.BPM, BEAT = 60 / CFG.BPM, OFF = CFG.beatOffset;
+  const BOIL = 12, TAU = Math.PI * 2;
+  const PAL = CFG.PAL;
+
+  // ---------- 素材通道 ----------
+  // ?assets=JSON 数组（图片的绝对 file:// URL）。setup() 预载完成后，章节脚本可用
+  // __P5FX.img('文件名') 取到 p5.Image，再用全局 image(img, x, y, w, h) 绘制。
+  const ASSET_URLS = (() => { try { return JSON.parse(q.get('assets') || '[]'); } catch (e) { return []; } })();
+  const IMAGES = {};  // 文件名 -> p5.Image
+
+  // ---------- 常量与基础工具（与 PDoomVideo core.js 一致） ----------
+  const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+  const lerp = (a, b, x) => a + (b - a) * x;
+  const ease = x => { x = clamp(x); return x * x * (3 - 2 * x); };
+  const easeOut = x => 1 - Math.pow(1 - clamp(x), 3);
+  const backOut = x => { x = clamp(x); const s = 1.9; return 1 + (s + 1) * Math.pow(x - 1, 3) + s * Math.pow(x - 1, 2); };
+  const easeIn = x => Math.pow(clamp(x), 3);
+  const elasticOut = x => { x = clamp(x); return x === 0 || x === 1 ? x : Math.pow(2, -10 * x) * Math.sin((x * 10 - .75) * (TAU / 3)) + 1; };
+  const hash = i => { const x = Math.sin(i * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); };
+  const frac = x => x - Math.floor(x);
+  const bpOf = t => (t - OFF) / BEAT;
+  const beatN = t => Math.floor(bpOf(t));
+  const pulse = (t, k = 6) => Math.exp(-frac(bpOf(t)) * k);
+  const pulse2 = (t, k = 6) => Math.exp(-frac(bpOf(t) * 2) * k);
+  const wob = (t, f = 1, ph = 0) => Math.sin((t * f + ph) * TAU);
+  const seg = (t, a, b) => clamp((t - a) / (b - a));
+  const jit = a => (random() * 2 - 1) * a;
+  function kf(t, keys, e = ease) {
+    if (t <= keys[0][0]) return keys[0][1];
+    for (let i = 1; i < keys.length; i++) {
+      if (t < keys[i][0]) {
+        const [a, va] = keys[i - 1], [b, vb] = keys[i], k = e((t - a) / (b - a));
+        return Array.isArray(va) ? va.map((v, j) => lerp(v, vb[j], k)) : lerp(va, vb, k);
+      }
+    }
+    return keys[keys.length - 1][1];
+  }
+  function mixCol(a, b, k) {
+    const pa = parseInt(a.slice(1), 16), pb = parseInt(b.slice(1), 16), c = i => Math.round(lerp((pa >> i) & 255, (pb >> i) & 255, clamp(k)));
+    return '#' + ((1 << 24) + (c(16) << 16) + (c(8) << 8) + c(0)).toString(16).slice(1);
+  }
+  const shakeXY = (t, amt) => { const f = Math.floor(t * 24); return [(hash(f * 1.7) - .5) * 2 * amt, (hash(f * 2.3 + 9) - .5) * 2 * amt]; };
+
+  // ---------- 相机 ----------
+  let CAM = null;
+  function camBegin(cx = W / 2, cy = H / 2, zoom = 1, rot = 0) { push(); translate(W / 2, H / 2); rotate(rot); scale(zoom); translate(-cx, -cy); CAM = { cx, cy, zoom, rot }; }
+  function camEnd() { pop(); CAM = null; }
+  function toScreen(x, y) {
+    if (!CAM) return [x, y];
+    const c = Math.cos(CAM.rot), s = Math.sin(CAM.rot), dx = (x - CAM.cx) * CAM.zoom, dy = (y - CAM.cy) * CAM.zoom;
+    return [W / 2 + dx * c - dy * s, H / 2 + dx * s + dy * c];
+  }
+
+  // ---------- 全帧特效 ----------
+  function flash(k, col = '#FFFDF6') { if (k > .01) paint(rectPts(-60, -60, W + 120, H + 120), { wash: col, washOp: 255 * clamp(k), ink: null }); }
+  function irisShape(pts, col = PAL.ink, far = 4000) {
+    const n = pts.length; let cx = 0, cy = 0; for (const p of pts) { cx += p[0]; cy += p[1]; } cx /= n; cy /= n;
+    const out = p => { const dx = p[0] - cx, dy = p[1] - cy, d = Math.hypot(dx, dy) || 1; return [cx + dx / d * far, cy + dy / d * far]; };
+    for (let i = 0; i < n; i++) {
+      const a = pts[i], b = pts[(i + 1) % n], ex = (b[0] - a[0]) * .06, ey = (b[1] - a[1]) * .06;
+      const a2 = [a[0] - ex, a[1] - ey], b2 = [b[0] + ex, b[1] + ey];
+      paint([a2, b2, out(b2), out(a2)], { wash: col, washOp: 255, ink: null });
+    }
+  }
+  function iris(cx, cy, r, col = PAL.ink) { if (r < 4) paint(rectPts(-60, -60, W + 120, H + 120), { wash: col, ink: null }); else irisShape(ellPts(cx, cy, r, r, 40), col); }
+
+  let T = 0, paperG = null, grainC = null, letG = null, outC = null, outX = null;
+  let LETTERS = [];
+
+  // ---------- 几何原语 ----------
+  function rectPts(x, y, w, h, j = 0) {
+    return [[x + jit(j), y + jit(j)], [x + w / 2 + jit(j), y + jit(j) * .5], [x + w + jit(j), y + jit(j)],
+            [x + w + jit(j) * .5, y + h / 2], [x + w + jit(j), y + h + jit(j)], [x + w / 2 + jit(j), y + h + jit(j) * .5],
+            [x + jit(j), y + h + jit(j)], [x + jit(j) * .5, y + h / 2]];
+  }
+  function ellPts(cx, cy, rx, ry, n = 28, j = 0, rot = 0) {
+    const p = []; for (let i = 0; i < n; i++) { const a = rot + i / n * TAU; p.push([cx + Math.cos(a) * rx + jit(j), cy + Math.sin(a) * ry + jit(j)]); } return p;
+  }
+  function rrPts(x, y, w, h, r, j = 0) {
+    const p = [], seg = 5, corner = (cx, cy, a0) => { for (let i = 0; i <= seg; i++) { const a = a0 + i / seg * Math.PI / 2; p.push([cx + Math.cos(a) * r + jit(j), cy + Math.sin(a) * r + jit(j)]); } };
+    corner(x + w - r, y + r, -Math.PI / 2); corner(x + w - r, y + h - r, 0); corner(x + r, y + h - r, Math.PI / 2); corner(x + r, y + r, Math.PI);
+    return p;
+  }
+  function starPts(cx, cy, r, inner = .38, n = 4, rot = -Math.PI / 2) {
+    const p = []; for (let i = 0; i < n * 2; i++) { const a = rot + i * Math.PI / n, q = i % 2 ? r * inner : r; p.push([cx + Math.cos(a) * q, cy + Math.sin(a) * q]); } return p;
+  }
+  function heartPts(cx, cy, r) {
+    const p = []; for (let i = 0; i <= 30; i++) { const a = -Math.PI + i / 30 * TAU; p.push([cx + 1.1 * r * Math.pow(Math.sin(a), 3), cy - r * (Math.cos(a) - Math.pow(Math.cos(2 * a), .5))]); } return p;
+  }
+  // ---------- 路径/曲线构造（通用形状词汇，均为纯函数点列） ----------
+  function polyPts(verts) { return verts.map(p => [p[0], p[1]]); }
+  function quadPts(p0, p1, p2, n = 20) {
+    const out = []; for (let i = 0; i <= n; i++) { const u = i / n, v = 1 - u;
+      out.push([v * v * p0[0] + 2 * v * u * p1[0] + u * u * p2[0], v * v * p0[1] + 2 * v * u * p1[1] + u * u * p2[1]]); } return out;
+  }
+  function bezierPts(p0, p1, p2, p3, n = 28) {
+    const out = []; for (let i = 0; i <= n; i++) { const u = i / n, v = 1 - u;
+      out.push([v * v * v * p0[0] + 3 * v * v * u * p1[0] + 3 * v * u * u * p2[0] + u * u * u * p3[0],
+                v * v * v * p0[1] + 3 * v * v * u * p1[1] + 3 * v * u * u * p2[1] + u * u * u * p3[1]]); } return out;
+  }
+  function catmullPts(verts, per = 12, closed = false) {
+    const v = verts, n = v.length; if (n < 2) return v.slice();
+    const P = i => v[closed ? ((i % n) + n) % n : Math.max(0, Math.min(n - 1, i))];
+    const out = [], last = closed ? n : n - 1;
+    for (let i = 0; i < last; i++) {
+      const p0 = P(i - 1), p1 = P(i), p2 = P(i + 1), p3 = P(i + 2);
+      for (let k = 0; k < per; k++) { const u = k / per, u2 = u * u, u3 = u2 * u;
+        out.push([0.5 * (2 * p1[0] + (-p0[0] + p2[0]) * u + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * u2 + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * u3),
+                  0.5 * (2 * p1[1] + (-p0[1] + p2[1]) * u + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * u2 + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * u3)]); }
+    }
+    const e = P(closed ? 0 : n - 1); out.push([e[0], e[1]]);
+    return out;
+  }
+  // 统一入口：verts 折线；smooth>0 时按 Catmull-Rom 采样成平滑曲线
+  function pathPts(verts, smooth = 0, closed = false) {
+    return smooth > 0 ? catmullPts(verts, smooth, closed) : (closed ? char_Close(verts) : verts.slice());
+  }
+  function arcPts(cx, cy, rx, ry, a0, a1, n = 24, rot = 0) {
+    const out = []; for (let i = 0; i <= n; i++) { const a = a0 + (a1 - a0) * i / n + rot;
+      out.push([cx + Math.cos(a) * rx, cy + Math.sin(a) * ry]); } return out;
+  }
+  // 圆环（外圈正向 + 内圈反向拼成单多边形）：给出"带洞"观感的填充形状
+  function ringPts(cx, cy, ro, ri, n = 40, rot = 0) {
+    const out = [];
+    for (let i = 0; i <= n; i++) { const a = rot + i / n * TAU; out.push([cx + Math.cos(a) * ro + jit(1), cy + Math.sin(a) * ro + jit(1)]); }
+    for (let i = n; i >= 0; i--) { const a = rot + i / n * TAU; out.push([cx + Math.cos(a) * ri + jit(1), cy + Math.sin(a) * ri + jit(1)]); }
+    return out;
+  }
+
+  // ---------- paint 封装（PDoomVideo ANIMATION_GUIDE 兼容） ----------
+  function paint(pts, o = {}) {
+    if (o.wash || o.fill || o.hatch) {
+      if (o.wash) brush.wash(o.wash, o.washOp ?? 255); else brush.noWash();
+      // fillTexture(tex, border)：border 是"填充边缘强度"，会在平涂内部摊出细胞格轮廓，
+      // 大块平涂（黑板/墙面/地面）上表现为一整片圆形水渍斑——这是画面脏点的头号来源，
+      // 故默认归零；tex 只留轻微颗粒。要纹理请显式传 border，勿依赖默认。
+      if (o.fill) { brush.fill(o.fill, o.fillOp ?? 170); brush.fillBleed(o.bleed ?? .1); brush.fillTexture(o.tex ?? .16, o.border ?? 0); } else brush.noFill();
+      if (o.hatch) { brush.hatch(o.hatch.d, o.hatch.a, o.hatch.o || { rand: .15 }); brush.hatchStyle(o.hatch.b || 'HB', o.hatch.c || PAL.ink, o.hatch.w || 1); } else brush.noHatch();
+      brush.noStroke();
+      if (o.curv) { brush.beginShape(o.curv); for (const p of pts) brush.vertex(p[0], p[1]); brush.endShape(true); }
+      else brush.polygon(pts);
+    }
+    if (o.ink !== null) {
+      brush.noWash(); brush.noFill(); brush.noHatch(); brush.set(o.br || 'ink', o.ink || PAL.ink, o.sw ?? 1);
+      brush.beginShape(o.curv || 0); for (const p of pts) brush.vertex(p[0], p[1]); brush.endShape(true);
+    }
+  }
+  // 护栏：brush.spline 对【<3 点的折线静默不出笔】——不抛异常、不报错、probe 也查不出来，
+  // 是"画面莫名缺笔"最隐蔽的来源（实测：板书每笔只有 2 点 → 整条公式一片空白）。
+  // 引擎内自动补密，任何章节（含 LLM 现写的）都免疫，无需作者自己记得加密。
+  function inkLine(pts, sw = 1, col = PAL.ink, br = 'ink', curv = .5) {
+    if (!pts || pts.length < 2) return;
+    const s = pts.length < 3 ? catmullPts(pts, 6, false) : pts;
+    brush.noFill(); brush.noWash(); brush.noHatch(); brush.set(br, col, sw); brush.spline(s, curv);
+  }
+
+  // ---------- 确定性笔触生长（纯函数：按 p 比例截断折线，不依赖上一帧） ----------
+  // strokeUpTo 返回"画到全长 p 比例"的点列；配合 t 即可做手绘逐步生长/进度揭示。
+  function strokeUpTo(pts, p) {
+    p = clamp(p); if (p <= 0 || !pts || pts.length < 2) return [];
+    if (p >= 1) return pts.slice();
+    const segLen = []; let total = 0;
+    for (let i = 1; i < pts.length; i++) { const d = Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]); segLen.push(d); total += d; }
+    if (total <= 0) return [pts[0]];
+    const target = total * p, out = [pts[0]]; let acc = 0;
+    for (let i = 1; i < pts.length; i++) {
+      const d = segLen[i - 1];
+      if (acc + d >= target) { const k = d > 0 ? (target - acc) / d : 0;
+        out.push([lerp(pts[i - 1][0], pts[i][0], k), lerp(pts[i - 1][1], pts[i][1], k)]); return out; }
+      acc += d; out.push(pts[i]);
+    }
+    return out;
+  }
+  // 便捷封装：在 [t0,t1] 内把折线"画出来"（等价于按 t 的进度生长）
+  function inkGrow(pts, t, t0, t1, sw = 1, col = PAL.ink, br = 'ink', curv = .5) {
+    const sub = strokeUpTo(pts, seg(t, t0, t1)); if (sub.length > 1) inkLine(sub, sw, col, br, curv);
+  }
+
+  // ---------- 文字 ----------
+  function letter(txt, x, y, size, color, o = {}) {
+    if (CAM && !o.screen) { [x, y] = toScreen(x, y); size *= CAM.zoom; o = { ...o, rot: (o.rot || 0) + CAM.rot }; if (o.font) o.font = o.font.replace(/(\d+(\.\d+)?)px/, (m, v) => (v * CAM.zoom) + 'px'); }
+    LETTERS.push({ txt, x, y, size, color, ...o });
+  }
+  function sfx(txt, x, y, size, color, age, o = {}) {
+    const life = o.life ?? 1.2; if (age < 0 || age > life) return;
+    letter(txt, x, y, size, color, { pop: age * 5, rot: (o.rot ?? -.08) + Math.sin(age * 20) * .03 * (1 - age / life), alpha: 1 - seg(age, life - .25, life), ...o });
+  }
+  function drawLetters(c) {
+    for (const L of LETTERS) {
+      const k = L.pop != null ? backOut(L.pop) : 1; if (k <= .01) continue;
+      c.save(); c.translate(L.x, L.y); c.rotate(L.rot || 0); c.scale(k, k); c.globalAlpha = L.alpha ?? 1;
+      c.font = L.font || `${L.size}px "Comic Sans MS", system-ui, sans-serif`;
+      c.textAlign = L.align || 'center'; c.textBaseline = 'middle';
+      if (L.stroke) { c.lineJoin = 'round'; c.lineWidth = L.size * .12; c.strokeStyle = L.stroke; c.strokeText(L.txt, 0, 0); }
+      if (L.ink !== false) { c.fillStyle = PAL.ink; c.fillText(L.txt, L.size * .045, L.size * .055); }
+      c.fillStyle = L.color; c.fillText(L.txt, 0, 0);
+      c.restore();
+    }
+  }
+  function flushLetters() {
+    if (!LETTERS.length) return;
+    letG.clear(); drawLetters(letG.drawingContext); LETTERS = [];
+    push(); resetMatrix(); translate(-W / 2, -H / 2);
+    brush.noStroke(); brush.noHatch(); brush.noWash(); brush.fill('#000000', 1); brush.fillBleed(0); brush.fillTexture(0, 0);
+    brush.polygon([[-50, -50], [-40, -50], [-40, -40]]); brush.noFill();
+    image(letG, 0, 0); pop();
+  }
+
+  // ---------- 纸张与颗粒 ----------
+  function lcg(seed) { let s = seed; return () => (s = (s * 16807) % 2147483647) / 2147483647; }
+  function makePaper() {
+    const g = createGraphics(W, H); g.pixelDensity(1); const c = g.drawingContext, rnd = lcg(11);
+    c.fillStyle = PAL.paper; c.fillRect(0, 0, W, H);
+    for (let i = 0; i < 70; i++) { const x = rnd() * W, y = rnd() * H, r = 120 + rnd() * 380, gr = c.createRadialGradient(x, y, 0, x, y, r), a = .045 * rnd(); gr.addColorStop(0, `rgba(160,125,80,${a})`); gr.addColorStop(1, 'rgba(160,125,80,0)'); c.fillStyle = gr; c.fillRect(x - r, y - r, 2 * r, 2 * r); }
+    c.lineWidth = 1;
+    for (let i = 0; i < 1400; i++) { const x = rnd() * W, y = rnd() * H, l = 6 + rnd() * 26, a = rnd() * TAU; c.strokeStyle = `rgba(110,88,60,${.035 + rnd() * .06})`; c.beginPath(); c.moveTo(x, y); c.quadraticCurveTo(x + Math.cos(a + .6) * l * .5, y + Math.sin(a + .6) * l * .5, x + Math.cos(a) * l, y + Math.sin(a) * l); c.stroke(); }
+    return g;
+  }
+  function makeGrain() {
+    const cv = document.createElement('canvas'); cv.width = W; cv.height = H; const c = cv.getContext('2d'), rnd = lcg(5);
+    const id = c.createImageData(W, H), d = id.data;
+    for (let i = 0; i < d.length; i += 4) { const v = 255 - (rnd() < .55 ? rnd() * rnd() * 34 : 0); d[i] = v; d[i + 1] = v - 1; d[i + 2] = v - 3; d[i + 3] = 255; }
+    c.putImageData(id, 0, 0);
+    const g = c.createRadialGradient(W / 2, H / 2, H * .45, W / 2, H / 2, H * 1.05); g.addColorStop(0, 'rgba(255,255,255,0)'); g.addColorStop(1, 'rgba(120,95,70,.35)');
+    c.fillStyle = g; c.fillRect(0, 0, W, H);
+    return cv;
+  }
+
+  // ---------- 自定义笔刷 ----------
+  function defineBrushes() {
+    brush.add('ink', { type: 'default', weight: 5, scatter: .25, sharpness: .8, grain: 40, opacity: 235, spacing: .2, pressure: [1.15, .75], rotate: 'natural', noise: .15 });
+    brush.add('inkfine', { type: 'default', weight: 2.6, scatter: .15, sharpness: .85, grain: 40, opacity: 230, spacing: .2, pressure: [1.1, .8], rotate: 'natural', noise: .1 });
+    brush.add('dry', { type: 'default', weight: 14, scatter: 3, sharpness: .3, grain: 6, opacity: 90, spacing: .6, pressure: [1, .6], rotate: 'natural', noise: .4 });
+  }
+
+  /* ============================================================================
+     通用角色构件库（engine 内置，经 __P5FX 暴露）——不是"某个角色"的模板
+     ----------------------------------------------------------------------------
+     徐总校准：按"大脑/机器人"做整角色模板 → 换小猫小狗又要加模板，等于换皮硬编码。
+     正确抽象是【积木 + 质量护栏】：给 AI 一组通用、参数化、无任何生物/IP 绑定的
+     构件，AI 用它拼任意角色（大脑/机器人/猫/狗都只是同一套构件的不同组合），
+     再靠质量护栏保证拼出来不丑、不崩。命名角色（大脑/机器人）仅作为"拼法示例"，
+     放在 demo_core.js，不是引擎 API，禁止 AI 当模板填空。
+     帧约束：都是整帧纯函数；禁止跨帧状态、禁止 Math.random()（用 hash/jit）。
+     ============================================================================ */
+  // 构件：有机闭合基座形状（作头/身体轮廓）。正弦叠加"凸叶"打破呆板蛋形。
+  function char_Blob(cx, cy, rx, ry, n, j, seed, bumps) {
+    const p = [];
+    for (let i = 0; i < n; i++) {
+      const a = i / n * TAU;
+      const lobe = 1 + Math.sin(a * (bumps || 4) + seed) * 0.09 + Math.sin(a * 3 + seed * 2.7) * 0.045;
+      p.push([cx + Math.cos(a) * rx * lobe + jit(j), cy + Math.sin(a) * ry * lobe + jit(j)]);
+    }
+    return p;
+  }
+  // 构件：眼睛（圆瞳 + 高光，可调睑缝针刺）。任何角色都能配。
+  function char_Eye(ex, ey, es, o = {}) {
+    const eyeCol = o.eyeCol || PAL.ink;
+    paint(ellPts(ex, ey, es, es * (o.blink || 1), 16, .5), { wash: eyeCol, washOp: 240, fill: PAL.sky, fillOp: 55, ink: null });
+    paint(ellPts(ex - es * .3, ey - es * .33, es * .28, es * .28, 10, .4), { wash: PAL.cream, washOp: 235, ink: null });
+  }
+  // 构件：耳朵/角/翼——任意旋向的"叶子/尖角"，可放头两侧或顶端。猫狗鹿龙皆可用。
+  function char_Ear(cx, cy, w, h, rot, o = {}) {
+    paint(ellPts(cx, cy, w, h, 18, 1.4, rot),
+      { wash: o.wash || PAL.cream, washOp: 220, fill: o.fill, fillOp: o.fillOp || 40, bleed: .12, tex: .16, ink: o.ink || PAL.ink, sw: o.sw || .8 });
+  }
+  // 护栏：质量→强制闭合轮廓。AI 手拼的多边形常"开口",画出来是断线/脏相；传入任意
+  // 点列，自动把首尾闭合。用在任何 paint/inkLine 前，保证轮廓封闭。
+  function char_Close(pts) {
+    if (!pts || pts.length < 3) return pts;
+    const a = pts[0], b = pts[pts.length - 1];
+    return (a[0] === b[0] && a[1] === b[1]) ? pts : pts.concat([[a[0], a[1]]]);
+  }
+  // 护栏：自检多边形是否闭环（返回 bool）。配 char_Close 用，AI 可在关键形状上保证质量。
+  function char_Closed(pts) {
+    if (!pts || pts.length < 3) return false;
+    const a = pts[0], b = pts[pts.length - 1];
+    return a[0] === b[0] && a[1] === b[1];
+  }
+
+  /* ============================================================================
+     自然元素元件库（engine 内置，经 __P5FX 暴露）—— 参数化、确定性、无 IP 绑定
+     ----------------------------------------------------------------------------
+     与 char_* 同级的"积木"：树/云/山脊/水波/日/星。AI 直接调用即可扩题材，
+     全部是 t 的纯函数（用 hash/wob/jit，无跨帧状态）。都可传 o 覆盖颜色/幅度/相位。
+     ============================================================================ */
+  function el_Cloud(cx, cy, s, t, o = {}) {
+    const drift = (o.drift != null ? o.drift : 7) * wob(t, o.speed || .05, o.ph || 0);
+    const col = o.col || PAL.cream;
+    push(); translate(cx + drift, cy); scale(s);
+    const lobes = o.lobes || [[-72, 8, 54, 34], [-26, -14, 62, 46], [28, -6, 50, 34], [76, 10, 42, 26]];
+    for (const L of lobes)
+      paint(ellPts(L[0], L[1], L[2], L[3], 22, 2),
+        { wash: mixCol(col, PAL.sky, .25), washOp: 205, fill: col, fillOp: 40, bleed: .25, tex: .16, border: 0, ink: null });
+    pop();
+  }
+  function el_Tree(cx, cy, s, t, o = {}) {
+    const sway = (o.sway != null ? o.sway : 2.2) * wob(t, o.speed || .12, o.ph || 0);
+    const trunkC = o.trunk || PAL.clayDk, leafC = o.leaf || PAL.sap;
+    push(); translate(cx, cy); scale(s);
+    paint(rectPts(-8, -84, 16, 92), { wash: trunkC, washOp: 225, fill: trunkC, fillOp: 45, ink: PAL.ink, sw: .8 });
+    const lobes = o.lobes || [[0, -124, 64, 52], [-44, -98, 46, 38], [44, -98, 46, 38], [0, -156, 46, 36]];
+    for (const L of lobes)
+      paint(char_Close(char_Blob(L[0] + sway * (1 - L[1] / 320), L[1], L[2], L[3], 28, 1.6, 7 + L[0], 4)),
+        { wash: mixCol(leafC, PAL.cream, .25), washOp: 215, fill: leafC, fillOp: 30, bleed: .1, tex: .16, ink: PAL.ink, sw: .9 });
+    pop();
+  }
+  function el_Ridge(cx, cy, w, h, t, o = {}) {
+    const col = o.col || PAL.sap, peaks = o.peaks || 3, seed = o.seed != null ? o.seed : 3;
+    const mn = o.min != null ? o.min : .35, n = 48, pts = [], base = cy + h * .6;
+    for (let i = 0; i <= n; i++) {
+      const u = i / n, x = cx - w / 2 + u * w;
+      const amp = mn + (1 - mn) * Math.abs(Math.sin(u * Math.PI * peaks + seed));
+      pts.push([x + jit(1.2), cy - amp * h + jit(1.2)]);
+    }
+    const poly = char_Close(pts.concat([[cx + w / 2, base], [cx - w / 2, base]]));
+    paint(poly, { wash: mixCol(col, PAL.cream, .3), washOp: 220, fill: col, fillOp: 30, bleed: .15, tex: .16, border: 0, ink: PAL.ink, sw: .9 });
+  }
+  function el_Wave(cx, cy, w, t, o = {}) {
+    const rows = o.rows || 3, col = o.col || PAL.sky, amp = o.amp != null ? o.amp : 6, k = o.k || 6;
+    for (let r = 0; r < rows; r++) {
+      const y = cy + r * (o.gap || 14), pts = [], n = 30;
+      for (let i = 0; i <= n; i++) { const u = i / n, x = cx - w / 2 + u * w;
+        pts.push([x, y + Math.sin(u * Math.PI * k + t * (1.2 + r * .3) + r) * amp + jit(1)]); }
+      inkLine(pts, o.sw || 1.3, col, 'ink', .5);
+    }
+  }
+  function el_Sun(cx, cy, r, t, o = {}) {
+    const col = o.col || PAL.ochre, k = 1 + .04 * wob(t, o.speed || .25, o.ph || 0);
+    paint(ellPts(cx, cy, r * 1.5 * k, r * 1.5 * k, 30, 3), { wash: mixCol(col, PAL.cream, .35), washOp: 110, ink: null });
+    paint(ellPts(cx, cy, r * k, r * k, 28, 2), { wash: col, washOp: 238, fill: PAL.cream, fillOp: 40, ink: null });
+  }
+  function el_Stars(cx, cy, w, h, n, t, o = {}) {
+    const col = o.col || PAL.cream;
+    for (let i = 0; i < n; i++) {
+      const x = cx - w / 2 + hash(i * 3.1 + 1) * w, y = cy - h / 2 + hash(i * 7.7 + 2) * h;
+      const tw = .5 + .5 * Math.sin(t * (1.5 + hash(i) * 2) + i);
+      paint(starPts(x, y, 2.4 + 2 * hash(i + 9), .4, 4), { wash: col, washOp: 90 + 150 * tw, ink: null });
+    }
+  }
+
+  // ---------- 章节注册（与 PDoomVideo timeline 一致） ----------
+  const CH = [];
+  function chapter(name, start, end, shots) { CH.push({ name, start, end, shots }); CH.sort((a, b) => a.start - b.start); }
+  window.chapter = chapter;
+
+  // ---------- 转场（wipes）：在章节边界横扫一条"纸带"作为换场（纯函数，随 t 扫描） ----------
+  // 边界取自 CFG.wipes；未显式给则由章节起始时间自动推断。
+  function wipeBoundaries() {
+    if (CFG.wipes && CFG.wipes.length) return CFG.wipes;
+    const bs = [];
+    for (const c of CH) if (c.start > 1e-6) bs.push(c.start);
+    return bs.sort((a, b) => a - b);
+  }
+  function drawWipes(t) {
+    const d = CFG.wipeDuration || .3, bw = W * .34;
+    for (const tb of wipeBoundaries()) {
+      if (t < tb - d || t > tb + d) continue;
+      const p = ease(clamp((t - (tb - d)) / (2 * d)));
+      const cx = -bw / 2 + (W + bw) * p;
+      paint(rectPts(cx - bw / 2, -40, bw, H + 80), { wash: PAL.paper, washOp: 252, ink: null });
+      inkLine([[cx - bw / 2, -40], [cx - bw / 2, H + 40]], 1.6, PAL.ink, 'ink', .35);
+      inkLine([[cx + bw / 2, -40], [cx + bw / 2, H + 40]], 1.6, PAL.ink, 'ink', .35);
+    }
+  }
+
+  // 向后续加载的脚本暴露常用工具
+  window.__P5FX = {
+    clamp, lerp, ease, easeOut, easeIn, backOut, elasticOut, hash, frac,
+    bpOf, beatN, pulse, pulse2, wob, seg, jit, kf, mixCol, shakeXY,
+    camBegin, camEnd, toScreen, flash, iris, irisShape,
+    rectPts, ellPts, rrPts, starPts, heartPts,
+    polyPts, pathPts, quadPts, bezierPts, catmullPts, arcPts, ringPts,
+    paint, inkLine, letter, sfx, flushLetters,
+    strokeUpTo, inkGrow,
+    PAL, CFG, W, H, DUR, BPM, BEAT,
+    // 素材通道：images 为 {文件名: p5.Image}，img(name) 便捷取用（需先经 ?assets= 注入）
+    images: IMAGES, img: (n) => IMAGES[n], assetUrls: ASSET_URLS,
+    // 通用角色构件库（积木 + 质量护栏）：AI 用它拼任意角色，绝非填角色模板
+    char_Blob, char_Eye, char_Ear, char_Close, char_Closed,
+    // 自然元素元件库（参数化、确定性、无 IP 绑定）
+    el_Cloud, el_Tree, el_Ridge, el_Wave, el_Sun, el_Stars,
+  };
+
+  // ---------- 绘制世界：命中章节则画其镜头，否则占位 ----------
+  // PH_N：本帧"无命中章节"的计数（0=正常）。这是把"画布没内容"从静默变成【事实信号】：
+  // 章节没注册（注入的 core 加载失败）、或时间线没盖满 0~DUR，都会命中这里。
+  // 渲染器/探针在 renderAt 后可读 window.__P5FXPlaceholderLast，据此判失败——
+  // 否则"占位帧照样出片"这种假成功会绕过所有降级逻辑（详见 skill.md）。
+  let PH_N = 0;
+  function drawWorld(t) {
+    const ch = CH.find(c => t >= c.start && t < c.end);
+    if (!ch) { PH_N++; if (CFG.placeholder) placeholder(t); return; }
+    let i = 0; while (i + 1 < ch.shots.length && t >= ch.shots[i + 1][0]) i++;
+    const t0 = ch.shots[i][0], end = i + 1 < ch.shots.length ? ch.shots[i + 1][0] : ch.end;
+    ch.shots[i][1](t, t - t0, end - t0);
+    CAM = null;
+  }
+  function placeholder(t) {
+    paint(ellPts(W / 2, H * .48, Math.min(W, H) * .27, Math.min(W, H) * .135, 30, 20), { fill: PAL.sky, fillOp: 90, bleed: .3, ink: null });
+    letter('(no scene at t=' + t.toFixed(1) + 's)', W / 2, H * .42, Math.max(24, H * .04), PAL.ink, { ink: false });
+  }
+
+  // ---------- 初始化与帧管线 ----------
+  async function setup() {
+    // p5.brush 强制 WEBGL。headless 无 GPU 下，WEBGL buffer 未保留时
+    // drawImage(webglCanvas) 会触发整帧 readPixels（软渲染单帧 ~2.4s）。
+    // p5 的 createCanvas 不接受 attrs 对象，故手动创建 preserveDrawingBuffer
+    // 的 canvas 传入：WebGL 创建属性只在首次 getContext 锁定，p5 后续
+    // getContext('webgl') 返回同一 context，preserve 保持生效 → 零拷贝 blit。
+    const glCanvas = document.createElement('canvas');
+    glCanvas.width = W; glCanvas.height = H;
+    // 必须 webgl2：p5.brush 通过 "webgl2"===webglVersion 识别 sketch
+    glCanvas.getContext('webgl2', { preserveDrawingBuffer: true });
+    createCanvas(W, H, WEBGL, glCanvas); pixelDensity(1); noLoop();
+    brush.scaleBrushes(5); defineBrushes();
+    paperG = makePaper(); grainC = makeGrain(); letG = createGraphics(W, H); letG.pixelDensity(1);
+    // outC 尺寸必须与 CFG 分辨率一致：HTML 固定 1920x1080，而 CFG 可被
+    // query 覆盖为更低分辨率，尺寸不匹配会导致每帧放大 drawImage +
+    // 大画布 toDataURL 编码，单帧可慢到 14s。
+    outC = document.getElementById('out');
+    outC.width = W; outC.height = H;
+    outX = outC.getContext('2d');
+    // 暴露实时录屏接口（兼容 video_scene / recorder.py）
+    window.CURRENT_FRAME = 0;
+    window.updateAnimation = function () {
+      const t = window.CURRENT_FRAME / CFG.FPS;
+      T = t; paintFrame(t);
+    };
+    // 预载注入的素材（?assets=...）；单个失败不阻塞，章节里取不到即为 undefined。
+    // 注意：此处**不用 p5 的 loadImage**——它在 file:// 协议下会带 crossOrigin 语义而失败
+    // （实测：原生 Image 能加载同 URL，p5.loadImage 的 success 回调却不触发，素材通道静默失效）。
+    // 故统一用原生 Image 载入，再转存为 p5.Graphics（2D）供 image() 在 WEBGL 主画布绘制。
+    if (ASSET_URLS.length) {
+      await Promise.all(ASSET_URLS.map(u => new Promise(res => {
+        const name = decodeURIComponent(String(u).split('?')[0]).split('/').pop();
+        const el = new Image();
+        el.onload = () => {
+          try {
+            const g = createGraphics(el.naturalWidth || el.width, el.naturalHeight || el.height);
+            g.pixelDensity(1);
+            g.drawingContext.drawImage(el, 0, 0);
+            IMAGES[name] = g;
+          } catch (e) { /* 单张失败不阻塞 */ }
+          res();
+        };
+        el.onerror = () => res();
+        el.src = u;
+      })));
+    }
+    window.ready = true;
+    window.setup = setup;         // p5 全局模式要求在 window 上找到 setup/draw
+    // draw 仅为满足 p5 全局模式而占位，绝不在此递归 redraw()——
+    // 否则 renderAt/updateAnimation 每帧触发无限重绘，单帧耗时暴涨。
+    window.draw = function () {};
+  }
+
+  // 整帧渲染（纯函数，逐帧截图用）
+  function paintFrame(t) {
+    LETTERS = []; CAM = null; window.__P5FXError = null;
+    PH_N = 0;                       // 重置本帧"无命中章节"计数
+    push(); translate(-W / 2, -H / 2);
+    randomSeed(1000 + Math.floor(t * BOIL)); noiseSeed(77);
+    image(paperG, 0, 0);
+    try { drawWorld(t); }
+    catch (e) { window.__P5FXError = String((e && e.message) || e); }
+    try { drawWipes(t); } catch (e) {}
+    pop();
+    try { flushLetters(); } catch (e) {}
+    window.__P5FXPlaceholderLast = PH_N;   // 暴露本帧"无命中章节"计数给渲染器/探针
+    return composite(t);
+  }
+  function composite(t) {
+    const c = outX;
+    c.globalCompositeOperation = 'source-over'; c.globalAlpha = 1;
+    c.drawImage(drawingContext.canvas, 0, 0, W, H);
+    drawLetters(c);
+    c.globalCompositeOperation = 'multiply'; c.drawImage(grainC, 0, 0);
+    c.globalCompositeOperation = 'source-over';
+  }
+
+  // 逐帧截图接口（保真主路径）：paintFrame 已画完整帧，无需再触发 p5 redraw
+  window.renderAt = async (t, type = 'image/png', q = .92) => { T = t; paintFrame(t); return outC.toDataURL(type, q); };
+  // 拼图快速检查
+  window.renderSheet = async (times, cols = 3, w = 640) => {
+    const wid = Math.min(w, W), hei = Math.round(wid * 9 / 16), rows = Math.ceil(times.length / cols), sc = document.createElement('canvas');
+    sc.width = cols * wid; sc.height = rows * hei; const c = sc.getContext('2d'), ms = [];
+    let ph = 0;  // 拼图里"无命中章节"的格子数：>0 = 注入的章节没盖到这些采样点，预览同样不该算成功
+    for (let i = 0; i < times.length; i++) {
+      const t0 = performance.now(); T = times[i]; paintFrame(times[i]); ms.push(Math.round(performance.now() - t0));
+      if (PH_N > 0) ph++;
+      const x = (i % cols) * wid, y = Math.floor(i / cols) * hei;
+      c.drawImage(outC, x, y, wid, hei); c.fillStyle = 'rgba(0,0,0,.65)'; c.fillRect(x, y, 96, 26); c.fillStyle = '#fff'; c.font = '16px sans-serif'; c.fillText(times[i].toFixed(2) + 's', x + 6, y + 18);
+    }
+    return { url: sc.toDataURL('image/jpeg', .88), ms, ph };
+  };
+  window.gpuInfo = () => { const gl = drawingContext, e = gl.getExtension('WEBGL_debug_renderer_info'); return e ? gl.getParameter(e.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER); };
+</script>
+<!-- 章节脚本（AI 创作入口）：用 window.__P5FX 工具 + window.chapter() 注册镜头。
+     章节脚本必须由 query 参数 core 显式注入，**不再默认回落 demo_core.js**——
+     无 core 即无章节，整片退化为占位帧，渲染器据此判失败（宁可报错，也不悄悄出一个示例片）。
+     注入通道避免 AI 复制/改写本文件（改写编码易损坏内联 JS）。需将章节 JS 与本文件同目录。 -->
+<script>
+  (function () {
+    var core = new URLSearchParams(location.search).get('core');
+    if (!core) { console.warn('[painter] 未注入章节脚本（?core=...）——本页不会注册任何章节'); return; }
+    var s = document.createElement('script');
+    s.src = core;
+    document.body.appendChild(s);
+  })();
+</script>
+</body>
+</html>

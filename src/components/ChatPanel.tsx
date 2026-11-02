@@ -154,7 +154,7 @@ function parseTodoResult(content: string): TodoListData | null {
 
 // ── 解析当前活跃的 LLM 配置 ──
 
-function resolveActiveLLM(config: KimiConfig): { name: string; baseUrl: string; apiKey: string; model: string; protocol: 'anthropic' | 'openai'; provider?: LLMEntry['provider']; thinking?: LLMEntry['thinking']; contextSize?: number; maxTokens?: number; temperature?: number; topP?: number; label: string } {
+function resolveActiveLLM(config: KimiConfig): { name: string; baseUrl: string; apiKey: string; model: string; protocol: 'anthropic' | 'openai'; provider?: LLMEntry['provider']; thinking?: LLMEntry['thinking']; contextSize?: number; maxTokens?: number; temperature?: number; topP?: number; topK?: number; label: string } {
   if (config.activeLLMId && config.llms.length > 0) {
     const active = config.llms.find(l => l.id === config.activeLLMId)
     if (active) {
@@ -170,6 +170,7 @@ function resolveActiveLLM(config: KimiConfig): { name: string; baseUrl: string; 
         maxTokens: active.maxTokens,
         temperature: active.temperature,
         topP: active.topP,
+        topK: active.topK,
         label: `${active.name} (${active.model})`,
       }
     }
@@ -516,6 +517,21 @@ export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKe
     setSessionId(newSessionId())
   }, [])
 
+  // 停止当前任务：断开流 + 通知后端取消会话（终止其全部子进程）
+  const handleStop = useCallback(() => {
+    abortRef.current?.abort()
+    setQuestionnaire(null)
+    questionnaireRef.current = null
+    setToolTimeout(null)
+    getBackendUrl()
+      .then(baseUrl => fetch(`${baseUrl}/api/stop-task`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session_id: sessionId }),
+      }))
+      .catch(() => { /* 停止请求失败不影响前端已中断 */ })
+  }, [sessionId])
+
   const handleInputChange = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const value = e.target.value
     setInput(value)
@@ -715,7 +731,7 @@ export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKe
         {isLoading ? (
           <div className="chat-input-working">
             <ThinkingAnimation isStreaming={true} />
-            <button className="stop-btn" onClick={() => { abortRef.current?.abort(); setQuestionnaire(null); questionnaireRef.current = null }}>
+            <button className="stop-btn" onClick={handleStop}>
               <StopCircle size={18} />
             </button>
           </div>

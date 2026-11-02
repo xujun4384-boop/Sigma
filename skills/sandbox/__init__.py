@@ -206,6 +206,8 @@ class SandboxTool(BaseTool):
     # ── Bash ──
 
     def _run_bash(self, code: str) -> ToolResult:
+        if self.is_cancelled():
+            return ToolResult.fail("命令已被用户取消")
         self._emit_progress(f"正在执行命令: {code[:80]}{'...' if len(code) > 80 else ''}")
         try:
             process = subprocess.Popen(
@@ -257,6 +259,8 @@ class SandboxTool(BaseTool):
                     output += "\n[输出已截断]"
                     truncated = True
 
+                if self.is_cancelled():
+                    return ToolResult(success=False, content=f"命令已被用户取消（进程已终止）\n{output}", truncated=truncated)
                 if process.returncode != 0:
                     return ToolResult(success=False, content=f"退出码 {process.returncode}\n{output}", truncated=truncated)
                 return ToolResult(success=True, content=output or "(无输出)", truncated=truncated)

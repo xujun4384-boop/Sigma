@@ -3,13 +3,14 @@ import ChatPanel, { type TerminalTab } from './components/ChatPanel'
 import ErrorBoundary from './components/ErrorBoundary'
 import ExplorerPanel from './components/ExplorerPanel'
 import PreviewPanel from './components/PreviewPanel'
-import Sidebar, { loadSystemSettings } from './components/Sidebar'
+import Sidebar, { loadSystemSettings, resolveActiveLLMForAgent } from './components/Sidebar'
 import ScanningOverlay from './components/ScanningOverlay'
 import Onboarding from './components/Onboarding'
 import { I18nProvider, getSavedLanguage, saveLanguage } from './i18n/I18nContext'
 import type { Lang } from './i18n/translations'
-import type { KimiConfig, LLMEntry, FolderTreeItem } from './types/electron'
+import type { KimiConfig, LLMEntry, FolderTreeItem, ModelRegistry } from './types/electron'
 import { getBackendUrl } from './utils/config'
+import { fetchModelRegistry, migrateConfig } from './utils/modelPresets'
 import { loadAgents, syncAgentsToBackend } from './utils/agentStore'
 import { PanelRightOpen } from 'lucide-react'
 import './App.css'
@@ -44,8 +45,19 @@ const DEFAULT_KIMI_CONFIG: KimiConfig = {
       visionApiKey: '',
       visionModel: '',
       visionBaseUrl: '',
+      visionLlmId: '',
       doubaoVoiceApiKey: '',
-      opendesignLlmId: '',
+      doubaoVoiceSpeaker: '',
+      musicGenProvider: 'tencent_tokenhub',
+      musicGenApiKey: '',
+      musicGenBaseUrl: 'https://tokenhub.tencentmaas.com',
+      musicGenModel: 'minimax-music-v3.0',
+      cinematicVideoProvider: 'minimax',
+      videoArkApiKey: '',
+      videoArkBaseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+      videoArkModel: 'doubao-seedance-1-0-pro-250528',
+      amapJsKey: '',
+      amapSecurityCode: '',
       wechatAppId: '',
       wechatAppSecret: '',
       wechatRelayUrl: '',
@@ -100,6 +112,7 @@ function loadKimiConfig(): KimiConfig {
 
 export default function App() {
   const [config, setConfig] = useState<KimiConfig>(loadKimiConfig)
+  const [modelRegistry, setModelRegistry] = useState<ModelRegistry | null>(null)
   const [systemSettings, setSystemSettings] = useState(loadSystemSettings)
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => {
     try { return (localStorage.getItem('sigma_theme') as ThemeMode) || 'dark' } catch { return 'dark' }
@@ -116,11 +129,74 @@ export default function App() {
   const [canvasPatch, setCanvasPatch] = useState<{ canvasName: string; operation: 'add' | 'replace'; elements: any[] } | null>(null)
   const [terminalTabs, setTerminalTabs] = useState<TerminalTab[]>([])
 
+  // 模型预设注册表：由后端提供，前端所有能力判断都以它为准
+  useEffect(() => {
+    let cancelled = false
+    fetchModelRegistry().then(registry => {
+      if (!cancelled && registry) setModelRegistry(registry)
+    })
+    return () => { cancelled = true }
+  }, [])
+
+  // 注册表就绪后把历史配置归一（思考档位、family），只会在首次迁移时写回 localStorage
+  useEffect(() => {
+    if (!modelRegistry) return
+    setConfig(prev => {
+      const { entries, changed } = migrateConfig(prev.llms, modelRegistry)
+      if (!changed) return prev
+      const next = { ...prev, llms: entries }
+      try { localStorage.setItem('sigma_kimi_config', JSON.stringify(next)) } catch {}
+      return next
+    })
+  }, [modelRegistry])
+
   // 项目扫描状态
   const [scanningPhase, setScanningPhase] = useState<'init' | 'scanning' | 'analyzing' | 'done' | null>(null)
 
   // 引导流程状态
   const [onboardingDone, setOnboardingDone] = useState(false)
+  const [computerUseMode, setComputerUseMode] = useState(false)
+
+  // Computer Use 模式：订阅悬浮窗模式状态变化
+  useEffect(() => {
+    const api = window.electronAPI
+    if (!api?.getComputerUseMode) return
+    api.getComputerUseMode()
+      .then((r) => { if (r && typeof r.active === 'boolean') setComputerUseMode(r.active) })
+      .catch(() => {})
+    const cleanup = api.onComputerUseModeChange
+      ? api.onComputerUseModeChange((active: boolean) => setComputerUseMode(active))
+      : undefined
+    return () => { if (cleanup) cleanup() }
+  }, [])
+
+  const handleComputerUseToggle = useCallback(async () => {
+    const api = window.electronAPI
+    if (!api?.enterComputerUseMode) {
+      alert('Computer Use 模式需在 Sigma 桌面端中运行')
+      return
+    }
+    if (computerUseMode) {
+      await api.exitComputerUseMode()
+      return
+    }
+    const resolved = resolveActiveLLMForAgent(config)
+    if (!resolved) {
+      alert('请先在设置中配置并激活一个 LLM，再进入 Computer Use 模式')
+      return
+    }
+    const entry = (config.llms || []).find((l) => l.id === config.activeLLMId)
+    await api.enterComputerUseMode({
+      ...resolved,
+      name: resolved.model,
+      provider: entry?.provider || 'generic',
+      thinking: entry?.thinking || 'adaptive',
+      contextSize: entry?.contextSize,
+      maxTokens: entry?.maxTokens,
+      temperature: entry?.temperature,
+      topP: entry?.topP,
+    })
+  }, [computerUseMode, config])
 
   // 检查是否有有效的 API key
   const hasApiKey = (() => {
@@ -454,6 +530,7 @@ export default function App() {
         <>
           <Sidebar
             config={config}
+            modelRegistry={modelRegistry}
             system={systemSettings}
             themeMode={themeMode}
             language={language}
@@ -476,7 +553,7 @@ export default function App() {
             <div className="resizer" onMouseDown={() => { isDraggingLeft.current = true }} />
 
             <div className="panel-center">
-              <PreviewPanel file={selectedFile} key={previewKey} fileDiffState={fileDiffQueue.length > 0 ? fileDiffQueue[0] : null} fileDiffQueueLength={fileDiffQueue.length} onAcknowledgeDiff={handleAcknowledgeDiff} onAcknowledgeAllDiffs={handleAcknowledgeAllDiffs} terminalTabs={terminalTabs} onCloseTerminal={handleCloseTerminal} canvasPatch={canvasPatch} onCanvasPatchApplied={handleCanvasPatchApplied} />
+              <PreviewPanel file={selectedFile} key={previewKey} fileDiffState={fileDiffQueue.length > 0 ? fileDiffQueue[0] : null} fileDiffQueueLength={fileDiffQueue.length} onAcknowledgeDiff={handleAcknowledgeDiff} onAcknowledgeAllDiffs={handleAcknowledgeAllDiffs} terminalTabs={terminalTabs} onCloseTerminal={handleCloseTerminal} canvasPatch={canvasPatch} onCanvasPatchApplied={handleCanvasPatchApplied} computerUseMode={computerUseMode} onComputerUseToggle={handleComputerUseToggle} />
             </div>
 
             {!explorerCollapsed && (

@@ -11,6 +11,8 @@ import json
 from pathlib import Path
 
 from skills.base import BaseTool, ToolParameter, ToolResult
+from skills.doubao_tts.voices import resolve_voice
+from cancellation import ToolCancelledError
 
 MAX_RETRY = 6
 
@@ -28,17 +30,19 @@ class VideoProduceTool(BaseTool):
         ToolParameter("output_path", "string", "最终输出 mp4 路径"),
         ToolParameter("script", "string", "确认后的脚本 JSON（二次调用时传入，跳过脚本设计直接制作）", required=False),
         ToolParameter("project", "string", "项目名，用于组织输出目录", required=False),
-        ToolParameter("speaker", "string", "旁白音色ID，默认广告解说2.0", required=False, default="zh_male_guanggaojieshuo_uranus_bigtts"),
+        ToolParameter("speaker", "string", "旁白音色ID。留空则使用用户在 Settings 中配置的音色。", required=False),
         ToolParameter("fps", "integer", "帧率", required=False, default=30),
         ToolParameter("width", "integer", "视频宽度", required=False, default=1920),
         ToolParameter("height", "integer", "视频高度", required=False, default=1080),
     ]
 
     def __init__(self, cwd: str = ".", skill_manager=None,
-                 opendesign_llm_config: dict = None, **kwargs):
+                 llm_config: dict = None, default_speaker: str = "", **kwargs):
         super().__init__(cwd)
         self.skill_manager = skill_manager
-        self.opendesign_llm_config = opendesign_llm_config or {}
+        self.llm_config = llm_config or {}
+        # Settings 中配置的旁白音色；留空则回落内置默认
+        self.default_speaker = (default_speaker or "").strip()
 
     def execute(
         self,
@@ -46,7 +50,7 @@ class VideoProduceTool(BaseTool):
         output_path: str,
         script: str = None,
         project: str = None,
-        speaker: str = "zh_male_guanggaojieshuo_uranus_bigtts",
+        speaker: str = None,
         fps: int = 30,
         width: int = 1920,
         height: int = 1080,
@@ -63,6 +67,9 @@ class VideoProduceTool(BaseTool):
         out = self._resolve_path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
 
+        # 音色优先级：调用方显式传入 > Settings 配置 > 内置默认
+        speaker = resolve_voice(speaker, self.default_speaker)
+
         def progress(msg: str):
             self._emit_progress(msg)
 
@@ -74,10 +81,12 @@ class VideoProduceTool(BaseTool):
                 project=project or "",
                 speaker=speaker,
                 skill_manager=self.skill_manager,
-                opendesign_llm_config=self.opendesign_llm_config,
+                llm_config=self.llm_config,
                 fps=fps, width=width, height=height,
                 progress=progress,
             )
+        except ToolCancelledError:
+            return ToolResult.fail("已取消：视频制作流水线被用户停止。")
         except PipelineAbortError as e:
             return ToolResult.fail(
                 f"视频制作流水线在「{e.stage}」阶段重试 {MAX_RETRY} 次仍失败，已熔断停止。\n"

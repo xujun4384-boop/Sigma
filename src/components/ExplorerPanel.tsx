@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Folder, File, FileText, FileSpreadsheet, Presentation, Image, ChevronRight, ChevronDown, RefreshCw, Trash2, X, FolderOpen, FolderPlus, Edit3, Film, PanelRightClose, FilePlus, FolderDot } from 'lucide-react'
+import { Folder, File, FileText, FileSpreadsheet, Presentation, Image, ChevronRight, ChevronDown, RefreshCw, Trash2, X, FolderOpen, FolderPlus, Edit3, Film, Music, PanelRightClose, FilePlus, FolderDot } from 'lucide-react'
 import ContextMenu from './ContextMenu'
 import type { FolderTreeItem } from '../types/electron'
 import { useTranslation } from '../i18n/I18nContext'
@@ -19,6 +19,7 @@ const FILE_ICONS: Record<string, React.ReactNode> = {
   pdf: <FileText size={14} color="#e74c3c" />,
   image: <Image size={14} />,
   video: <Film size={14} color="#9b59b6" />,
+  audio: <Music size={14} color="#e67e22" />,
   file: <File size={14} />,
 }
 
@@ -305,7 +306,7 @@ export default function ExplorerPanel({ width, onSelectFile, highlightPath, onTo
   // 递归查找文件中所有祖先文件夹路径
   const findAncestorPaths = useCallback((targetPath: string, items: FolderTreeItem[], ancestors: string[]): string[] | null => {
     for (const item of items) {
-      if (item.type === 'file' || item.type === 'docx' || item.type === 'xlsx' || item.type === 'pptx' || item.type === 'pdf' || item.type === 'image') {
+      if (item.type !== 'folder' && item.type !== 'workspace-folder') {
         if (item.path === targetPath) return ancestors
       }
       if ((item.type === 'folder' || item.type === 'workspace-folder') && item.children) {

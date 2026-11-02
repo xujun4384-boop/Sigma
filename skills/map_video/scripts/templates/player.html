@@ -1,0 +1,910 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>AMap Map Video</title>
+<style>
+  :root {
+    --bg: #04070d;
+    --panel: #16263d;
+    --stroke: #6f8fc0;
+    --accent: #1e6bff;
+    --title: #f5f8ff;
+    --sub: #c9d4e6;
+    --kicker: #8fe3ff;
+    --list-cn: #dbe7ff;
+    --list-en: rgba(180, 202, 232, .62);
+    --dot: #00d2ff;
+  }
+  body.light {
+    --bg: #eef3f9;
+    --panel: #e3ebf6;
+    --stroke: #9fb3cf;
+    --accent: #2f7bff;
+    --title: #122033;
+    --sub: #4b5f79;
+    --kicker: #2f7bff;
+    --list-cn: #24384f;
+    --list-en: rgba(60, 84, 112, .65);
+    --dot: #2f7bff;
+  }
+  html, body { margin: 0; height: 100%; background: var(--bg); overflow: hidden; }
+  #map { position: absolute; inset: 0; }
+
+  #vignette {
+    position: absolute; inset: 0; pointer-events: none;
+    background: radial-gradient(ellipse at 50% 46%,
+      rgba(0,0,0,0) 42%, rgba(0,0,0,.26) 78%, rgba(0,0,0,.58) 100%);
+  }
+  body.light #vignette {
+    background: radial-gradient(ellipse at 50% 46%,
+      rgba(255,255,255,0) 42%, rgba(40,60,90,.10) 80%, rgba(30,45,70,.22) 100%);
+  }
+
+  #titleWrap {
+    position: absolute; left: 76px; top: 66px; max-width: 46%;
+    color: var(--title); font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+    will-change: transform, opacity;
+  }
+  #kicker { font-size: 17px; letter-spacing: .40em; font-weight: 600; color: var(--kicker); opacity: 0; }
+  #title { margin-top: 14px; font-size: 62px; line-height: 1.08; font-weight: 700; letter-spacing: .02em; opacity: 0; }
+  #rule { margin-top: 20px; height: 4px; width: 0; border-radius: 2px;
+          background: linear-gradient(90deg, var(--dot), #7a5cff); }
+  #sub { margin-top: 16px; font-size: 22px; letter-spacing: .12em; color: var(--sub); opacity: 0; }
+
+  #list {
+    position: absolute; right: 76px; top: 50%; transform: translateY(-50%);
+    display: flex; flex-direction: column; gap: 14px;
+    font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+  }
+  .city-item {
+    display: flex; align-items: center; gap: 12px; justify-content: flex-end;
+    opacity: 0;
+  }
+  .city-item .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--dot); box-shadow: 0 0 12px var(--dot);
+  }
+  .city-item .txt { text-align: right; color: var(--list-cn); }
+  .city-item .cn { font-size: 22px; font-weight: 600; letter-spacing: .06em; }
+  .city-item .en { font-size: 12px; letter-spacing: .24em; color: var(--list-en); margin-top: 2px; }
+
+  #markers { position: absolute; inset: 0; pointer-events: none; }
+  .city {
+    position: absolute; left: 0; top: 0; opacity: 0;
+    transform: translate(-50%, -50%) scale(.5);
+    pointer-events: none;
+  }
+  .city .dot {
+    position: absolute; left: 0; top: 0; width: 14px; height: 14px; margin: -7px 0 0 -7px;
+    border-radius: 50%; background: var(--dot); border: 2px solid #ffffff;
+    box-shadow: 0 0 18px var(--dot);
+  }
+  .city .pulse {
+    position: absolute; left: 0; top: 0; width: 14px; height: 14px; margin: -7px 0 0 -7px;
+    border-radius: 50%; border: 1px solid var(--dot);
+  }
+  .city .name {
+    position: absolute; white-space: nowrap; font-family: "Microsoft YaHei", sans-serif;
+    font-size: 18px; font-weight: 600; color: var(--title);
+    text-shadow: 0 2px 10px rgba(0,0,0,.8);
+  }
+  body.light .city .name { text-shadow: 0 2px 10px rgba(255,255,255,.9); }
+  .city .name em {
+    display: block; font-style: normal; font-size: 10px; letter-spacing: .22em;
+    color: var(--list-en); font-weight: 400; margin-top: 2px;
+  }
+  .city.left .name { right: 18px; top: -8px; text-align: right; }
+  .city.right .name { left: 18px; top: -8px; text-align: left; }
+  .city.up .name { left: -8px; bottom: 18px; text-align: center; }
+  .city.down .name { left: -8px; top: 18px; text-align: center; }
+  .city.left-up .name { right: 20px; bottom: 14px; text-align: right; }
+  .city.right-down .name { left: 20px; top: 14px; text-align: left; }
+
+  #routeHead {
+    position: absolute; left: 0; top: 0; opacity: 0;
+    transform: translate(-50%, -50%); pointer-events: none;
+  }
+  #routeHead .dot {
+    position: absolute; left: 0; top: 0; width: 16px; height: 16px; margin: -8px 0 0 -8px;
+    border-radius: 50%; background: var(--dot); border: 2px solid #ffffff;
+    box-shadow: 0 0 22px var(--dot);
+  }
+  #routeHead .pulse {
+    position: absolute; left: 0; top: 0; width: 16px; height: 16px; margin: -8px 0 0 -8px;
+    border-radius: 50%; border: 1px solid var(--dot);
+  }
+
+  #plane {
+    position: absolute; left: 0; top: 0; width: 48px; height: 48px; opacity: 0;
+    pointer-events: none; z-index: 30;
+    transform: translate(-50%, -50%);
+    filter: drop-shadow(0 0 10px var(--dot));
+  }
+  #plane svg { width: 100%; height: 100%; display: block; fill: #f5fbff; stroke: var(--dot); stroke-width: 1.1; }
+
+  /* 合规：暗色底图上给高德 logo 与审图号加浅色底，保证可读、且不遮挡 */
+  .amap-logo {
+    background: rgba(255,255,255,.88) !important;
+    padding: 2px 5px !important;
+    border-radius: 4px !important;
+    bottom: 4px !important;
+    left: 4px !important;
+  }
+  .amap-copyright {
+    background: rgba(255,255,255,.88) !important;
+    color: #1a1a1a !important;
+    padding: 2px 6px !important;
+    border-radius: 4px !important;
+    bottom: 4px !important;
+    left: 84px !important;
+    font-size: 11px !important;
+  }
+  .amap-copyright .amap-mcode { color: #1a1a1a !important; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="vignette"></div>
+
+<div id="titleWrap">
+  <div id="kicker"></div>
+  <div id="title"></div>
+  <div id="rule"></div>
+  <div id="sub"></div>
+</div>
+
+<div id="list"></div>
+<div id="markers"></div>
+<div id="routeHead"><div class="pulse"></div><div class="dot"></div></div>
+<div id="plane">
+  <svg viewBox="0 0 64 64" aria-hidden="true">
+    <path d="M60 32 L36 28 L24 6 L18 7 L26 28 L6 30 L2 32 L6 34 L26 36 L18 57 L24 58 L36 36 Z"></path>
+  </svg>
+</div>
+
+<script>
+(function () {
+  var cfg = window.__AMAP_CONFIG__ || {};
+  window._AMapSecurityConfig = { securityJsCode: cfg.securityCode || '' };
+  var s = document.createElement('script');
+  s.src = 'https://webapi.amap.com/maps?v=2.0&key=' + encodeURIComponent(cfg.key || '');
+  s.onload = function () { if (window.initMap) window.initMap(); };
+  s.onerror = function () { window.__error__ = 'AMap JS API 脚本加载失败'; };
+  document.head.appendChild(s);
+})();
+</script>
+
+<script>
+var SPEC = window.__MAP_SPEC__ || {};
+var KIND = String(SPEC.kind || 'region').toLowerCase();
+var THEME = String(SPEC.theme || 'dark').toLowerCase() === 'light' ? 'light' : 'dark';
+var CITIES = Array.isArray(SPEC.markers) ? SPEC.markers.slice() : [];
+var LIST_ON = SPEC.list !== false;
+var CHINA_BOUNDS = [[73.502355, 3.83703], [135.09567, 53.563624]];
+
+var map = null;
+var baseZoom = 4.5;
+var routePts = [];
+var routeMeta = null;
+var routeLineGlow = null;
+var routeLineMain = null;
+var routeHeadEl = null;
+var flightRouteLine = null;
+var flightTrailGlow = null;
+var flightTrailMain = null;
+var flightCenter = null;
+var planeEl = null;
+var markerEls = [];
+var listEls = [];
+var sceneDone = false;
+var regionFixedZoom = false;
+
+function colors() {
+  return THEME === 'light'
+    ? {bg: '#eef3f9', panel: '#e3ebf6', stroke: '#9fb3cf', accent: '#2f7bff',
+       dot: '#2f7bff', text: '#24384f'}
+    : {bg: '#04070d', panel: '#16263d', stroke: '#6f8fc0', accent: '#1e6bff',
+       dot: '#8fe3ff', text: '#dbe8ff'};
+}
+function lerp(a, b, p) { return a + (b - a) * p; }
+function clamp01(p) { return Math.max(0, Math.min(1, p)); }
+function easeOut(p) { p = clamp01(p); return 1 - Math.pow(1 - p, 3); }
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+    return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c];
+  });
+}
+function titleText() {
+  document.getElementById('kicker').textContent = SPEC.kicker || (
+    KIND === 'route' ? 'ROUTE STORY' : KIND === 'world' ? 'WORLD · MAP' : 'CHINA · MAP'
+  );
+  document.getElementById('title').textContent = SPEC.title || '';
+  document.getElementById('sub').textContent = SPEC.subtitle || '';
+}
+
+/* ── 地理编码 ── */
+var geocoders = {};              // 城市提示 → 对应的 Geocoder 实例
+var geocoderPluginReady = false;
+var geocoderPluginQueue = [];
+var GEO_TIMEOUT_MS = 4000;       // 单次解析等待上限：AMap 在失败状态下不回调，必须自带超时
+
+// 同一个 city 提示不能同时用于路线的起点与终点：跨城路线（如成都→郑州）
+// 会把终点限定在出发城市里，永远查不到。所以先按提示查，查不到再退到全国。
+function geocoderHints() {
+  var hint = String(SPEC.city || (SPEC.route && SPEC.route.city) ||
+                    (SPEC.region && SPEC.region.city) || '').trim();
+  return hint ? [hint, '全国'] : ['全国'];
+}
+
+function ensureGeocoder(cb) {
+  if (geocoderPluginReady) return cb();
+  geocoderPluginQueue.push(cb);
+  if (geocoderPluginQueue.length > 1) return;
+  AMap.plugin('AMap.Geocoder', function () {
+    geocoderPluginReady = true;
+    var q = geocoderPluginQueue; geocoderPluginQueue = [];
+    q.forEach(function (f) { f(); });
+  });
+}
+
+function geocoderFor(hint) {
+  if (!geocoders[hint]) geocoders[hint] = new AMap.Geocoder({city: hint});
+  return geocoders[hint];
+}
+
+function geocodeOnce(inst, name, done) {
+  var finished = false;
+  function finish(p) {
+    if (finished) return;
+    finished = true;
+    done(p);
+  }
+  var timer = setTimeout(function () { finish(null); }, GEO_TIMEOUT_MS);
+  try {
+    inst.getLocation(String(name), function (status, result) {
+      clearTimeout(timer);
+      if (status === 'complete' && result && result.geocodes && result.geocodes.length) {
+        var l = result.geocodes[0].location;
+        finish([l.lng, l.lat]);
+      } else {
+        finish(null);
+      }
+    });
+  } catch (e) {
+    clearTimeout(timer);
+    finish(null);
+  }
+}
+
+function geocode(name, cb) {
+  var hints = geocoderHints();
+  ensureGeocoder(function () {
+    var i = 0;
+    (function next() {
+      if (i >= hints.length) return cb(null);
+      geocodeOnce(geocoderFor(hints[i++]), name, function (p) {
+        if (p) return cb(p);
+        next();
+      });
+    })();
+  });
+}
+function resolvePoint(p, cb) {
+  if (Array.isArray(p) && p.length >= 2 && isFinite(p[0]) && isFinite(p[1])) return cb([+p[0], +p[1]]);
+  if (typeof p === 'string' && p.trim()) return geocode(p.trim(), cb);
+  cb(null);
+}
+
+/* ── 路线工具 ── */
+function pathMeters(path) {
+  var total = 0;
+  for (var i = 1; i < path.length; i++) {
+    var a = path[i - 1], b = path[i];
+    var mx = (a[1] + b[1]) * 0.5 * Math.PI / 180;
+    var dx = (b[0] - a[0]) * 111320 * Math.cos(mx);
+    var dy = (b[1] - a[1]) * 111320;
+    total += Math.hypot(dx, dy);
+  }
+  return total;
+}
+function resampleToCount(path, n) {
+  if (!path || path.length < 2) return path || [];
+  var total = pathMeters(path);
+  if (total <= 0.001 || n < 2) return path;
+  var step = total / (n - 1);
+  var out = [path[0]];
+  var prev = path[0];
+  var carry = 0;          // 距上一个采样点已经走过的距离（必须跨段累加）
+  for (var i = 1; i < path.length; i++) {
+    var cur = path[i];
+    var mx = (prev[1] + cur[1]) * 0.5 * Math.PI / 180;
+    var dx = (cur[0] - prev[0]) * 111320 * Math.cos(mx);
+    var dy = (cur[1] - prev[1]) * 111320;
+    var seg = Math.hypot(dx, dy);
+    if (seg < 0.001) continue;
+    var used = 0;         // 本段内已消费的距离
+    while (carry + (seg - used) >= step) {
+      var need = step - carry;
+      var r = (used + need) / seg;
+      out.push([prev[0] + (cur[0] - prev[0]) * r,
+                prev[1] + (cur[1] - prev[1]) * r]);
+      used += need;
+      carry = 0;
+    }
+    carry += seg - used;
+    prev = cur;
+  }
+  var last = path[path.length - 1];
+  var tail = out[out.length - 1];
+  if (Math.hypot((tail[0] - last[0]) * 111320, (tail[1] - last[1]) * 111320) > 1) out.push(last);
+  return out;
+}
+function flattenRoute(route) {
+  var pts = [];
+  var steps = (route && route.steps) || [];
+  for (var i = 0; i < steps.length; i++) {
+    var path = steps[i].path || [];
+    for (var j = 0; j < path.length; j++) pts.push([path[j].lng, path[j].lat]);
+  }
+  return pts;
+}
+function fallbackRoute(a, b) {
+  var pts = [];
+  for (var i = 0; i <= 80; i++) {
+    var p = i / 80;
+    pts.push([
+      a[0] + (b[0] - a[0]) * p + Math.sin(p * Math.PI) * 0.0025,
+      a[1] + (b[1] - a[1]) * p
+    ]);
+  }
+  return pts;
+}
+function routeBounds(pts) {
+  var minLng = 999, minLat = 999, maxLng = -999, maxLat = -999;
+  pts.forEach(function (p) {
+    minLng = Math.min(minLng, p[0]); maxLng = Math.max(maxLng, p[0]);
+    minLat = Math.min(minLat, p[1]); maxLat = Math.max(maxLat, p[1]);
+  });
+  return new AMap.Bounds([minLng, minLat], [maxLng, maxLat]);
+}
+
+function haversineKm(a, b) {
+  var R = 6371;
+  var dLat = (b[1] - a[1]) * Math.PI / 180;
+  var dLng = (b[0] - a[0]) * Math.PI / 180;
+  var la1 = a[1] * Math.PI / 180, la2 = b[1] * Math.PI / 180;
+  var h = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+          Math.cos(la1) * Math.cos(la2) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+// 上海→大连这类航线：用二次贝塞尔做一条向一侧鼓起的弧线。
+// 经纬度是真实起点/终点；弧线是“航线示意”，不是真实航班轨迹。
+function buildArc(a, b, bowRatio) {
+  var dx = b[0] - a[0], dy = b[1] - a[1];
+  var span = Math.hypot(dx, dy) || 1;
+  // 行进方向的右侧（北行时偏东，落在黄海/东海上，更像航线）
+  var px = dy / span, py = -dx / span;
+  var bow = (typeof bowRatio === 'number' ? bowRatio : 0.16) * span;
+  var mid = [(a[0] + b[0]) / 2 + px * bow, (a[1] + b[1]) / 2 + py * bow];
+  var pts = [];
+  for (var i = 0; i <= 180; i++) {
+    var u = i / 180, v = 1 - u;
+    pts.push([
+      v * v * a[0] + 2 * v * u * mid[0] + u * u * b[0],
+      v * v * a[1] + 2 * v * u * mid[1] + u * u * b[1]
+    ]);
+  }
+  return pts;
+}
+
+/* ── 场景 ── */
+function initMap() {
+  document.body.classList.toggle('light', THEME === 'light');
+  titleText();
+
+  var opts = {
+    viewMode: '2D',
+    zoom: KIND === 'route' ? 12.4 : KIND === 'flight' ? 7 : 4.5,
+    center: KIND === 'route' ? [116.4582, 39.9213]
+      : KIND === 'flight' ? [121.5, 35] : [104.2, 35.8],
+    mapStyle: 'amap://styles/normal',
+    showLabel: KIND === 'route' || KIND === 'flight',
+    WebGLParams: {preserveDrawingBuffer: true}
+  };
+  if (KIND !== 'route' && KIND !== 'flight') opts.features = [];
+  map = new AMap.Map('map', opts);
+  routeHeadEl = document.getElementById('routeHead');
+  planeEl = document.getElementById('plane');
+
+  var styleBooted = false;
+  function finishBoot() {
+    if (THEME === 'dark') {
+      var m = document.querySelector('.amap-mcode');
+      if (!m || !m.textContent) {
+        map.setMapStyle('amap://styles/normal');
+        setTimeout(function () {
+          map.setMapStyle('amap://styles/dark');
+          setTimeout(buildScene, 700);
+        }, 500);
+        return;
+      }
+    }
+    buildScene();
+  }
+  function boot() {
+    if (styleBooted) return;
+    styleBooted = true;
+    if (THEME === 'dark') {
+      map.setMapStyle('amap://styles/dark');
+      setTimeout(finishBoot, 800);
+    } else {
+      setTimeout(buildScene, 300);
+    }
+  }
+  map.on('complete', boot);
+  // complete 只发一次：如果地图在注册监听之前就已经加载完（瓦片命中缓存时会这样），
+  // 这个事件会被错过，buildScene 就永不会执行 → 外部一直等到超时。
+  if (map.complete === true) boot();
+}
+
+function buildScene() {
+  var C = colors();
+  if (KIND !== 'route' && KIND !== 'flight') {
+    map.add(new AMap.Polygon({
+      path: [[-179.9, -85], [179.9, -85], [179.9, 85], [-179.9, 85]],
+      fillColor: C.bg, fillOpacity: 1, strokeWeight: 0, zIndex: 1
+    }));
+  }
+  if (KIND === 'region') buildRegion(C);
+  else if (KIND === 'world') buildWorld(C);
+  else if (KIND === 'flight') buildFlight(C);
+  else buildRoute(C);
+}
+
+function buildRegion(C) {
+  var R = SPEC.region || {};
+  var hl = (R.highlight || []).map(String);
+  // 统一用 Country 图层（它稳定覆盖中国全部省份）；Province 图层在部分尺度会消失，
+  // 单省/单市视图通过 name/adcode 定位 + Country 图层上的高亮表达。
+  if (R.name || R.adcode) regionFixedZoom = true;
+  var layer = new AMap.DistrictLayer.Country({
+    zIndex: 120, zooms: [2, 20], SOC: R.soc || 'CHN', depth: Number(R.depth) || 1
+  });
+  layer.setStyles({
+    'stroke-width': 1.15,
+    'stroke': C.stroke,
+    'fill': function (data) {
+      var name = String(data.NAME_CHN || '');
+      var ad = String(data.adcode || '');
+      return (hl.indexOf(name) >= 0 || hl.indexOf(ad) >= 0) ? C.accent : C.panel;
+    },
+    'fill-opacity': 1,
+    'text-color': C.text,
+    'text-size': 13
+  });
+  map.add(layer);
+
+  function afterFit() {
+    baseZoom = map.getZoom();
+    resolveMarkers(function () { finishScene(); });
+  }
+
+  if (R.bounds && R.bounds.length === 2) {
+    map.setBounds(new AMap.Bounds(R.bounds[0], R.bounds[1]), false, [40, 40, 40, 40]);
+    afterFit();
+  } else if (R.name || R.adcode) {
+    // 省级视图：Province 图层只在 zoom <=8 显示；setCity 会到 10+ 导致图层消失，
+    // 所以这里用 setZoomAndCenter，并用 name 地理编码出中心点。
+    function apply(p) {
+      // 7.9 而不是 8：留一点余量，避免逐帧微调时越过 Province 图层的 8 级上限。
+      map.setZoomAndCenter(7.9, p || [116.4074, 39.9042], true);
+      afterFit();
+    }
+    if (Array.isArray(R.center) && R.center.length >= 2) apply(R.center);
+    else if (R.name) geocode(R.name, function (p) { apply(p); });
+    else apply(null);
+  } else {
+    map.setBounds(new AMap.Bounds(CHINA_BOUNDS[0], CHINA_BOUNDS[1]), false, [40, 40, 40, 40]);
+    afterFit();
+  }
+}
+
+function buildWorld(C) {
+  var W = SPEC.world || {};
+  var hl = (W.highlight || []).map(String);
+  var layer = new AMap.DistrictLayer.World({zIndex: 120, zooms: [2, 20]});
+  layer.setStyles({
+    'stroke-width': 0.9,
+    'stroke': C.stroke,
+    'fill': function (data) {
+      var soc = String(data.SOC || '');
+      var name = String(data.NAME_CHN || '');
+      return (hl.indexOf(soc) >= 0 || hl.indexOf(name) >= 0) ? C.accent : C.panel;
+    },
+    'fill-opacity': 1
+  });
+  map.add(layer);
+  // 1920 宽画面下 zoom 2.5 会让世界横向重复（viewport 比世界宽）；
+  // zoom 3.0 + 以 0° 经线为中心时世界约 2048px，正好铺满且不跨日界线重复。
+  map.setZoom(3.0, true);
+  map.setCenter(W.center || [0, 20], true);
+  baseZoom = map.getZoom();
+  resolveMarkers(function () { finishScene(); });
+}
+
+function buildFlight(C) {
+  var F = SPEC.flight || {};
+  var from = F.from || SPEC.from;
+  var to = F.to || SPEC.to;
+  if (!from || !to) {
+    window.__error__ = 'flight 缺少 from/to';
+    finishScene();
+    return;
+  }
+  resolvePoint(from, function (a) {
+    resolvePoint(to, function (b) {
+      if (!a || !b) {
+        window.__error__ = '起飞/到达地点解析失败：请检查地名';
+        finishScene();
+        return;
+      }
+      routePts = buildArc(a, b, typeof F.arc === 'number' ? F.arc : 0.16);
+      var distance = haversineKm(a, b);
+      var fromName = F.from_name || (typeof from === 'string' ? from : '起飞');
+      var toName = F.to_name || (typeof to === 'string' ? to : '到达');
+
+      flightRouteLine = new AMap.Polyline({
+        path: routePts, strokeColor: C.accent, strokeWeight: 2.4,
+        strokeOpacity: 0.70, strokeStyle: 'dashed', strokeDasharray: [8, 8],
+        lineJoin: 'round', lineCap: 'round', zIndex: 55
+      });
+      flightTrailGlow = new AMap.Polyline({
+        path: [a, a], strokeColor: C.accent, strokeWeight: 14,
+        strokeOpacity: 0.14, lineJoin: 'round', lineCap: 'round', zIndex: 60
+      });
+      flightTrailMain = new AMap.Polyline({
+        path: [a, a], strokeColor: C.dot, strokeWeight: 4,
+        strokeOpacity: 0.95, lineJoin: 'round', lineCap: 'round', zIndex: 61
+      });
+      map.add([flightRouteLine, flightTrailGlow, flightTrailMain]);
+
+      CITIES = [
+        {name: fromName, sub: '起飞', coord: a, side: 'left', start: 0.05},
+        {name: toName, sub: '到达', coord: b, side: 'right', start: 0.10}
+      ];
+      createMarkers();
+
+      if (!SPEC.title) {
+        SPEC.title = fromName + ' → ' + toName;
+        document.getElementById('title').textContent = SPEC.title;
+      }
+      if (!SPEC.subtitle) {
+        SPEC.subtitle = '约 ' + Math.round(distance) + ' km · 航线示意';
+        document.getElementById('sub').textContent = SPEC.subtitle;
+      }
+
+      // 固定相机看全航线；运动交给飞机和已飞轨迹，避免逐帧加载瓦片。
+      var bnd = routeBounds(routePts);
+      var sw = bnd.getSouthWest(), ne = bnd.getNorthEast();
+      var midLat = (sw.lat + ne.lat) * 0.5;
+      var wx = Math.abs(ne.lng - sw.lng) * 111320 * Math.cos(midLat * Math.PI / 180);
+      var hy = Math.abs(ne.lat - sw.lat) * 111320;
+      var size = (typeof map.getSize === 'function') ? map.getSize() : null;
+      var VW = size ? size.getWidth() : 1920;
+      var VH = size ? size.getHeight() : 1080;
+      var res = Math.max(wx / (0.74 * VW), hy / (0.70 * VH), 0.4);
+      baseZoom = Math.log2(156543 * Math.cos(midLat * Math.PI / 180) / res);
+      baseZoom = Math.max(2.2, Math.min(15.0, baseZoom));
+      flightCenter = [(sw.lng + ne.lng) * 0.5, midLat];
+      map.setZoom(baseZoom, true);
+      map.setCenter(flightCenter, true);
+      window.__route_ready__ = true;
+      finishScene();
+    });
+  });
+}
+
+function buildRoute(C) {
+  var R = SPEC.route || {};
+  if (!R.origin || !R.destination) {
+    window.__error__ = 'route 缺少 origin/destination';
+    finishScene();
+    return;
+  }
+  resolvePoint(R.origin, function (o) {
+    resolvePoint(R.destination, function (d) {
+        if (!o || !d) {
+          window.__error__ = '起点或终点解析失败：请检查地名与 city 是否正确';
+          finishScene();
+          return;
+        }
+      var mode = String(R.mode || 'driving').toLowerCase();
+      var pluginName = mode === 'walking' ? 'AMap.Walking' : mode === 'riding' ? 'AMap.Riding' : 'AMap.Driving';
+      var routerName = pluginName.replace('AMap.', '');
+      AMap.plugin(pluginName, function () {
+        var router = new AMap[routerName]({map: null});
+        router.search(o, d, function (status, result) {
+          var pts = [], meta = null;
+          if (status === 'complete' && result && result.routes && result.routes.length) {
+            var r0 = result.routes[0];
+            meta = {distance: r0.distance, time: r0.time};
+            pts = flattenRoute(r0);
+          }
+          if (!pts.length) {
+            pts = fallbackRoute(o, d);
+            if (!SPEC.subtitle) {
+              SPEC.subtitle = '路线示意（非真实导航）';
+              document.getElementById('sub').textContent = SPEC.subtitle;
+            }
+          }
+          routePts = resampleToCount(pts, 500);
+          routeMeta = meta;
+
+          routeLineGlow = new AMap.Polyline({
+            path: [o, d], strokeColor: C.accent, strokeWeight: 18,
+            strokeOpacity: 0.16, lineJoin: 'round', lineCap: 'round', zIndex: 60
+          });
+          routeLineMain = new AMap.Polyline({
+            path: [o, d], strokeColor: C.dot, strokeWeight: 5,
+            strokeOpacity: 0.95, lineJoin: 'round', lineCap: 'round', zIndex: 61
+          });
+          map.add([routeLineGlow, routeLineMain]);
+
+          CITIES = [
+            {name: R.origin_name || (typeof R.origin === 'string' ? R.origin : '起点'),
+             sub: '起点', coord: o, side: 'left', start: 0.06},
+            {name: R.destination_name || (typeof R.destination === 'string' ? R.destination : '终点'),
+             sub: '终点', coord: d, side: 'right', start: 0.12}
+          ];
+          if (meta && !SPEC.subtitle) {
+            var km = (meta.distance / 1000).toFixed(1);
+            var min = meta.time ? Math.round(meta.time / 60) : '';
+            SPEC.subtitle = km + ' km' + (min ? ' · ' + min + ' min' : '');
+            document.getElementById('sub').textContent = SPEC.subtitle;
+          }
+          createMarkers();
+
+          // 按路线 bbox 算一个稳定缩放：路线占画面约 70%，避免 setBounds 在长短路线上忽远忽近。
+          var b = routeBounds(routePts);
+          var sw = b.getSouthWest(), ne = b.getNorthEast();
+          var midLat = (sw.lat + ne.lat) * 0.5;
+          var wx = Math.abs(ne.lng - sw.lng) * 111320 * Math.cos(midLat * Math.PI / 180);
+          var hy = Math.abs(ne.lat - sw.lat) * 111320;
+          var sz = (typeof map.getSize === 'function') ? map.getSize() : null;
+          var VW = sz ? sz.getWidth() : 1920;
+          var VH = sz ? sz.getHeight() : 1080;
+          var res = Math.max(wx / (0.70 * VW), hy / (0.70 * VH), 0.4);
+          baseZoom = Math.log2(156543 * Math.cos(midLat * Math.PI / 180) / res);
+          baseZoom = Math.max(2.2, Math.min(15.4, baseZoom));
+          map.setZoom(baseZoom, true);
+          map.setCenter([(sw.lng + ne.lng) * 0.5, midLat], true);
+          routeHeadEl.style.opacity = 1;
+          window.__route_ready__ = true;
+          finishScene();
+        });
+      });
+    });
+  });
+}
+
+function resolveMarkers(done) {
+  if (!CITIES.length) return done();
+  var pending = CITIES.length;
+  CITIES.forEach(function (m, i) {
+    if (Array.isArray(m.coord) && m.coord.length >= 2) {
+      m._pos = [+m.coord[0], +m.coord[1]];
+      if (--pending === 0) { createMarkers(); done(); }
+      return;
+    }
+    if (m.name) {
+      geocode(m.name, function (p) {
+        m._pos = p;
+        if (--pending === 0) { createMarkers(); done(); }
+      });
+    } else {
+      m._pos = null;
+      if (--pending === 0) { createMarkers(); done(); }
+    }
+  });
+}
+
+function createMarkers() {
+  var wrap = document.getElementById('markers');
+  var list = document.getElementById('list');
+  wrap.innerHTML = '';
+  list.innerHTML = '';
+  markerEls = [];
+  listEls = [];
+  CITIES = CITIES.filter(function (m) { return !!m._pos; });
+  CITIES.forEach(function (m, i) {
+    var side = m.side || (i % 2 ? 'right' : 'left');
+    var el = document.createElement('div');
+    el.className = 'city ' + side;
+    el.innerHTML = '<div class="pulse"></div><div class="dot"></div><div class="name">' +
+      esc(m.name) + '<em>' + esc(m.sub || '') + '</em></div>';
+    wrap.appendChild(el);
+    markerEls.push(el);
+
+    if (LIST_ON) {
+      var item = document.createElement('div');
+      item.className = 'city-item';
+      item.innerHTML = '<div class="dot"></div><div class="txt"><div class="cn">' +
+        esc(m.name) + '</div><div class="en">' + esc(m.sub || '') + '</div></div>';
+      list.appendChild(item);
+      listEls.push(item);
+    }
+    m._start = (typeof m.start === 'number') ? m.start : 0.16 + i * 0.14;
+  });
+}
+
+function finishScene() {
+  if (sceneDone) return;
+  sceneDone = true;
+  window.__ready__ = true;
+}
+
+/* ── 逐帧渲染 ── */
+function updateMarkers(t) {
+  for (var i = 0; i < CITIES.length; i++) {
+    var m = CITIES[i];
+    if (!m._pos) continue;
+    var el = markerEls[i];
+    var item = listEls[i];
+    var p = easeOut((t - (m._start || 0.16)) / 0.10);
+    var pt = map.lngLatToContainer(new AMap.LngLat(m._pos[0], m._pos[1]));
+    if (el) {
+      el.style.left = pt.x + 'px';
+      el.style.top = pt.y + 'px';
+      el.style.opacity = p;
+      el.style.transform = 'translate(-50%, -50%) scale(' + lerp(0.5, 1, p) + ')';
+      var pulse = el.querySelector('.pulse');
+      if (pulse) {
+        var k = ((t - (m._start || 0.16)) * 2.6) % 1;
+        pulse.style.transform = 'scale(' + (1 + k * 2.2) + ')';
+        pulse.style.opacity = p * (1 - k) * 0.9;
+      }
+    }
+    if (item) {
+      item.style.opacity = p;
+      item.style.transform = 'translateX(' + ((1 - p) * 14) + 'px)';
+    }
+  }
+}
+
+function animateTitle(t) {
+  var p1 = clamp01(t / 0.12);
+  var p2 = clamp01((t - 0.06) / 0.14);
+  var p3 = clamp01((t - 0.16) / 0.16);
+  var p4 = clamp01((t - 0.24) / 0.16);
+  document.getElementById('kicker').style.opacity = p1;
+  document.getElementById('title').style.opacity = p2;
+  document.getElementById('title').style.transform = 'translateY(' + ((1 - p2) * 18) + 'px)';
+  document.getElementById('rule').style.width = (p3 * 220) + 'px';
+  document.getElementById('sub').style.opacity = p4;
+}
+
+window.renderAt = async function (t) {
+  t = clamp01(t);
+  if (!map) return;
+  animateTitle(t);
+
+  if (KIND === 'flight') {
+    var fpts = routePts;
+    if (!fpts || fpts.length < 2) {
+      await new Promise(function (r) { requestAnimationFrame(r); });
+      return;
+    }
+    var fpos = t * (fpts.length - 1);
+    var fi0 = Math.floor(fpos);
+    var fi1 = Math.min(fpts.length - 1, fi0 + 1);
+    var ff = fpos - fi0;
+    var fhead = [lerp(fpts[fi0][0], fpts[fi1][0], ff), lerp(fpts[fi0][1], fpts[fi1][1], ff)];
+    var fnext = fpts[Math.min(fpts.length - 1, fi0 + 2)];
+    var fcur = fpts[Math.max(0, fi0 - 1)];
+    if (fi0 >= fpts.length - 2) {
+      fnext = fpts[fpts.length - 1];
+      fcur = fpts[fpts.length - 2];
+    }
+    var fpath = fpts.slice(0, fi0 + 1);
+    fpath.push(fhead);
+    if (flightTrailGlow) flightTrailGlow.setPath(fpath);
+    if (flightTrailMain) flightTrailMain.setPath(fpath);
+    if (flightCenter) {
+      map.setZoom(baseZoom, true);
+      map.setCenter(flightCenter, true);
+    }
+    if (planeEl) {
+      var hp = map.lngLatToContainer(new AMap.LngLat(fhead[0], fhead[1]));
+      var np = map.lngLatToContainer(new AMap.LngLat(fnext[0], fnext[1]));
+      var cp = map.lngLatToContainer(new AMap.LngLat(fcur[0], fcur[1]));
+      var angle = Math.atan2(np.y - cp.y, np.x - cp.x) * 180 / Math.PI;
+      var appear = clamp01(t / 0.06);
+      planeEl.style.left = hp.x + 'px';
+      planeEl.style.top = hp.y + 'px';
+      planeEl.style.opacity = appear;
+      planeEl.style.transform = 'translate(-50%, -50%) rotate(' + angle + 'deg)';
+    }
+    updateMarkers(t);
+    if (typeof map.render === 'function') map.render();
+    await new Promise(function (resolve) {
+      var done = false;
+      var timer = setTimeout(function () { if (!done) { done = true; resolve(); } }, 320);
+      map.once('complete', function () {
+        if (!done) { done = true; clearTimeout(timer); resolve(); }
+      });
+    });
+    await new Promise(function (r) { requestAnimationFrame(function () { requestAnimationFrame(r); }); });
+    await new Promise(function (r) { setTimeout(r, 25); });
+    return;
+  }
+
+  if (KIND === 'route') {
+    var pts = routePts;
+    if (!pts || pts.length < 2) {
+      await new Promise(function (r) { requestAnimationFrame(r); });
+      return;
+    }
+    var pos = t * (pts.length - 1);
+    var i0 = Math.floor(pos);
+    var i1 = Math.min(pts.length - 1, i0 + 1);
+    var f = pos - i0;
+    var head = [lerp(pts[i0][0], pts[i1][0], f), lerp(pts[i0][1], pts[i1][1], f)];
+    var lookPos = Math.min(pts.length - 1, pos + Math.max(4, Math.round(pts.length * 0.02)));
+    var l0 = Math.floor(lookPos);
+    var l1 = Math.min(pts.length - 1, l0 + 1);
+    var lf = lookPos - l0;
+    var cam = [lerp(pts[l0][0], pts[l1][0], lf), lerp(pts[l0][1], pts[l1][1], lf)];
+
+    map.setZoom(baseZoom, true);
+    map.setPitch(Number((SPEC.route || {}).pitch) || 20, true);
+    map.setRotation(Number((SPEC.route || {}).rotation) || -6, true);
+    map.setCenter(cam, true);
+
+    var path = pts.slice(0, i0 + 1);
+    path.push(head);
+    if (routeLineGlow) routeLineGlow.setPath(path);
+    if (routeLineMain) routeLineMain.setPath(path);
+
+    var hp = map.lngLatToContainer(new AMap.LngLat(head[0], head[1]));
+    if (routeHeadEl) {
+      routeHeadEl.style.left = hp.x + 'px';
+      routeHeadEl.style.top = hp.y + 'px';
+      routeHeadEl.style.opacity = 1;
+      var pulse = routeHeadEl.querySelector('.pulse');
+      if (pulse) {
+        var k = (t * 5) % 1;
+        pulse.style.transform = 'scale(' + (1 + k * 2.2) + ')';
+        pulse.style.opacity = (1 - k) * 0.9;
+      }
+    }
+    updateMarkers(t);
+
+    if (typeof map.render === 'function') map.render();
+    await new Promise(function (resolve) {
+      var done = false;
+      var timer = setTimeout(function () { if (!done) { done = true; resolve(); } }, 320);
+      map.once('complete', function () {
+        if (!done) { done = true; clearTimeout(timer); resolve(); }
+      });
+    });
+    await new Promise(function (r) { requestAnimationFrame(function () { requestAnimationFrame(r); }); });
+    await new Promise(function (r) { setTimeout(r, 25); });
+    return;
+  }
+
+  // region / world：矢量图层，无需等瓦片，轻微推进即可。
+  // Province 图层有 8 级上限，省级视图固定缩放，不做推进，避免图层消失。
+  var z = (KIND === 'region' && regionFixedZoom) ? baseZoom : baseZoom + 0.14 * t;
+  map.setZoom(z, true);
+  updateMarkers(t);
+  if (typeof map.render === 'function') map.render();
+  await new Promise(function (r) { requestAnimationFrame(function () { requestAnimationFrame(r); }); });
+  await new Promise(function (r) { setTimeout(r, 20); });
+};
+
+window.initMap = initMap;
+</script>
+</body>
+</html>

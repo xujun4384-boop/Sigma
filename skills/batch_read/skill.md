@@ -7,6 +7,7 @@
 ## ⚠️ 重要提示
 # - 阅读 >=2 个文件时必须使用 batch_read，不要逐文件调用 read
 # - 读 1 个文件时也优先使用 batch_read（设置 purpose 可获得更精准的摘要）
+# - 图片文件（.png/.jpg/.jpeg/.webp/.gif/.bmp）请直接用 read_image，不要走 batch_read
 # - 需要查看文件原文时，设置 include_content=true，子 Agent 会同时返回摘要+原文
 # - 需要深入了解文件细节时，在 purpose 中明确描述即可
 # - 禁止直接调用 read/read_docx/read_pdf/read_xlsx 读取文件

@@ -4,6 +4,7 @@
 # 使用 Kimi PPTD DSL 中间格式生成 PowerPoint/PPTX 演示文稿。
 # LLM 按以下规范生成 .pptd + .page 文件，再调用 convert_pptx 转换为 .pptx。
 # 支持多智能体协作：超过 20 页的 PPT 通过 sub_agent 并行生成。
+# 触发：凡是要生成、重做或更新 PPT / 演示文稿 / 幻灯片的任务，必须先走本技能；不要自己写 python-pptx 脚本重建。
 #
 ## 使用场景
 # - 从零创建 PPT 演示文稿（支持大规模多页 PPT）

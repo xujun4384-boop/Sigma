@@ -1,128 +1,107 @@
-"""MiniMax 音乐生成 Skill。"""
-import base64
-import json
-import uuid
-import urllib.error
-import urllib.request
+"""
+music_generate skill - 音乐组（AI 音乐生成）
+
+提供工具:
+  music_generate - 文本描述 → 音乐 mp3（纯音乐 / 自定义歌词 / 自动写词）。
+
+设计要点:
+  - provider 可切换（腾讯云 TokenHub / MiniMax 开放平台），端点信息集中在
+    scripts/music.py 的 PROVIDER_SPECS 里登记，调用逻辑不因厂商而分叉。
+  - key 复用前端 SkillKeys 配置（musicGenApiKey），与 image_generate / doubao_tts 同模式。
+  - 产物默认落 video_work/<project>/music/，与视频部门目录约定一致。
+"""
+import os
 from pathlib import Path
-from typing import Any
 
 from skills.base import BaseTool, ToolParameter, ToolResult
 
-DEFAULT_BASE_URL = "https://api.minimaxi.com/v1"
-DEFAULT_MODEL = "music-3.0"
+
+def _auto_output_path(output_path: str, project: str, cwd: str) -> Path:
+    """相对路径自动放入 video_work/<project>/music/ 下，与视频工具约定一致。"""
+    p = Path(output_path)
+    if p.is_absolute():
+        return p
+    base = Path(cwd) if cwd else Path(os.getcwd())
+    work_dir = base / "video_work"
+    if project:
+        work_dir = work_dir / project
+    return work_dir / "music" / p
 
 
 class MusicGenerateTool(BaseTool):
-    name = "generate_music"
-    description = "根据音乐风格提示词和可选歌词调用 MiniMax 音乐生成服务，保存生成的音频到本地。"
+    name = "music_generate"
+    description = (
+        "音乐组：根据文本描述生成音乐（mp3）。支持三种模式——纯音乐（默认，适合做视频配乐/BGM）、"
+        "自定义歌词演唱、按主题自动写词演唱。返回音频路径与时长。"
+    )
     parameters = [
-        ToolParameter("prompt", "string", "音乐风格、情绪、乐器与场景描述", required=False, default=""),
-        ToolParameter("lyrics", "string", "歌词；纯音乐时留空", required=False, default=""),
-        ToolParameter("is_instrumental", "boolean", "是否生成纯音乐；纯音乐不需要歌词", required=False, default=False),
-        ToolParameter("model", "string", "MiniMax 音乐模型名；默认使用设置中的模型", required=False, default=""),
+        ToolParameter("prompt", "string", "音乐描述：风格 / 情绪 / 场景 / 乐器 / BPM（如“轻快的电子配乐，适合科技讲解，无鼓点干扰人声”）"),
+        ToolParameter("output_path", "string", "输出 mp3 文件路径（相对路径自动放在 video_work/<project>/music/ 下）"),
+        ToolParameter("project", "string", "项目名，与视频工具保持一致", required=False),
+        ToolParameter("instrumental", "boolean", "是否纯音乐（无人声），默认 true；做视频配乐一般用 true", required=False, default=True),
+        ToolParameter("lyrics", "string", "自定义歌词；建议用 [Verse]/[Chorus]/[Bridge] 等结构标签分段。instrumental=true 时忽略", required=False),
+        ToolParameter("auto_lyrics", "boolean", "没有歌词时是否让模型按 prompt 主题自动写词（仅非纯音乐模式生效）", required=False, default=False),
+        ToolParameter("format", "string", "输出音频格式，默认 mp3", required=False, default="mp3"),
     ]
 
-    def __init__(self, cwd: str = ".", api_key: str = "", base_url: str = "", default_model: str = ""):
+    def __init__(self, cwd: str = ".", api_key: str = "", base_url: str = "",
+                 default_model: str = "", provider: str = "", **kwargs):
         super().__init__(cwd)
         self.api_key = api_key
-        self.base_url = (base_url or DEFAULT_BASE_URL).rstrip("/")
-        self.default_model = default_model or DEFAULT_MODEL
+        self.base_url = base_url
+        self.default_model = default_model
+        self.provider = provider
 
-    def execute(
-        self,
-        prompt: str = "",
-        lyrics: str = "",
-        is_instrumental: bool = False,
-        model: str = "",
-    ) -> ToolResult:
+    def execute(self, prompt: str, output_path: str, project: str = None,
+                instrumental: bool = True, lyrics: str = None,
+                auto_lyrics: bool = False, format: str = "mp3",
+                **kwargs) -> ToolResult:
         if not self.api_key:
-            return ToolResult.fail("未配置 MiniMax 音乐生成 API Key，请在 Skill Keys 中配置。")
-        if not prompt and (is_instrumental or not lyrics):
-            return ToolResult.fail("纯音乐需要提供 prompt；歌曲需要至少提供歌词或 prompt。")
+            return ToolResult.fail(
+                "未配置音乐生成 API Key。请在 Settings → Skill Keys → 音乐生成 中配置。"
+            )
 
-        payload: dict[str, Any] = {
-            "model": model or self.default_model,
-            "is_instrumental": is_instrumental,
-        }
-        if prompt:
-            payload["prompt"] = prompt
-        if lyrics:
-            payload["lyrics"] = lyrics
+        from .scripts.music import generate, provider_label, resolve_provider
 
-        request = urllib.request.Request(
-            f"{self.base_url}/music_generation",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "Accept": "application/json",
-            },
-            method="POST",
+        out = _auto_output_path(output_path, project or "", self.cwd)
+        out.parent.mkdir(parents=True, exist_ok=True)
+
+        mode = "纯音乐" if instrumental else ("自定义歌词" if (lyrics or "").strip() else "自动写词")
+        self._emit_progress(f"正在生成音乐（{mode}）：{prompt[:40]}{'...' if len(prompt) > 40 else ''}")
+
+        try:
+            result = generate(
+                api_key=self.api_key,
+                output_path=str(out),
+                prompt=prompt,
+                provider=self.provider,
+                base_url=self.base_url,
+                model=self.default_model,
+                lyrics=lyrics or "",
+                instrumental=bool(instrumental),
+                auto_lyrics=bool(auto_lyrics),
+                audio_format=format or "mp3",
+            )
+        except Exception as e:
+            return ToolResult.fail(f"音乐生成失败: {e}")
+
+        self._emit_progress("音乐生成完成")
+        size_mb = result["size_bytes"] / 1024 / 1024
+        content = (
+            f"音乐生成完成: {Path(result['output_path']).name}\n"
+            f"时长: {result['duration']} 秒｜大小: {size_mb:.2f} MB｜模式: {mode}\n"
+            f"provider: {provider_label(resolve_provider(self.provider))}｜模型: {result['model']}\n"
+            f"文件路径: {result['output_path']}"
         )
-        try:
-            with urllib.request.urlopen(request, timeout=120) as response:
-                result = json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as error:
-            try:
-                detail = json.loads(error.read().decode("utf-8"))
-                message = detail.get("base_resp", {}).get("status_msg") or detail.get("message") or str(detail)
-            except Exception:
-                message = error.reason
-            return ToolResult.fail(f"MiniMax 音乐生成请求失败（HTTP {error.code}）：{message}")
-        except Exception as error:
-            return ToolResult.fail(f"MiniMax 音乐生成请求失败：{error}")
-
-        base_resp = result.get("base_resp") or {}
-        if base_resp.get("status_code") not in (None, 0):
-            return ToolResult.fail(base_resp.get("status_msg") or f"MiniMax 返回错误：{base_resp}")
-
-        audio = self._find_audio(result)
-        if not audio:
-            return ToolResult.fail("MiniMax 未返回可识别的音频数据。", response=result)
-
-        output_dir = Path(self.cwd) / "generated_music"
-        output_dir.mkdir(parents=True, exist_ok=True)
-        filename = f"music_{uuid.uuid4().hex[:12]}.mp3"
-        output_path = output_dir / filename
-        try:
-            self._save_audio(audio, output_path)
-        except Exception as error:
-            return ToolResult.fail(f"音频保存失败：{error}", response=result)
-
         return ToolResult.ok(
-            f"音乐已生成：{output_path}",
-            filename=filename,
-            filepath=str(output_path.resolve()),
-            model=payload["model"],
+            content,
+            output_path=result["output_path"],
+            duration=result["duration"],
+            size_bytes=result["size_bytes"],
+            model=result["model"],
+            provider=result["provider"],
+            instrumental=bool(instrumental),
         )
 
-    @staticmethod
-    def _find_audio(data: Any) -> str | None:
-        if isinstance(data, dict):
-            for key in ("audio", "audio_url", "audio_base64", "url", "file_url"):
-                value = data.get(key)
-                if isinstance(value, str) and value:
-                    return value
-            for value in data.values():
-                found = MusicGenerateTool._find_audio(value)
-                if found:
-                    return found
-        elif isinstance(data, list):
-            for value in data:
-                found = MusicGenerateTool._find_audio(value)
-                if found:
-                    return found
-        return None
 
-    @staticmethod
-    def _save_audio(audio: str, output_path: Path) -> None:
-        if audio.startswith(("https://", "http://")):
-            with urllib.request.urlopen(audio, timeout=120) as response:
-                output_path.write_bytes(response.read())
-            return
-        encoded = audio.split(",", 1)[-1] if audio.startswith("data:") else audio
-        try:
-            output_path.write_bytes(bytes.fromhex(encoded))
-        except ValueError:
-            output_path.write_bytes(base64.b64decode(encoded))
+__all__ = ["MusicGenerateTool"]

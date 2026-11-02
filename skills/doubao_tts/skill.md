@@ -1,7 +1,8 @@
 # doubao_tts skill
 # ---------------------------------------------------------------------------
 # 摘要
-# 豆包语音合成大模型 2.0 旁白生成。文本 → mp3 旁白，并返回字级时间戳。
+# 豆包语音合成大模型旁白生成。文本 → mp3 旁白，并返回字级时间戳。
+# 音色按注册表自动匹配所属代次资源（1.0 / 2.0）。
 # 与 edge-tts（video_tts）相比，音质更好、支持情感/语速控制，且带字级时间戳。
 # 时间戳用于「旁白时间与视频内容精确契合」：字幕逐字对齐、分镜时长跟随旁白。
 #
@@ -41,7 +42,8 @@
 #   text (string, 必填) 待合成的旁白文本
 #   output_path (string, 必填) 输出 mp3 路径（相对路径放 video_work/<project>/ 下）
 #   project (string, 可选) 项目名，与视频工具保持一致
-#   speaker (string, 可选) 音色ID，默认 zh_male_guanggaojieshuo_uranus_bigtts（广告解说2.0）
+#   speaker (string, 可选) 音色ID，留空则用 Settings「配音音色」，再空则内置默认（广告解说2.0）
+#                       可选音色见 skills/doubao_tts/voices.py，前端 Settings 下拉也读同一份
 #   speech_rate (integer, 可选, 默认0) 语速 -50~100（100=2倍速，-50=0.5倍速）
 #   loudness_rate (integer, 可选, 默认0) 音量 -50~100
 #

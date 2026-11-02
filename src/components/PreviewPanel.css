@@ -44,6 +44,16 @@
   color: var(--accent);
 }
 
+/* Computer Use 入口：贴右对齐在标题栏右侧 */
+.computer-use-trigger {
+  margin-left: auto;
+}
+
+.computer-use-trigger.active {
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
 /* === Tab Bar === */
 
 .preview-tab-bar {
@@ -206,6 +216,21 @@
   max-width: 100%;
   max-height: calc(100vh - 120px);
   border-radius: 4px;
+  outline: none;
+}
+
+.preview-audio {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  padding: 24px;
+}
+
+.preview-audio audio {
+  width: 100%;
+  max-width: 560px;
   outline: none;
 }
 

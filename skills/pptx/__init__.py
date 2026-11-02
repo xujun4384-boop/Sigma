@@ -20,6 +20,7 @@ except ImportError:
 class ConvertPptxTool(BaseTool):
     name = "convert_pptx"
     description = (
+        "生成 PPT / 演示文稿 / 幻灯片时必须使用本工具，不要自己写 python-pptx 脚本重建。"
         "将 .pptd (Kimi PPTD DSL) 中间格式检查并转换为 .pptx 演示文稿。"
         "支持 check（仅检查）/ convert（仅转换）/ check_convert（检查+转换）。"
         "自动规范化旧版 PPTD 格式。"

@@ -80,4 +80,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   showNotification: (title, body) => ipcRenderer.invoke('show-notification', title, body),
   getSystemSounds: () => ipcRenderer.invoke('get-system-sounds'),
   previewSound: (soundPath) => ipcRenderer.invoke('preview-sound', soundPath),
+
+  // Computer Use 模式（悬浮窗 + 主体缩到托盘）
+  enterComputerUseMode: (config) => ipcRenderer.invoke('enter-computer-use-mode', config),
+  exitComputerUseMode: () => ipcRenderer.invoke('exit-computer-use-mode'),
+  getComputerUseMode: () => ipcRenderer.invoke('get-computer-use-mode'),
+  onComputerUseModeChange: (callback) => {
+    const listener = (event, active) => callback(active)
+    ipcRenderer.on('computer-use-mode', listener)
+    return () => ipcRenderer.removeListener('computer-use-mode', listener)
+  },
 })

@@ -3,11 +3,15 @@ video_cinematic skill - 电影级 AI 视频生成
 
 提供两个工具:
   video_cinematic_storyboard - 分镜脚本设计（LLM 拆解用户意图为电影分镜）
-  video_cinematic_generate   - 电影级视频生成（提交 MiniMax-Hailuo-2.3 文生视频任务）
+  video_cinematic_generate   - 电影级视频生成（按 Settings 选择的服务商提交文生视频任务）
+
+服务商（由用户在 Settings → Skill Keys → 影视级视频生成 中选择）:
+  - minimax：MiniMax-Hailuo-2.3（默认）
+  - ark：火山方舟 / 豆包 Seedance 系列
 
 核心特性:
   - 纯提示词驱动，生成后不可修改
-  - 使用 Token Plan 套餐每日赠送的 3 条 Hailuo2.3 视频额度
+  - 每次生成消耗一次视频额度（按套餐用量扣减，具体以控制台为准）
   - 支持 [运镜指令] 语法实现精确镜头控制
 """
 import json
@@ -40,7 +44,7 @@ class VideoCinematicStoryboardTool(BaseTool):
     )
     parameters = [
         ToolParameter("user_intent", "string", "用户想要视频的文字描述"),
-        ToolParameter("total_duration", "integer", "目标总时长（秒），默认 30（3 个 10s 分镜，正好用完每日赠送）", required=False, default=30),
+        ToolParameter("total_duration", "integer", "目标总时长（秒），默认 30（3 个 10s 分镜，按实际需要调整）", required=False, default=30),
         ToolParameter("style", "string", "视觉风格参考，默认 cinematic", required=False, default="cinematic"),
         ToolParameter("scene_count", "integer", "分镜数量，不提供则自动计算", required=False),
     ]
@@ -122,8 +126,8 @@ class VideoCinematicStoryboardTool(BaseTool):
 class VideoCinematicGenerateTool(BaseTool):
     name = "video_cinematic_generate"
     description = (
-        "电影级 AI 视频生成。基于 MiniMax-Hailuo-2.3 模型，通过纯文本提示词生成"
-        "具有电影感画面的高质量视频。\n"
+        "电影级 AI 视频生成。按 Settings 中选择的服务商（MiniMax-Hailuo-2.3 或 火山方舟 Seedance）"
+        "通过纯文本提示词生成具有电影感画面的高质量视频。\n"
         "⚠️ 重要：生成后不可修改，任务一旦提交即消耗配额。\n"
         "建议先使用 video_cinematic_storyboard 设计分镜，再逐镜调用本工具。"
     )
@@ -139,10 +143,20 @@ class VideoCinematicGenerateTool(BaseTool):
     ]
 
     def __init__(self, cwd: str = ".", llm_config: dict = None,
-                 minimax_video_api_key: str = "", **kwargs):
+                 minimax_video_api_key: str = "",
+                 video_provider: str = "minimax",
+                 ark_video_api_key: str = "",
+                 ark_video_base_url: str = "",
+                 ark_video_model: str = "",
+                 **kwargs):
         super().__init__(cwd)
         self.llm_config = llm_config or {}
         self.minimax_video_api_key = minimax_video_api_key
+        # 服务商由 Settings 决定（minimax | ark），默认沿用历史上的 MiniMax
+        self.video_provider = (video_provider or "minimax").strip().lower()
+        self.ark_video_api_key = ark_video_api_key
+        self.ark_video_base_url = ark_video_base_url
+        self.ark_video_model = ark_video_model
 
     def execute(
         self,
@@ -156,23 +170,7 @@ class VideoCinematicGenerateTool(BaseTool):
         max_wait: int = 1800,
         **kwargs,
     ) -> ToolResult:
-        from .scripts.hailuo_client import generate_cinematic_video
-
-        # 获取 MiniMax API Key（优先级：构造参数 > 环境变量 > llm_config）
         import os
-        minimax_api_key = self.minimax_video_api_key
-        if not minimax_api_key:
-            minimax_api_key = os.environ.get("MINIMAX_API_KEY", "")
-        if not minimax_api_key:
-            # 尝试从 llm_config 获取（某些配置可能统一存放）
-            minimax_api_key = self.llm_config.get("minimax_api_key", "")
-
-        if not minimax_api_key:
-            return ToolResult.fail(
-                "MiniMax API Key 未配置。\n"
-                "请设置环境变量 MINIMAX_API_KEY 或在配置中提供 minimax_api_key。\n"
-                "Token Plan 订阅 Key 和按量计费 API Key 均可用于 Hailuo-2.3。"
-            )
 
         out = self._resolve_path(output_path)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -188,24 +186,57 @@ class VideoCinematicGenerateTool(BaseTool):
                 size_mb=round(size_mb, 1),
             )
 
-        self._emit_progress(f"正在提交视频生成任务 ({duration}s, {resolution})...")
+        self._emit_progress(
+            f"正在提交视频生成任务 ({self.video_provider}, {duration}s, {resolution})...")
 
         def _progress(status, elapsed):
             self._emit_progress(f"任务状态: {status} (已等待 {elapsed}s)")
 
         try:
-            result = generate_cinematic_video(
-                prompt=prompt,
-                output_path=str(out),
-                api_key=minimax_api_key,
-                duration=duration,
-                resolution=resolution,
-                prompt_optimizer=prompt_optimizer,
-                fast_pretreatment=fast_pretreatment,
-                poll_interval=poll_interval,
-                max_wait=max_wait,
-                progress_callback=_progress,
-            )
+            if self.video_provider == "ark":
+                ark_key = self.ark_video_api_key or os.environ.get("ARK_API_KEY", "")
+                if not ark_key:
+                    return ToolResult.fail(
+                        "火山方舟 API Key 未配置。\n"
+                        "请在 Settings → Skill Keys → 影视级视频生成 中选择「火山方舟 Seedance」并填写 ARK API Key。")
+                from .scripts.ark_video_client import generate_cinematic_video as gen_ark
+                result = gen_ark(
+                    prompt=prompt,
+                    output_path=str(out),
+                    api_key=ark_key,
+                    duration=duration,
+                    resolution=resolution,
+                    base_url=self.ark_video_base_url,
+                    model=self.ark_video_model,
+                    poll_interval=poll_interval,
+                    max_wait=max_wait,
+                    progress_callback=_progress,
+                )
+            else:
+                # 获取 MiniMax API Key（优先级：构造参数 > 环境变量 > llm_config）
+                minimax_api_key = self.minimax_video_api_key
+                if not minimax_api_key:
+                    minimax_api_key = os.environ.get("MINIMAX_API_KEY", "")
+                if not minimax_api_key:
+                    minimax_api_key = self.llm_config.get("minimax_api_key", "")
+                if not minimax_api_key:
+                    return ToolResult.fail(
+                        "MiniMax API Key 未配置。\n"
+                        "请在 Settings → Skill Keys → 影视级视频生成 中填写，或设置环境变量 MINIMAX_API_KEY。\n"
+                        "Token Plan 订阅 Key 和按量计费 API Key 均可用于 Hailuo-2.3。")
+                from .scripts.hailuo_client import generate_cinematic_video as gen_hailuo
+                result = gen_hailuo(
+                    prompt=prompt,
+                    output_path=str(out),
+                    api_key=minimax_api_key,
+                    duration=duration,
+                    resolution=resolution,
+                    prompt_optimizer=prompt_optimizer,
+                    fast_pretreatment=fast_pretreatment,
+                    poll_interval=poll_interval,
+                    max_wait=max_wait,
+                    progress_callback=_progress,
+                )
         except Exception as e:
             return ToolResult.fail(f"视频生成失败: {e}")
 
@@ -215,7 +246,7 @@ class VideoCinematicGenerateTool(BaseTool):
             size_mb = Path(result["output_path"]).stat().st_size / 1024 / 1024
 
         return ToolResult.ok(
-            f"电影级视频生成完成: {Path(result['output_path']).name}\n"
+            f"电影级视频生成完成（{self.video_provider}）: {Path(result['output_path']).name}\n"
             f"任务 ID: {result['task_id']}\n"
             f"时长: {result['duration']} 秒\n"
             f"分辨率: {result['resolution']} ({result.get('video_width', 0)}x{result.get('video_height', 0)})\n"

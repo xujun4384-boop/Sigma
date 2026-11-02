@@ -10,9 +10,15 @@ Skill 管理器：注册、调度、导出 Anthropic tools 格式
 """
 from pathlib import Path
 from typing import Any
+from collections import OrderedDict
+import hashlib
 import inspect
+import json
+import os
+import threading
 
 from sigma_logger import log
+from cancellation import current_cancel_token
 from skills.base import BaseTool, ToolResult
 from skills.canvas import CanvasUpdateTool
 from skills.file_operations import ReadTool, WriteTool, EditTool, BashTool
@@ -26,7 +32,6 @@ from skills.image_reader import ImageReaderTool
 from skills.image_search import ImageSearchTool
 from skills.image_generate import ImageGenerateTool
 from skills.image_to_image import ImageToImageTool
-from skills.music_generate import MusicGenerateTool
 from skills.sandbox import SandboxTool
 from skills.sub_agent import SubAgentTool
 from skills.custom_agent import CustomAgentTool
@@ -60,12 +65,24 @@ from skills.video_custom import VideoCustomTool
 from skills.video_overlay import VideoOverlayTool
 from skills.video_card import VideoCardTool
 from skills.video_cinematic import VideoCinematicStoryboardTool, VideoCinematicGenerateTool
+from skills.footage_video import FootageVideoTool
+from skills.map_video import MapVideoTool
 from skills.opendesign import OpendesignVideoTool
 from skills.doubao_tts import DoubaoTTS
+from skills.narration import NarrationTool
+from skills.music_generate import MusicGenerateTool
+from skills.sfx import SfxTool
+from skills.subtitle import SubtitleTool
+from skills.director import DirectorTool
+from skills.video_review import VideoReviewTool
+from skills.title_overlay import TitleOverlayTool
 from skills.video_produce import VideoProduceTool
-from skills.video_shot import VideoShotTool
 from skills.compose_video import ComposeVideoTool
-from skills.animation_painter import AnimationPainterRenderTool
+from skills.lyric_mv import LyricMvTool
+from skills.styled_video import StyledVideoTool
+from skills.remotion_hook import RemotionHookTool
+from skills.manim import ManimVideoTool
+from skills.blender import BlenderVideoTool
 from skills.fengniao import (
     FengniaoFuzzySearch, FengniaoBasicInfo, FengniaoShareholders,
     FengniaoExecutives, FengniaoInvestments, FengniaoChanges,
@@ -80,14 +97,25 @@ from skills.baidu_map import (
     BaiduMapPlaceTool, BaiduMapDirectionTool, BaiduMapGeocodingTool,
     BaiduMapReverseGeocodingTool, BaiduMapWeatherTool, BaiduMapRenderTool,
 )
+from computer_use.tool import ComputerUseTool
 
-# 内部工具：仅供子 Agent / 编排流程使用，不对外暴露给 LLM（只读工具由 batch_read 统一入口）。
-# video_auto/video_custom/video_overlay 已并入 video_card；opendesign/doubao_tts/pdoom 归 video_shot 调度，均不直接暴露。
+# 内部工具：仅供子 Agent / 编排流程使用，不对外暴露给 LLM
+# （文本/文档类只读工具由 batch_read 统一入口；read_image 例外——图片需要直接看图，
+#   已正式暴露给主 LLM，避免 batch_read 多套一层子 Agent 且模型对图片误用 read）。
+# 画面引擎（opendesign/manim/cinematic/blender/remotion/footage/map）收为内部，只由 director 导演组调度；video_auto/custom/overlay
+# 已并入 video_card；video_produce 已解耦为内部保留；doubao_tts 为旁白组内部引擎。
+# blender_video（真 3D）同为"待完善引擎"，仅内部保留。
 _INTERNAL_TOOLS = {
-    "read", "read_docx", "read_pdf", "read_pptx", "read_image",
+    "read", "read_docx", "read_pdf", "read_pptx",
     "video_scene", "video_compose",
     "video_auto", "video_custom", "video_overlay",
-    "opendesign_video", "doubao_tts", "pdoom_render",
+    "video_produce", "doubao_tts",
+    "opendesign_video", "manim_video", "blender_video", "styled_video",
+    "video_cinematic_storyboard", "video_cinematic_generate",
+    "footage_video",
+    "map_video",
+    "remotion_hook_generate",
+    "title_overlay",
 }
 
 # 所有工具类的注册表
@@ -103,7 +131,6 @@ ALL_TOOL_CLASSES: dict[str, type] = {
     "search_image": ImageSearchTool,
     "generate_image": ImageGenerateTool,
     "generate_image_from_images": ImageToImageTool,
-    "generate_music": MusicGenerateTool,
     "sandbox_run": SandboxTool,
     "sub_agent": SubAgentTool,
     "custom_agent": CustomAgentTool,
@@ -127,14 +154,26 @@ ALL_TOOL_CLASSES: dict[str, type] = {
     "video_custom": VideoCustomTool,
     "video_overlay": VideoOverlayTool,
     "video_card": VideoCardTool,
-    "video_shot": VideoShotTool,
     "compose_video": ComposeVideoTool,
     "video_cinematic_storyboard": VideoCinematicStoryboardTool,
     "video_cinematic_generate": VideoCinematicGenerateTool,
+    "footage_video": FootageVideoTool,
+    "map_video": MapVideoTool,
     "opendesign_video": OpendesignVideoTool,
+    "manim_video": ManimVideoTool,
+    "blender_video": BlenderVideoTool,
     "doubao_tts": DoubaoTTS,
+    "narration": NarrationTool,
+    "music_generate": MusicGenerateTool,
+    "sfx": SfxTool,
+    "subtitle": SubtitleTool,
+    "director": DirectorTool,
+    "video_review": VideoReviewTool,
+    "title_overlay": TitleOverlayTool,
     "video_produce": VideoProduceTool,
-    "pdoom_render": AnimationPainterRenderTool,
+    "lyric_mv": LyricMvTool,
+    "styled_video": StyledVideoTool,
+    "remotion_hook_generate": RemotionHookTool,
     "wechat_publish": WeChatPublisherTool,
     "mail_163": Mail163Tool,
     "wecom_email": WecomEmailTool,
@@ -175,6 +214,7 @@ ALL_TOOL_CLASSES: dict[str, type] = {
     "write_docx": WriteDocxTool,
     "write_xlsx": WriteXlsxTool,
     "convert_pptx": ConvertPptxTool,
+    "computer_use": ComputerUseTool,
 }
 
 # Skill → 包含的工具名映射
@@ -218,10 +258,6 @@ ALL_SKILLS: dict[str, dict] = {
     "image_to_image": {
         "label": "图生图",
         "tool_names": ["generate_image_from_images"],
-    },
-    "music_generate": {
-        "label": "音乐生成",
-        "tool_names": ["generate_music"],
     },
     "sandbox": {
         "label": "沙箱执行",
@@ -291,29 +327,41 @@ ALL_SKILLS: dict[str, dict] = {
         "label": "竖版卡片视频",
         "tool_names": ["video_card"],
     },
-    "video_shot": {
-        "label": "视频片段生成",
-        "tool_names": ["video_shot"],
+    "lyric_mv": {
+        "label": "歌词 MV",
+        "tool_names": ["lyric_mv"],
     },
     "compose_video": {
         "label": "视频合成",
         "tool_names": ["compose_video"],
     },
-    "video_cinematic": {
-        "label": "电影级视频生成",
-        "tool_names": ["video_cinematic_storyboard", "video_cinematic_generate"],
-    },
-    "opendesign": {
-        "label": "OpenDesign 视频生成",
-        "tool_names": ["opendesign_video"],
-    },
     "doubao_tts": {
         "label": "豆包语音生成",
         "tool_names": ["doubao_tts"],
     },
-    "video_produce": {
-        "label": "视频制作流水线",
-        "tool_names": ["video_produce"],
+    "narration": {
+        "label": "旁白生成",
+        "tool_names": ["narration"],
+    },
+    "music_generate": {
+        "label": "音乐生成",
+        "tool_names": ["music_generate"],
+    },
+    "sfx": {
+        "label": "音效组",
+        "tool_names": ["sfx"],
+    },
+    "subtitle": {
+        "label": "字幕生成",
+        "tool_names": ["subtitle"],
+    },
+    "director": {
+        "label": "导演组",
+        "tool_names": ["director"],
+    },
+    "video_review": {
+        "label": "成片审查",
+        "tool_names": ["video_review"],
     },
     "wechat_publisher": {
         "label": "公众号发布",
@@ -359,11 +407,27 @@ ALL_SKILLS: dict[str, dict] = {
         "label": "PPT 生成",
         "tool_names": ["convert_pptx"],
     },
-    "animation_painter": {
-        "label": "动画绘制（p5.brush 水彩）",
-        "tool_names": ["pdoom_render"],
+    "computer_use": {
+        "label": "桌面自动化(Computer Use)",
+        "tool_names": ["computer_use"],
     },
 }
+
+
+# ── 进程级共享缓存 ──
+# skill.md 文本 / header 只随文件内容（mtime）变化，跨会话、跨请求复用，避免每条消息重复读盘与解析。
+_SKILL_TEXT_CACHE: dict[tuple[str, int], str] = {}
+_SKILL_HEADER_CACHE: dict[tuple[str, int], str] = {}
+_SKILL_CACHE_LOCK = threading.Lock()
+
+# Gmail 连通性探针结果：按「账号+授权码+服务器」缓存，进程内只真实探测一次。
+_GMAIL_STATE: dict[str, dict] = {}
+_GMAIL_LOCK = threading.Lock()
+
+# SkillManager 实例池：同一会话 + 同一份配置复用同一实例（工具实例、脚本索引也随之复用）。
+_MANAGER_POOL: dict[str, tuple[str, "SkillManager"]] = OrderedDict()
+_MANAGER_POOL_LOCK = threading.Lock()
+_MANAGER_POOL_MAX = 8
 
 
 def _norm_path(p) -> str:
@@ -372,15 +436,61 @@ def _norm_path(p) -> str:
 
 
 class SkillManager:
+    @classmethod
+    def acquire(cls, cache_key: str, **kwargs) -> "SkillManager":
+        """获取会话级 SkillManager：同会话同配置复用，避免每条消息重复构建。
+
+        cache_key 由「会话标识 + 用途」组成；配置指纹变化（换目录/换 key/换技能集）时自动重建。
+        可变会话状态（todo_manager）不参与指纹，命中缓存时按本次请求覆盖。
+        """
+        fingerprint = cls._config_fingerprint(kwargs)
+        with _MANAGER_POOL_LOCK:
+            entry = _MANAGER_POOL.get(cache_key)
+            if entry and entry[0] == fingerprint:
+                _MANAGER_POOL.move_to_end(cache_key)
+                manager = entry[1]
+                if "todo_manager" in kwargs:
+                    manager.todo_manager = kwargs["todo_manager"]
+                manager._apply_gmail_state()
+                return manager
+
+        manager = cls(**kwargs)
+        with _MANAGER_POOL_LOCK:
+            _MANAGER_POOL[cache_key] = (fingerprint, manager)
+            _MANAGER_POOL.move_to_end(cache_key)
+            while len(_MANAGER_POOL) > _MANAGER_POOL_MAX:
+                _MANAGER_POOL.popitem(last=False)
+        return manager
+
+    @staticmethod
+    def _config_fingerprint(kwargs: dict) -> str:
+        """把影响工具实例的构造参数压成稳定指纹，排除可变的会话状态。"""
+        stable = {k: v for k, v in kwargs.items() if k != "todo_manager"}
+        if isinstance(stable.get("enabled_skills"), (list, tuple, set)):
+            stable["enabled_skills"] = sorted(stable["enabled_skills"])
+        if stable.get("cwd"):
+            stable["cwd"] = os.path.abspath(str(stable["cwd"]))
+        blob = json.dumps(stable, sort_keys=True, default=str, ensure_ascii=False)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
     def __init__(self, cwd: str = ".", web_search_provider: str = "kimi",
                  web_search_api_key: str = "", web_search_base_url: str = "",
                  tavily_api_key: str = "", image_gen_api_key: str = "",
                  image_gen_base_url: str = "", image_gen_model: str = "",
                  image_gen_provider: str = "ark",
-                 music_gen_api_key: str = "", music_gen_base_url: str = "",
-                 music_gen_model: str = "",
                  minimax_video_api_key: str = "",
+                 cinematic_video_provider: str = "minimax",
+                 video_ark_api_key: str = "",
+                 video_ark_base_url: str = "",
+                 video_ark_model: str = "",
                  doubao_voice_api_key: str = "",
+                 doubao_voice_speaker: str = "",
+                 music_gen_api_key: str = "",
+                 music_gen_base_url: str = "",
+                 music_gen_model: str = "",
+                 music_gen_provider: str = "",
+                 amap_js_key: str = "",
+                 amap_security_code: str = "",
                  wechat_appid: str = "", wechat_appsecret: str = "",
                  wechat_relay_url: str = "", wechat_relay_key: str = "",
                  fengniao_api_key: str = "", flyai_api_key: str = "",
@@ -395,7 +505,6 @@ class SkillManager:
                  gmail_smtp_host: str = "", gmail_smtp_port: str = "",
                  gmail_imap_host: str = "", gmail_imap_port: str = "",
                  llm_config: dict | None = None,
-                 opendesign_llm_config: dict | None = None,
                  todo_manager: TodoManager | None = None,
                  backup_enabled: bool = True,
                  skills_root: str | None = None,
@@ -411,11 +520,19 @@ class SkillManager:
         self.image_gen_base_url = image_gen_base_url
         self.image_gen_model = image_gen_model
         self.image_gen_provider = image_gen_provider
+        self.minimax_video_api_key = minimax_video_api_key
+        self.cinematic_video_provider = cinematic_video_provider
+        self.video_ark_api_key = video_ark_api_key
+        self.video_ark_base_url = video_ark_base_url
+        self.video_ark_model = video_ark_model
+        self.doubao_voice_api_key = doubao_voice_api_key
+        self.doubao_voice_speaker = doubao_voice_speaker
         self.music_gen_api_key = music_gen_api_key
         self.music_gen_base_url = music_gen_base_url
         self.music_gen_model = music_gen_model
-        self.minimax_video_api_key = minimax_video_api_key
-        self.doubao_voice_api_key = doubao_voice_api_key
+        self.music_gen_provider = music_gen_provider
+        self.amap_js_key = amap_js_key
+        self.amap_security_code = amap_security_code
         self.wechat_appid = wechat_appid
         self.wechat_appsecret = wechat_appsecret
         self.wechat_relay_url = wechat_relay_url
@@ -442,12 +559,10 @@ class SkillManager:
         self.gmail_imap_host = gmail_imap_host
         self.gmail_imap_port = gmail_imap_port
         self.llm_config = llm_config or {}
-        self.opendesign_llm_config = opendesign_llm_config or {}
         self.todo_manager = todo_manager
         self.sub_agent_max_turns = 8  # 可被 server.py 动态设置
+        self.cancel_token = None  # 会话级取消令牌，由 server.py 注入
         self._instances: dict[str, BaseTool] = {}
-        self._skill_cache: dict[str, str] = {}
-        self._header_cache: dict[str, str] = {}
 
         # 根据 enabled_skills 过滤可用的 tools 和 skills
         if enabled_skills:
@@ -486,53 +601,116 @@ class SkillManager:
         self._maybe_disable_gmail()
 
     def _maybe_disable_gmail(self):
-        """测试 Gmail 连接。如果失败（网络不可达或凭据错误），从 skills 中移除 gmail，
-        使 LLM 看不到这个 skill。仅当用户配置了 gmail 凭据时才测试。"""
+        """配置了 Gmail 凭据时，用后台探针校验连通性；请求线程不做任何网络等待。
+
+        探针结果按「账号 + 授权码 + 邮件服务器」缓存，进程内只真实探测一次；
+        探测进行中先乐观保留 gmail，探测失败后再对 LLM 隐藏。
+        """
         if "gmail" not in self._skills:
             return
         if not self.gmail_address or not self.gmail_auth_code:
             log.info("[Gmail] 未配置凭据，gmail skill 对 LLM 不可见")
-            self._skills.pop("gmail", None)
-            self._tool_classes.pop("gmail", None)
+            self._remove_gmail_skill()
             return
-        import smtplib
+
+        key = self._gmail_fingerprint()
+        with _GMAIL_LOCK:
+            state = _GMAIL_STATE.get(key)
+            start_probe = state is None
+            if start_probe:
+                _GMAIL_STATE[key] = {"status": "pending", "reason": ""}
+        if start_probe:
+            threading.Thread(
+                target=self._probe_gmail,
+                args=(key,),
+                name="gmail-probe",
+                daemon=True,
+            ).start()
+            log.info("[Gmail] 已配置凭据，后台校验中（不阻塞对话）")
+            return
+        self._apply_gmail_state(key)
+
+    def _gmail_fingerprint(self) -> str:
+        raw = "|".join([
+            self.gmail_address,
+            self.gmail_auth_code,
+            self.gmail_smtp_host or "smtp.gmail.com",
+            self.gmail_smtp_port or "465",
+            self.gmail_imap_host or "imap.gmail.com",
+            self.gmail_imap_port or "993",
+        ])
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def _apply_gmail_state(self, key: str | None = None):
+        """按缓存中的探针结果决定 gmail 是否对 LLM 可见（不触发网络请求）。"""
+        if "gmail" not in self._skills:
+            return
+        key = key or self._gmail_fingerprint()
+        with _GMAIL_LOCK:
+            state = _GMAIL_STATE.get(key) or {}
+        if state.get("status") == "fail":
+            self._remove_gmail_skill()
+
+    def _remove_gmail_skill(self):
+        self._skills.pop("gmail", None)
+        self._tool_classes.pop("gmail", None)
+
+    def _probe_gmail(self, key: str):
+        """后台线程：真实校验 SMTP / IMAP 连通性，结果写回进程级缓存。"""
         import imaplib
-        smtp_host = self.gmail_smtp_host or "smtp.gmail.com"
-        smtp_port = int(self.gmail_smtp_port) if self.gmail_smtp_port else 465
-        imap_host = self.gmail_imap_host or "imap.gmail.com"
-        imap_port = int(self.gmail_imap_port) if self.gmail_imap_port else 993
+        import smtplib
+
+        ok, reason = True, ""
         try:
-            with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=10) as s:
-                s.login(self.gmail_address, self.gmail_auth_code)
+            smtp_host = self.gmail_smtp_host or "smtp.gmail.com"
+            smtp_port = int(self.gmail_smtp_port) if self.gmail_smtp_port else 465
+            imap_host = self.gmail_imap_host or "imap.gmail.com"
+            imap_port = int(self.gmail_imap_port) if self.gmail_imap_port else 993
+            try:
+                with smtplib.SMTP_SSL(smtp_host, smtp_port, timeout=10) as s:
+                    s.login(self.gmail_address, self.gmail_auth_code)
+            except Exception as e:
+                ok, reason = False, f"SMTP: {e}"
+            if ok:
+                try:
+                    imap = imaplib.IMAP4_SSL(imap_host, imap_port, timeout=10)
+                    imap.login(self.gmail_address, self.gmail_auth_code)
+                    imap.logout()
+                except Exception as e:
+                    ok, reason = False, f"IMAP: {e}"
         except Exception as e:
-            log.warning(f"[Gmail] SMTP 连接测试失败，gmail skill 对 LLM 不可见: {e}")
-            self._skills.pop("gmail", None)
-            self._tool_classes.pop("gmail", None)
-            return
-        try:
-            imap = imaplib.IMAP4_SSL(imap_host, imap_port)
-            imap.login(self.gmail_address, self.gmail_auth_code)
-            imap.logout()
-        except Exception as e:
-            log.warning(f"[Gmail] IMAP 连接测试失败，gmail skill 对 LLM 不可见: {e}")
-            self._skills.pop("gmail", None)
-            self._tool_classes.pop("gmail", None)
-            return
-        log.info("[Gmail] 连接测试通过，gmail skill 已启用")
+            ok, reason = False, str(e)
+        finally:
+            with _GMAIL_LOCK:
+                _GMAIL_STATE[key] = {"status": "ok" if ok else "fail", "reason": reason}
+        if ok:
+            log.info("[Gmail] 连接测试通过，gmail skill 已启用")
+        else:
+            log.warning(f"[Gmail] 连接测试失败，gmail skill 对 LLM 不可见: {reason}")
 
     def clear_cache(self):
         """清除所有内部缓存，配合热重载使用。"""
         self._instances.clear()
-        self._skill_cache.clear()
-        self._header_cache.clear()
+        with _SKILL_CACHE_LOCK:
+            _SKILL_TEXT_CACHE.clear()
+            _SKILL_HEADER_CACHE.clear()
 
     # ─── 工具注册与实例化 ───
 
     def get_all_tool_names(self) -> list[str]:
         return list(self._tool_classes)
 
+    def get_tool(self, tool_name: str) -> BaseTool:
+        """公开获取（惰性实例化的）工具实例。
+
+        供编排器查询工具自述的运行时资源（如渲染引擎路径与创作规范），
+        让"引擎在哪/契约是什么"只有工具本身一个事实来源，调用方无需硬编码。
+        """
+        return self._get_instance(tool_name)
+
     def get_anthropic_tools(self) -> list[dict]:
         """导出所有工具为 Anthropic tool use 格式（排除内部工具）"""
+        self._apply_gmail_state()
         tools = []
         for tool_name in self._tool_classes:
             if tool_name in _INTERNAL_TOOLS:
@@ -543,6 +721,7 @@ class SkillManager:
 
     def get_openai_tools(self) -> list[dict]:
         """导出所有工具为 OpenAI function calling 格式（排除内部工具）"""
+        self._apply_gmail_state()
         tools = []
         for tool_name in self._tool_classes:
             if tool_name in _INTERNAL_TOOLS:
@@ -553,6 +732,8 @@ class SkillManager:
 
     def dispatch(self, tool_name: str, **kwargs) -> ToolResult:
         """调度执行工具。执行 todo_write 前自动设置 ContextVar。"""
+        # 将本会话取消令牌注入 ContextVar，供工具线程读取（长循环检查 + 子进程登记）
+        current_cancel_token.set(self.cancel_token)
         # 在执行前将 TodoManager 注入 ContextVar
         if tool_name == "todo_write" and self.todo_manager:
             current_todo_manager.set(self.todo_manager)
@@ -561,10 +742,10 @@ class SkillManager:
             kwargs = self._normalize_tool_input(inst, kwargs)
             ok, msg = inst.validate_input(**kwargs)
             if not ok:
-                return ToolResult.fail(f"参数校验失败: {msg}")
+                return ToolResult.fail(f"参数校验失败: {msg}", error_kind="validation")
             ok, msg = inst.check_permission(**kwargs)
             if not ok:
-                return ToolResult.fail(f"权限拒绝: {msg}")
+                return ToolResult.fail(f"权限拒绝: {msg}", error_kind="permission")
             try:
                 return inst.execute(**kwargs)
             except TypeError as e:
@@ -573,6 +754,7 @@ class SkillManager:
                     tool_name=tool_name,
                     accepted_parameters=[p.name for p in inst.parameters],
                     received_parameters=list(kwargs.keys()),
+                    error_kind="signature",
                 )
         finally:
             if tool_name == "todo_write":
@@ -668,13 +850,6 @@ class SkillManager:
                     default_model=self.image_gen_model,
                     provider=self.image_gen_provider,
                 )
-            elif tool_name == "generate_music":
-                self._instances[tool_name] = cls(
-                    cwd=str(self.cwd),
-                    api_key=self.music_gen_api_key,
-                    base_url=self.music_gen_base_url,
-                    default_model=self.music_gen_model,
-                )
             elif tool_name == "sub_agent":
                 self._instances[tool_name] = cls(
                     cwd=str(self.cwd),
@@ -691,6 +866,31 @@ class SkillManager:
             elif tool_name == "read_pdf":
                 self._instances[tool_name] = cls(cwd=str(self.cwd))
             elif tool_name == "read_image":
+                self._instances[tool_name] = cls(
+                    cwd=str(self.cwd),
+                    llm_config=self.llm_config,
+                )
+            elif tool_name == "lyric_mv":
+                # 编导/画面由 LLM 现场创作，复用主 LLM 配置（框架注入，不去读前端存储）
+                self._instances[tool_name] = cls(
+                    cwd=str(self.cwd),
+                    llm_config=self.llm_config,
+                    image_config={
+                        "provider": self.image_gen_provider,
+                        "api_key": self.image_gen_api_key,
+                        "base_url": self.image_gen_base_url,
+                        "model": self.image_gen_model,
+                    },
+                )
+            elif tool_name == "styled_video":
+                # 导演组的风格动画引擎：写镜头代码也要 LLM；画面素材按需自己生图
+                self._instances[tool_name] = cls(
+                    cwd=str(self.cwd),
+                    llm_config=self.llm_config,
+                    skill_manager=self,
+                )
+            elif tool_name == "remotion_hook_generate":
+                # Remotion 开场钩子：自由发挥要主 LLM 写 TSX，视觉闸门复用主 LLM 的多模态
                 self._instances[tool_name] = cls(
                     cwd=str(self.cwd),
                     llm_config=self.llm_config,
@@ -723,11 +923,6 @@ class SkillManager:
                     cwd=str(self.cwd),
                     skill_manager=self,
                 )
-            elif tool_name == "video_shot":
-                self._instances[tool_name] = cls(
-                    cwd=str(self.cwd),
-                    skill_manager=self,
-                )
             elif tool_name == "video_cinematic_storyboard":
                 self._instances[tool_name] = cls(
                     cwd=str(self.cwd),
@@ -738,23 +933,70 @@ class SkillManager:
                     cwd=str(self.cwd),
                     llm_config=self.llm_config,
                     minimax_video_api_key=self.minimax_video_api_key,
+                    video_provider=self.cinematic_video_provider,
+                    ark_video_api_key=self.video_ark_api_key,
+                    ark_video_base_url=self.video_ark_base_url,
+                    ark_video_model=self.video_ark_model,
                 )
             elif tool_name == "opendesign_video":
                 self._instances[tool_name] = cls(
                     cwd=str(self.cwd),
                     llm_config=self.llm_config,
-                    opendesign_llm_config=self.opendesign_llm_config,
+                    skill_manager=self,
+                )
+            elif tool_name == "manim_video":
+                self._instances[tool_name] = cls(
+                    cwd=str(self.cwd),
+                    llm_config=self.llm_config,
+                )
+            elif tool_name == "blender_video":
+                self._instances[tool_name] = cls(
+                    cwd=str(self.cwd),
+                    llm_config=self.llm_config,
                 )
             elif tool_name == "doubao_tts":
                 self._instances[tool_name] = cls(
                     cwd=str(self.cwd),
                     api_key=self.doubao_voice_api_key,
+                    default_speaker=self.doubao_voice_speaker,
+                )
+            elif tool_name == "narration":
+                self._instances[tool_name] = cls(
+                    cwd=str(self.cwd),
+                    skill_manager=self,
+                    default_speaker=self.doubao_voice_speaker,
+                )
+            elif tool_name == "music_generate":
+                self._instances[tool_name] = cls(
+                    cwd=str(self.cwd),
+                    api_key=self.music_gen_api_key,
+                    base_url=self.music_gen_base_url,
+                    default_model=self.music_gen_model,
+                    provider=self.music_gen_provider,
+                )
+            elif tool_name == "map_video":
+                # 高德 Key 由前端「技能 API 配置」注入，不写进程序目录
+                self._instances[tool_name] = cls(
+                    cwd=str(self.cwd),
+                    amap_js_key=self.amap_js_key,
+                    amap_security_code=self.amap_security_code,
+                )
+            elif tool_name == "sfx":
+                self._instances[tool_name] = cls(cwd=str(self.cwd))
+            elif tool_name == "director":
+                self._instances[tool_name] = cls(
+                    cwd=str(self.cwd),
+                    skill_manager=self,
+                    llm_config=self.llm_config,
+                    default_speaker=self.doubao_voice_speaker,
+                    minimax_video_api_key=self.minimax_video_api_key,
                 )
             elif tool_name == "video_produce":
                 self._instances[tool_name] = cls(
                     cwd=str(self.cwd),
                     skill_manager=self,
-                    opendesign_llm_config=self.opendesign_llm_config,
+                    llm_config=self.llm_config,
+                    default_speaker=self.doubao_voice_speaker,
                 )
             elif tool_name == "wechat_publish":
                 self._instances[tool_name] = cls(
@@ -827,11 +1069,8 @@ class SkillManager:
 
     # ─── 两级暴露机制 ───
 
-    def _read_skill_md(self, skill_name: str) -> str | None:
-        """读取 skill.md 文件内容。"""
-        if skill_name in self._skill_cache:
-            return self._skill_cache[skill_name]
-
+    def _skill_md_source(self, skill_name: str) -> tuple[Path, int] | None:
+        """定位 skill.md 并返回 (路径, mtime)，mtime 作为缓存版本号。"""
         candidates = [
             self.skills_root / skill_name / "skill.md",
             self.skills_root / skill_name / "SKILL.md",
@@ -839,11 +1078,31 @@ class SkillManager:
             self.cwd / "skills" / skill_name / "SKILL.md",
         ]
         for path in candidates:
-            if path.exists():
-                text = path.read_text(encoding="utf-8")
-                self._skill_cache[skill_name] = text
-                return text
+            try:
+                if path.exists():
+                    return path, path.stat().st_mtime_ns
+            except OSError:
+                continue
         return None
+
+    def _read_skill_md(self, skill_name: str) -> str | None:
+        """读取 skill.md 文件内容（进程级缓存，文件变更后自动失效）。"""
+        source = self._skill_md_source(skill_name)
+        if source is None:
+            return None
+        path, mtime = source
+        key = (str(path), mtime)
+        with _SKILL_CACHE_LOCK:
+            cached = _SKILL_TEXT_CACHE.get(key)
+        if cached is not None:
+            return cached
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return None
+        with _SKILL_CACHE_LOCK:
+            _SKILL_TEXT_CACHE[key] = text
+        return text
 
     def _parse_header(self, text: str) -> str:
         """截取 skill.md 的 header 部分：标题 + 摘要 + 使用场景（到 ═══ 分隔线之前）。"""
@@ -866,21 +1125,30 @@ class SkillManager:
         return "\n".join(header_lines)
 
     def get_skill_headers(self) -> dict[str, str]:
-        """一级暴露：返回所有 skill 的 header 摘要，供 LLM 选择。"""
+        """一级暴露：返回所有 skill 的 header 摘要，供 LLM 选择（进程级缓存）。"""
         headers: dict[str, str] = {}
         for skill_name in self._skills:
-            text = self._read_skill_md(skill_name)
-            if text is None:
+            source = self._skill_md_source(skill_name)
+            if source is None:
                 continue
-            if skill_name not in self._header_cache:
+            path, mtime = source
+            key = (str(path), mtime)
+            with _SKILL_CACHE_LOCK:
+                header = _SKILL_HEADER_CACHE.get(key)
+            if header is None:
+                text = self._read_skill_md(skill_name)
+                if text is None:
+                    continue
                 header = self._parse_header(text)
-                # 显式列出本 skill 对应的工具名，避免 LLM 把 skill 名（如 image_to_image）
-                # 当作工具名调用而触发"未知工具"
+                # 显式列出技能目录与工具名：目录名不一定等于工具名（如 pptx → convert_pptx），
+                # 避免 LLM 按工具名去找目录、误判技能未安装，也避免把 skill 名当工具名调用
                 tool_names = self._skills.get(skill_name, {}).get("tool_names", [])
+                header = header.rstrip() + f"\n\n技能目录: `skills/{skill_name}/`"
                 if tool_names:
-                    header = header.rstrip() + f"\n\n工具名: `{'`, `'.join(tool_names)}`"
-                self._header_cache[skill_name] = header
-            headers[skill_name] = self._header_cache[skill_name]
+                    header += f"\n工具名: `{'`, `'.join(tool_names)}`"
+                with _SKILL_CACHE_LOCK:
+                    _SKILL_HEADER_CACHE[key] = header
+            headers[skill_name] = header
         return headers
 
     def get_skill_spec(self, skill_name: str) -> str | None:

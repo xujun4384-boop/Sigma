@@ -3,7 +3,7 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import hljs from 'highlight.js'
 import 'highlight.js/styles/vs2015.css'
-import { X, ChevronLeft, ChevronRight, Terminal, FileCode, PenTool, Monitor } from 'lucide-react'
+import { X, ChevronLeft, ChevronRight, Terminal, FileCode, PenTool, Monitor, MousePointerClick } from 'lucide-react'
 import CodeMirror from '@uiw/react-codemirror'
 import { javascript } from '@codemirror/lang-javascript'
 import { python } from '@codemirror/lang-python'
@@ -44,6 +44,8 @@ interface Props {
   onCloseTerminal?: (id: string) => void
   canvasPatch?: { canvasName: string; operation: 'add' | 'replace'; elements: any[] } | null
   onCanvasPatchApplied?: () => void
+  computerUseMode?: boolean
+  onComputerUseToggle?: () => void
 }
 
 const REPLACE_WINDOW_MS = 5 * 60 * 1000
@@ -86,7 +88,7 @@ function getCodeMirrorLanguage(type: string): any {
   }
 }
 
-export default function PreviewPanel({ file, fileDiffState, fileDiffQueueLength, onAcknowledgeDiff, onAcknowledgeAllDiffs, terminalTabs, onCloseTerminal, canvasPatch, onCanvasPatchApplied }: Props) {
+export default function PreviewPanel({ file, fileDiffState, fileDiffQueueLength, onAcknowledgeDiff, onAcknowledgeAllDiffs, terminalTabs, onCloseTerminal, canvasPatch, onCanvasPatchApplied, computerUseMode, onComputerUseToggle }: Props) {
   const { t } = useTranslation()
   const [tabs, setTabs] = useState<Tab[]>([])
   const [activePath, setActivePath] = useState<string | null>(null)
@@ -249,6 +251,16 @@ export default function PreviewPanel({ file, fileDiffState, fileDiffQueueLength,
     <div className="preview-panel">
       <div className="preview-category-bar">
         <CategoryButtons category={category} onSelect={setCategory} t={t} />
+        {onComputerUseToggle && (
+          <button
+            className={`preview-category-btn computer-use-trigger ${computerUseMode ? 'active' : ''}`}
+            onClick={onComputerUseToggle}
+            title="Computer Use 桌面自动化模式（悬浮窗，可暂停/接管/纠正）"
+          >
+            <MousePointerClick size={14} />
+            <span>{computerUseMode ? '退出 Computer Use' : 'Computer Use'}</span>
+          </button>
+        )}
       </div>
 
       {category === 'files' && allTabs.length === 0 && (
@@ -384,8 +396,8 @@ function TabContent({ tab, pptxCache }: { tab: Tab; pptxCache: { current: Map<st
   const { t } = useTranslation()
   const [state, setState] = useState<{
     loading: boolean; error: string; content: string;
-    pdfData: string | null; pptxImages: string[]; videoUrl: string | null;
-  }>({ loading: true, error: '', content: '', pdfData: null, pptxImages: [], videoUrl: null })
+    pdfData: string | null; pptxImages: string[]; mediaUrl: string | null;
+  }>({ loading: true, error: '', content: '', pdfData: null, pptxImages: [], mediaUrl: null })
 
   useEffect(() => {
     let cancelled = false
@@ -399,14 +411,14 @@ function TabContent({ tab, pptxCache }: { tab: Tab; pptxCache: { current: Map<st
 
     const load = async () => {
       try {
-        // 视频文件：通过 sigma-file:// 协议获取 URL，不读文件内容
-        if (tab.type === 'video') {
+        // 视频/音频文件：通过 sigma-file:// 协议获取 URL，直接交给原生播放器，不读文件内容
+        if (tab.type === 'video' || tab.type === 'audio') {
           const urlResult = await window.electronAPI.getFileUrl(tab.path)
           if (cancelled) return
           if (urlResult.success && urlResult.data) {
-            setState(s => ({ ...s, loading: false, videoUrl: urlResult.data! }))
+            setState(s => ({ ...s, loading: false, mediaUrl: urlResult.data! }))
           } else {
-            setState(s => ({ ...s, loading: false, error: urlResult.error || 'Failed to load video' }))
+            setState(s => ({ ...s, loading: false, error: urlResult.error || `Failed to load ${tab.type}` }))
           }
           return
         }
@@ -513,16 +525,24 @@ function TabContent({ tab, pptxCache }: { tab: Tab; pptxCache: { current: Map<st
     )
   }
 
-  // Video
-  if (tab.type === 'video' && state.videoUrl) {
+  // Video / Audio
+  if ((tab.type === 'video' || tab.type === 'audio') && state.mediaUrl) {
     return (
       <div className="preview-content">
-        <div className="preview-video">
-          <video controls autoPlay style={{ maxWidth: '100%', maxHeight: 'calc(100vh - 120px)', background: '#000' }}>
-            <source src={state.videoUrl} />
-            {t("preview.video_not_supported")}
-          </video>
-        </div>
+        {tab.type === 'video' ? (
+          <div className="preview-video">
+            <video controls autoPlay style={{ maxWidth: '100%', maxHeight: 'calc(100vh - 120px)', background: '#000' }}>
+              <source src={state.mediaUrl} />
+              {t("preview.video_not_supported")}
+            </video>
+          </div>
+        ) : (
+          <div className="preview-audio">
+            <audio controls src={state.mediaUrl}>
+              {t("preview.audio_not_supported")}
+            </audio>
+          </div>
+        )}
       </div>
     )
   }
@@ -546,7 +566,7 @@ function TabContent({ tab, pptxCache }: { tab: Tab; pptxCache: { current: Map<st
   }
 
   // Code
-  const isCode = !['markdown', 'image', 'video', 'folder', 'file', 'docx', 'xlsx', 'pptx', 'pdf', 'text'].includes(tab.type)
+  const isCode = !['markdown', 'image', 'video', 'audio', 'folder', 'file', 'docx', 'xlsx', 'pptx', 'pdf', 'text'].includes(tab.type)
   if (isCode) {
     const lines = state.content.split('\n')
     const lang = LANG_MAP[tab.type] || 'plaintext'

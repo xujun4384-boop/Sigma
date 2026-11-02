@@ -3,12 +3,27 @@
 """
 import os
 import base64
+import locale
 import subprocess
 import tempfile
 import threading
 import time
 from pathlib import Path
 from skills.base import BaseTool, ToolParameter, ToolResult
+
+
+def _decode_console_output(raw: bytes) -> str:
+    """按 UTF-8 → 系统 ANSI 代码页 的顺序解码命令输出。
+
+    中文 Windows 上 `dir`、python 等程序的输出可能是 GBK，也可能是 UTF-8；
+    逐行自适应解码，避免用单一编码硬解导致中文路径变成乱码/替换符。
+    """
+    for enc in ("utf-8", locale.getpreferredencoding(False), "mbcs"):
+        try:
+            return raw.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw.decode("utf-8", errors="replace")
 
 
 class ReadTool(BaseTool):
@@ -248,7 +263,7 @@ class BashTool(BaseTool):
         "- Git 操作（git status, git diff, git log）\n"
         "- 启动/管理服务，进程管理，端口检查\n\n"
         "❌ 禁止场景（有专用工具）：\n"
-        "- 读取文件 → 用 read / batch_read\n"
+        "- 读取文件 → 用 read / batch_read；读取图片 → 用 read_image\n"
         "- 搜索文本内容 → 用 grep\n"
         "- 搜索文件 → 用 find\n"
         "- 列出目录 → 文件树已显示，要用请用 ls 工具\n"
@@ -265,6 +280,8 @@ class BashTool(BaseTool):
         使用 Popen 执行命令，实时捕获输出。
         如果命令在 timeout 秒内未结束，返回已捕获的输出并让进程继续后台运行。
         """
+        if self.is_cancelled():
+            return ToolResult.fail("命令已被用户取消")
         try:
             # Windows: 强制控制台编码为 UTF-8，解决中文文件名/输出乱码
             if os.name == "nt":
@@ -277,18 +294,16 @@ class BashTool(BaseTool):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 cwd=str(self.cwd),
-                encoding="utf-8",
-                errors="replace",
                 # Windows: 创建新进程组，便于管理
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
 
-            stdout_lines = []
-            stderr_lines = []
+            stdout_lines: list[bytes] = []
+            stderr_lines: list[bytes] = []
 
             def _read_stdout():
                 try:
-                    for line in iter(process.stdout.readline, ""):
+                    for line in iter(process.stdout.readline, b""):
                         if line:
                             stdout_lines.append(line)
                 except Exception:
@@ -296,7 +311,7 @@ class BashTool(BaseTool):
 
             def _read_stderr():
                 try:
-                    for line in iter(process.stderr.readline, ""):
+                    for line in iter(process.stderr.readline, b""):
                         if line:
                             stderr_lines.append(line)
                 except Exception:
@@ -308,6 +323,12 @@ class BashTool(BaseTool):
             t_stdout.start()
             t_stderr.start()
 
+            def _collect_output() -> str:
+                text = "".join(_decode_console_output(line) for line in stdout_lines)
+                if stderr_lines:
+                    text += "\n[stderr]\n" + "".join(_decode_console_output(line) for line in stderr_lines)
+                return text
+
             # 等待进程结束，或超时
             try:
                 process.wait(timeout=timeout)
@@ -315,9 +336,7 @@ class BashTool(BaseTool):
                 t_stdout.join(timeout=2)
                 t_stderr.join(timeout=2)
 
-                output = "".join(stdout_lines)
-                if stderr_lines:
-                    output += "\n[stderr]\n" + "".join(stderr_lines)
+                output = _collect_output()
                 output = output.strip() or "(无输出)"
                 max_chars = 20000
                 if len(output) > max_chars:
@@ -343,6 +362,13 @@ class BashTool(BaseTool):
                     image_note = f"\n\n[检测到生成图片: {', '.join(image_files)}。可使用 batch_read 读取这些图片]"
                     output += image_note
 
+                if self.is_cancelled():
+                    return ToolResult.fail(
+                        f"命令已被用户取消（进程已终止）\n{output}",
+                        exit_code=process.returncode,
+                        command=command,
+                    )
+
                 return ToolResult.ok(
                     output,
                     exit_code=process.returncode,
@@ -354,9 +380,7 @@ class BashTool(BaseTool):
                 # 进程还在运行（典型场景：启动了一个服务）
                 # 等待读取线程收集更多输出
                 time.sleep(0.5)
-                output = "".join(stdout_lines)
-                if stderr_lines:
-                    output += "\n[stderr]\n" + "".join(stderr_lines)
+                output = _collect_output()
                 output = output.strip() or "(无输出)"
                 if len(output) > 3000:
                     output = output[:3000] + "\n...(输出已截断)"

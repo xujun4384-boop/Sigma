@@ -174,7 +174,10 @@ class SubAgentTool(BaseTool):
         model = config.get("model", "kimi-for-coding")
         protocol = config.get("protocol", "anthropic")
         provider = config.get("provider", "generic")
-        thinking_mode = config.get("thinking", "adaptive")
+        thinking_mode = config.get("thinking", "default")
+        # 端点不支持当前思考档位时切到能生效的协议（与主循环 ToolLoop 使用同一套规则）
+        from context_manager import resolve_effective_protocol
+        protocol = resolve_effective_protocol(provider, protocol, thinking_mode, model)
 
         log.info(
             f"[SubAgent {agent_id}] 启动 | desc={description[:60]} | type={subagent_type} "
@@ -403,7 +406,7 @@ class SubAgentTool(BaseTool):
             if client:
                 client.close()
 
-    def _call_anthropic(self, client, base_url, api_key, model, messages, tools_schema, provider="generic", thinking_mode="adaptive") -> dict | None:
+    def _call_anthropic(self, client, base_url, api_key, model, messages, tools_schema, provider="generic", thinking_mode="default") -> dict | None:
         """Anthropic Messages API"""
         body = {
             "model": model,
@@ -413,9 +416,12 @@ class SubAgentTool(BaseTool):
         if tools_schema:
             body["tools"] = tools_schema
 
-        # 注入 thinking 参数
-        from context_manager import _inject_thinking_params
-        _inject_thinking_params(body, provider, "anthropic", thinking_mode)
+        # 按模型预设注入思考与采样参数
+        from context_manager import apply_model_specific_params
+        apply_model_specific_params(
+            body, model, "anthropic",
+            {"provider": provider, "thinking": thinking_mode},
+        )
 
         url = f"{base_url}/v1/messages" if "/v1" not in base_url else f"{base_url}/messages"
         log.info(f"[SubAgent API] Anthropic 请求 | url={url} | model={model} | msg_count={len(messages)}")
@@ -442,7 +448,7 @@ class SubAgentTool(BaseTool):
             log.warning(f"[SubAgent API] Anthropic 异常: {type(e).__name__}: {e} | url={url}")
             return None
 
-    def _call_openai(self, client, base_url, api_key, model, messages, tools_schema, provider="generic", thinking_mode="adaptive") -> dict | None:
+    def _call_openai(self, client, base_url, api_key, model, messages, tools_schema, provider="generic", thinking_mode="default") -> dict | None:
         """OpenAI Chat Completions API"""
         openai_msgs = self._convert_messages_openai(messages)
         body = {
@@ -453,9 +459,12 @@ class SubAgentTool(BaseTool):
         if tools_schema:
             body["tools"] = tools_schema
 
-        # 注入 thinking 参数
-        from context_manager import _inject_thinking_params
-        _inject_thinking_params(body, provider, "openai", thinking_mode)
+        # 按模型预设注入思考与采样参数
+        from context_manager import apply_model_specific_params
+        apply_model_specific_params(
+            body, model, "openai",
+            {"provider": provider, "thinking": thinking_mode},
+        )
 
         url = f"{base_url}/v1/chat/completions" if "/v1" not in base_url else f"{base_url}/chat/completions"
         log.info(f"[SubAgent API] OpenAI 请求 | url={url} | model={model} | msg_count={len(messages)}")

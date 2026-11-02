@@ -14,6 +14,10 @@ Pillow>=10.0.0
 ruamel.yaml>=0.18.0
 pypdf>=3.0.0
 playwright>=1.40.0
+# Computer Use 桌面自动化（截图/鼠标/键盘/UI Automation）
+pyautogui>=0.9.54
+pyperclip>=1.8.0
+uiautomation>=2.0.0; sys_platform == "win32"
 moviepy>=1.0.3
 edge-tts>=6.1.0
 numpy>=1.24.0

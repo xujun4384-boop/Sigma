@@ -1,7 +1,8 @@
-"""doubao_tts - 豆包语音合成大模型 2.0 调用封装
+"""doubao_tts - 豆包语音合成大模型调用封装
 
 使用单向流式 HTTP 接口：一次性输入文本，流式返回 base64 音频片段，
 最后一个包携带字级时间戳（sentence.words）。用于生成视频旁白并精确对齐字幕/分镜。
+音色与资源 ID（模型代次）必须匹配，resource_id 由调用方按音色解析后传入。
 """
 import base64
 import json
@@ -10,8 +11,9 @@ from pathlib import Path
 
 import httpx
 
+from ..voices import DEFAULT_RESOURCE_ID, RESOURCE_TTS_1_0
+
 API_URL = "https://openspeech.bytedance.com/api/v3/tts/unidirectional"
-RESOURCE_ID = "seed-tts-2.0"
 # 流式接口的成功码（非流式文档示例为 0，实际流式返回 20000000）
 _OK_CODES = {0, 20000000}
 
@@ -21,6 +23,7 @@ def synthesize(
     api_key: str,
     speaker: str,
     output_path: str,
+    resource_id: str = DEFAULT_RESOURCE_ID,
     speech_rate: int = 0,
     loudness_rate: int = 0,
     audio_format: str = "mp3",
@@ -28,6 +31,8 @@ def synthesize(
     timeout: int = 120,
 ) -> dict:
     """合成语音并保存到 output_path。
+
+    resource_id: 音色所属模型代次的资源 ID，默认 2.0。
 
     返回:
         {
@@ -47,7 +52,7 @@ def synthesize(
 
     headers = {
         "X-Api-Key": api_key,
-        "X-Api-Resource-Id": RESOURCE_ID,
+        "X-Api-Resource-Id": resource_id,
         "X-Api-Request-Id": str(uuid.uuid4()),
         "Content-Type": "application/json",
     }
@@ -56,6 +61,9 @@ def synthesize(
         "sample_rate": sample_rate,
         "enable_subtitle": True,
     }
+    if resource_id == RESOURCE_TTS_1_0:
+        # 1.0 音色需显式开启字级时间戳（2.0 默认返回）
+        audio_params["enable_timestamp"] = True
     if speech_rate:
         audio_params["speech_rate"] = speech_rate
     if loudness_rate:

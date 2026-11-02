@@ -5,7 +5,7 @@ const { spawn } = require('child_process')
 let chokidar = null
 try { chokidar = require('chokidar') } catch (e) { console.error('[Electron] chokidar not available:', e.message) }
 
-let electron, app, BrowserWindow, ipcMain, Menu, dialog, nativeTheme, protocol, net, shell, nativeImage
+let electron, app, BrowserWindow, ipcMain, Menu, dialog, nativeTheme, protocol, net, shell, nativeImage, Tray
 
 try {
   electron = require('electron')
@@ -19,6 +19,7 @@ try {
   net = electron.net
   shell = electron.shell
   nativeImage = electron.nativeImage
+  Tray = electron.Tray
 } catch (error) {
   console.error('[ERROR] Failed to load Electron:', error)
   process.exit(1)
@@ -33,6 +34,9 @@ let splashWindow = null
 let currentWorkingDir = process.cwd()
 let workspaceDirs = [process.cwd()]  // 工作区目录列表（主目录 + 额外添加的）
 let fileWatcher = null
+let tray = null
+let computerUseWindow = null
+let isComputerUseMode = false
 
 const BACKEND_PORT = (() => {
   try {
@@ -205,6 +209,7 @@ function getFileType(ext) {
   if (['.txt', '.log'].includes(ext)) return 'text'
   if (['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.svg', '.ico'].includes(ext)) return 'image'
   if (['.mp4', '.webm', '.mov', '.avi', '.mkv', '.flv', '.wmv', '.m4v', '.ogv'].includes(ext)) return 'video'
+  if (['.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.oga', '.opus', '.wma', '.aif', '.aiff'].includes(ext)) return 'audio'
   return 'file'
 }
 
@@ -220,6 +225,17 @@ const SIGMA_FILE_MIME_TYPES = {
   '.ogv': 'video/ogg',
   '.flv': 'video/x-flv',
   '.wmv': 'video/x-ms-wmv',
+  '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav',
+  '.m4a': 'audio/mp4',
+  '.aac': 'audio/aac',
+  '.flac': 'audio/flac',
+  '.ogg': 'audio/ogg',
+  '.oga': 'audio/ogg',
+  '.opus': 'audio/opus',
+  '.wma': 'audio/x-ms-wma',
+  '.aif': 'audio/aiff',
+  '.aiff': 'audio/aiff',
   '.pdf': 'application/pdf',
 }
 
@@ -407,6 +423,88 @@ function createMainWindow() {
   mainWindow.on('closed', () => { mainWindow = null; stopFileWatcher() })
 }
 
+// ── System Tray & Computer Use Mode ──
+
+function showMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) createMainWindow()
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.show()
+    mainWindow.focus()
+  }
+}
+
+function createTray() {
+  if (tray) return
+  try {
+    const icoPath = path.join(__dirname, '..', 'icon.ico')
+    const pngPath = path.join(__dirname, '..', 'icon.png')
+    const iconPath = process.platform === 'win32' && fs.existsSync(icoPath) ? icoPath : pngPath
+    tray = new Tray(iconPath)
+    const menu = Menu.buildFromTemplate([
+      { label: '显示 Sigma 主窗口', click: () => showMainWindow() },
+      { type: 'separator' },
+      { label: '进入 Computer Use 模式', click: () => enterComputerUseMode() },
+      { label: '退出 Computer Use 模式', click: () => exitComputerUseMode(true) },
+      { type: 'separator' },
+      { label: '退出 Sigma', click: () => { if (pythonProcess) pythonProcess.kill(); app.quit() } },
+    ])
+    tray.setToolTip('Sigma AI Assistant')
+    tray.setContextMenu(menu)
+    tray.on('double-click', () => showMainWindow())
+    console.log('[Tray] 已创建')
+  } catch (err) {
+    console.error('[Tray] 创建失败:', err.message)
+  }
+}
+
+function enterComputerUseMode() {
+  isComputerUseMode = true
+  if (computerUseWindow && !computerUseWindow.isDestroyed()) {
+    computerUseWindow.show()
+    computerUseWindow.focus()
+  } else {
+    computerUseWindow = new BrowserWindow({
+      width: 400, height: 680, minWidth: 320, minHeight: 440,
+      frame: false, transparent: false, alwaysOnTop: true, resizable: true,
+      skipTaskbar: false, title: 'Sigma Computer Use',
+      backgroundColor: '#141518',
+      icon: path.join(__dirname, '..', 'icon.png'),
+      webPreferences: { nodeIntegration: true, contextIsolation: false },
+    })
+    computerUseWindow.setAlwaysOnTop(true, 'screen-saver')
+    computerUseWindow.loadFile(path.join(__dirname, 'computer-use.html'), { query: { port: String(BACKEND_PORT) } })
+    computerUseWindow.on('closed', () => {
+      computerUseWindow = null
+      if (isComputerUseMode) {
+        isComputerUseMode = false
+        showMainWindow()
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('computer-use-mode', false)
+      }
+    })
+    console.log('[ComputerUse] 悬浮窗已创建')
+  }
+  // 主体缩到托盘
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.hide()
+    mainWindow.webContents.send('computer-use-mode', true)
+  }
+  return { success: true }
+}
+
+function exitComputerUseMode(showMain = true) {
+  isComputerUseMode = false
+  if (computerUseWindow && !computerUseWindow.isDestroyed()) {
+    const w = computerUseWindow
+    computerUseWindow = null
+    w.destroy()
+  }
+  if (showMain) showMainWindow()
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('computer-use-mode', false)
+  }
+  return { success: true }
+}
+
 // ── IPC Handlers ──
 
 ipcMain.handle('get-file-url', async (event, filePath) => {
@@ -449,6 +547,31 @@ ipcMain.handle('check-backend', async () => {
     const resp = await fetch(`${BACKEND_URL}/api/health`)
     return { success: true, data: await resp.json() }
   } catch (err) { return { success: false, error: err.message } }
+})
+
+// ── Computer Use Mode ──
+
+ipcMain.handle('enter-computer-use-mode', async (event, config) => {
+  // 同步当前激活的 LLM 配置到后端，供 Computer Use 会话使用
+  if (config) {
+    try {
+      await fetch(`${BACKEND_URL}/api/computer-use/config`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ config }),
+      })
+    } catch (e) { console.error('[ComputerUse] 同步配置失败:', e.message) }
+  }
+  return enterComputerUseMode()
+})
+
+ipcMain.handle('exit-computer-use-mode', async () => exitComputerUseMode(true))
+
+ipcMain.handle('get-computer-use-mode', async () => ({ success: true, active: isComputerUseMode }))
+
+ipcMain.handle('computer-use-minimize', async () => {
+  if (computerUseWindow && !computerUseWindow.isDestroyed()) computerUseWindow.minimize()
+  return { success: true }
 })
 
 // ── Theme ──
@@ -1106,6 +1229,7 @@ app.whenReady().then(async () => {
   // Start services
   updateSplash('frontend', 'Loading user interface...', false)
   startFileWatcher()
+  createTray()
 
   // Frontend loading is handled by ready-to-show event above
   updateSplash('frontend', 'User interface loaded', true)

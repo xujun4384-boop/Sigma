@@ -70,3 +70,20 @@ skill_routing_e2e.py
 # Large reference media
 *.pdf
 长美产品介绍_视频TEMP_MPY_wvf_snd.mp4
+
+# Local scratch builds & demo renders
+_tmp_amap/
+kinetic_demo/
+sigma_outro_demo/
+output/
+99/
+skills/lyric_mv/_e2e/
+skills/remotion_runtime/out/
+
+# Generated media outputs
+*.mp4
+*.mp3
+*.wav
+
+# Runtime token cache
+skills/wechat_publisher/.token_cache.json

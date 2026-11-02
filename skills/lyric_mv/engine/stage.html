@@ -1,0 +1,1735 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>Lyric MV Stage</title>
+<style>
+  html,body{margin:0;padding:0;background:#000;overflow:hidden}
+  canvas{display:block}
+</style>
+</head>
+<body>
+<canvas id="c" width="1280" height="720"></canvas>
+<script>
+"use strict";
+/* ══════════════════════════════════════════════════════════════════════════
+   通用 MV 舞台引擎（Canvas 2D）
+   —— 引擎持有「契约」，LLM 自由写「画面」。
+   引擎负责：时间轴 / 拍网格 / 卡点原语 / 歌词与 KTV / 安全区 / 片头尾奏间奏调度 /
+             逐帧确定性（无 rAF、无 Date、无 Math.random）
+   LLM 负责：MV.scenes / MV.cards 里的 draw(e) 里的一切美术
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* 由渲染器在页面加载前注入：TL（时间轴）/ PLAN（编导决策）/ SCENES（LLM 画面代码） */
+const TL   = window.TL   || { lines: [], beat_seconds: 0.5, offset_seconds: 0, duration: 1, bpm: 120 };
+const PLAN = window.PLAN || {};
+/* 画布可由 TL.canvas / PLAN.canvas 指定（导演组的 styled 段是 1920×1080）；
+   plain=true 时不画歌词、章节、进度条，只走 LLM 画面。 */
+const CANVAS = TL.canvas || PLAN.canvas || {};
+const W = Math.max(320, parseInt(CANVAS.width || TL.width || 1280, 10));
+const H = Math.max(180, parseInt(CANVAS.height || TL.height || 720, 10));
+const FPS = Math.max(10, parseInt(CANVAS.fps || TL.fps || 30, 10));
+const PLAIN = !!(TL.plain || PLAN.plain);
+
+const BEAT = TL.beat_seconds || 0.5;
+const OFF  = TL.offset_seconds || 0;
+const DUR  = TL.duration || 1;
+const ANTICIPATE = 2 / FPS;          // 画面比声音提前 2 帧，抵消感知延迟
+
+/* 歌词带：LLM 的画面请避开 y∈[96,206]，那里是引擎的地盘 */
+/* 歌词带的历史常量：样式库已接管（每种样式自带 band），画面请用 e.lyricBand */
+const LYRIC_Y = 150, LYRIC_BAND = [96, 206];
+
+/* ─────────────── 确定性数学（替代 Math.random / Date） ─────────────── */
+const clamp   = (v, a = 0, b = 1) => (v < a ? a : v > b ? b : v);
+const clamp01 = v => clamp(v);
+const lerp    = (a, b, k) => a + (b - a) * k;
+const seg     = (t0, t1, t) => (t1 <= t0 ? (t >= t1 ? 1 : 0) : clamp01((t - t0) / (t1 - t0)));
+const easeOut = k => 1 - Math.pow(1 - k, 3);
+const easeIn  = k => k * k * k;
+const easeIO  = k => (k < .5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2);
+const back    = k => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(k - 1, 3) + c1 * Math.pow(k - 1, 2); };
+const elastic = k => (k <= 0 ? 0 : k >= 1 ? 1 : Math.pow(2, -10 * k) * Math.sin((k * 10 - 0.75) * 2.094) + 1);
+const wave    = k => Math.sin(clamp01(k) * Math.PI);
+
+/* ─────────────── 动画原语（移植自 Remotion 那套思路，全是纯函数） ───────────────
+   spring：物理弹簧，t 单位秒。damping 低→过冲回弹，高→稳稳停住；
+           stiffness 越大越快；mass 越大越"重"。
+   noise1：确定性一维噪声（值噪声 + smoothstep），用于"静止时的微动"，比 sin 更自然。 */
+function spring(t, cfg) {
+  if (t <= 0) return 0;
+  const c = cfg || {};
+  const damping = c.damping === undefined ? 12 : c.damping;
+  const stiffness = c.stiffness === undefined ? 180 : c.stiffness;
+  const mass = c.mass === undefined ? 1 : c.mass;
+  const w0 = Math.sqrt(stiffness / mass);
+  const zeta = damping / (2 * Math.sqrt(stiffness * mass));
+  if (zeta < 1) {
+    const wd = w0 * Math.sqrt(1 - zeta * zeta);
+    return 1 - Math.exp(-zeta * w0 * t) * (Math.cos(wd * t) + (zeta * w0 / wd) * Math.sin(wd * t));
+  }
+  return 1 - Math.exp(-w0 * t) * (1 + w0 * t);
+}
+function noise1(x) {
+  const i = Math.floor(x), f = x - i;
+  const u = f * f * (3 - 2 * f);
+  return lerp(hash(i) * 2 - 1, hash(i + 1) * 2 - 1, u);
+}
+/* 把连续值切成 N 档（卡帧感/逐格动画） */
+const posterize = (v, steps) => Math.round(clamp01(v) * steps) / steps;
+/* 确定性伪随机：同一个 seed 永远同一个值，可替代 Math.random */
+function hash(seed) {
+  let x = (Math.imul(seed | 0, 2654435761) >>> 0);
+  x ^= x >>> 15; x = Math.imul(x, 2246822519) >>> 0; x ^= x >>> 13;
+  return (x >>> 0) / 4294967296;
+}
+/* 每次 seek 重置探针状态，避免上一帧的错误串到这一帧 */
+
+/* ─────────────── 调色板 ─────────────── */
+const P = {
+  paper: "#F4EFE4", ink: "#20242E", night: "#141A2E", night2: "#1D2540",
+  gold: "#E9A63B", coral: "#E2583C", teal: "#2E8C86", blue: "#3C6FD1",
+  plum: "#7A4A86", green: "#4C8C46", dusk: "#E9884A",
+  white: "#FFFFFF", black: "#000000", grey: "#8A8F9C",
+};
+const isDark = (hex) => {
+  const c = hex.replace("#", "");
+  const n = parseInt(c.length === 3 ? c.split("").map(x => x + x).join("") : c, 16);
+  return (0.299 * (n >> 16 & 255) + 0.587 * (n >> 8 & 255) + 0.114 * (n & 255)) < 140;
+};
+const hexA = (hex, a) => {
+  const c = hex.replace("#", "");
+  const n = parseInt(c.length === 3 ? c.split("").map(x => x + x).join("") : c, 16);
+  return `rgba(${n >> 16 & 255},${n >> 8 & 255},${n & 255},${a})`;
+};
+
+/* ─────────────── 画布 + 文本（中文必须实测字宽，不能按字数估） ─────────────── */
+const cv = document.getElementById("c");
+cv.width = W; cv.height = H;
+const ctx = cv.getContext("2d", { alpha: false });
+const _m = document.createElement("canvas").getContext("2d");
+const FONT = '"Noto Sans SC","Source Han Sans SC","Microsoft YaHei","PingFang SC",sans-serif';
+
+function measure(str, size, weight = 900, font = FONT) {
+  _m.font = `${weight} ${size}px ${font}`;
+  return _m.measureText(str).width;
+}
+/* 文字自动对比度：plain 模式下先采样文字背后的亮度，
+   文字与背景太接近时自动加一圈反色描边（保留原填充色）。
+   —— 不依赖 LLM 选色，白字压浅底也能救回来。 */
+function _colorInfo(c, color) {
+  try {
+    c.save();
+    c.fillStyle = color;
+    const v = c.fillStyle;
+    c.restore();
+    let r = 0, g = 0, b = 0, a = 1;
+    if (typeof v === "string" && v[0] === "#") {
+      const s = v.slice(1);
+      if (s.length === 3) {
+        r = parseInt(s[0] + s[0], 16); g = parseInt(s[1] + s[1], 16); b = parseInt(s[2] + s[2], 16);
+      } else {
+        r = parseInt(s.slice(0, 2), 16); g = parseInt(s.slice(2, 4), 16); b = parseInt(s.slice(4, 6), 16);
+      }
+    } else {
+      const m = String(v).match(/rgba?\(([^)]+)\)/);
+      if (!m) return null;
+      const p = m[1].split(",").map(Number);
+      r = p[0]; g = p[1]; b = p[2]; a = p.length > 3 ? p[3] : 1;
+    }
+    return { lum: 0.299 * r + 0.587 * g + 0.114 * b, a: a };
+  } catch (e) { return null; }
+}
+function _bgLum(c, x0, y0, w, h) {
+  x0 = Math.max(0, Math.floor(x0)); y0 = Math.max(0, Math.floor(y0));
+  w = Math.min(c.canvas.width - x0, Math.ceil(w));
+  h = Math.min(c.canvas.height - y0, Math.ceil(h));
+  if (w <= 0 || h <= 0) return null;
+  try {
+    const d = c.getImageData(x0, y0, w, h).data;
+    let sum = 0, n = 0;
+    for (let i = 0; i < d.length; i += 28) {
+      sum += 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+      n++;
+    }
+    return n ? sum / n : null;
+  } catch (e) { return null; }
+}
+function _textBox(str, x, y, size, weight, font, align, baseline) {
+  const w = measure(str, size, weight, font);
+  let x0 = x;
+  if (align === "center") x0 = x - w / 2;
+  else if (align === "right") x0 = x - w;
+  let y0 = y - size * 0.75;
+  if (baseline === "top") y0 = y;
+  else if (baseline === "bottom") y0 = y - size * 1.1;
+  return { x: x0, y: y0, w: w, h: size * 1.2 };
+}
+/* 文本绘制：自动按 maxW 缩字号（避免超框），统一字体/对齐 */
+function drawText(str, x, y, o = {}) {
+  let size = o.size || 48;
+  const weight = o.weight || 900;
+  const font = o.font || FONT;
+  if (o.maxW) {
+    const w = measure(str, size, weight, font);
+    if (w > o.maxW) size = Math.max(8, Math.floor(size * o.maxW / w));
+  }
+  ctx.save();
+  ctx.font = `${weight} ${size}px ${font}`;
+  ctx.textAlign = o.align || "center";
+  ctx.textBaseline = o.baseline || "middle";
+  ctx.globalAlpha = o.alpha === undefined ? 1 : o.alpha;
+  if (o.shadow) { ctx.shadowColor = o.shadow; ctx.shadowBlur = o.blur || 0; ctx.shadowOffsetY = o.offsetY || 0; }
+  /* 没给 fill 时不再默认白字：按文字背后的亮度自动选深/浅色。
+     这是引擎级兜底，LLM 忘记写 fill 也不会出现白字压浅底。 */
+  let fillColor = o.fill;
+  if (!fillColor) {
+    const box = _textBox(str, x, y, size, weight, font, ctx.textAlign, ctx.textBaseline);
+    const lb = _bgLum(ctx, box.x, box.y, box.w, box.h);
+    fillColor = (lb !== null && lb > 128) ? "#1B1916" : "#F4EFE4";
+  }
+  if (PLAIN && o.autoContrast !== false) {
+    const tr = ctx.getTransform ? ctx.getTransform() : null;
+    const flat = !tr || (Math.abs(tr.b) < 0.01 && Math.abs(tr.c) < 0.01);
+    const fillInfo = _colorInfo(ctx, fillColor);
+    if (flat && fillInfo) {
+      const box = _textBox(str, x, y, size, weight, font, ctx.textAlign, ctx.textBaseline);
+      const lb = _bgLum(ctx, box.x, box.y, box.w, box.h);
+      if (lb !== null) {
+        const lf = fillInfo.a >= 0.99 ? fillInfo.lum
+                                      : fillInfo.lum * fillInfo.a + lb * (1 - fillInfo.a);
+        if (Math.abs(lf - lb) < 60) {
+          ctx.save();
+          ctx.lineWidth = Math.max(2, size * 0.06);
+          ctx.lineJoin = "round";
+          ctx.strokeStyle = lb > 128 ? "rgba(20,18,16,0.88)" : "rgba(244,239,228,0.92)";
+          ctx.strokeText(str, x, y);
+          ctx.restore();
+        }
+      }
+    }
+  }
+  if (o.stroke) { ctx.lineWidth = o.strokeW || 6; ctx.strokeStyle = o.stroke; ctx.lineJoin = "round"; ctx.strokeText(str, x, y); }
+  ctx.fillStyle = fillColor;
+  ctx.fillText(str, x, y);
+  if (o.underline) {
+    const w = measure(str, size, weight);
+    const x0 = ctx.textAlign === "center" ? x - w / 2 : ctx.textAlign === "right" ? x - w : x;
+    ctx.shadowBlur = 0;
+    ctx.fillStyle = o.underlineColor || fillColor;
+    ctx.fillRect(x0, y + size * 0.58, w, o.underlineW || 4);
+  }
+  ctx.restore();
+  return size;
+}
+/* 多行文本：按 maxW 自动断行（中文按字断，英文按词断） */
+function drawParagraph(str, x, y, o = {}) {
+  const size = o.size || 40, lh = (o.lineHeight || 1.45) * size, maxW = o.maxW || W - 120;
+  const toks = /[A-Za-z0-9]+/.test(str) ? str.split(/(\s+)/) : Array.from(str);
+  const rows = []; let cur = "";
+  for (const tk of toks) {
+    if (measure(cur + tk, size, o.weight || 700) <= maxW) cur += tk;
+    else { if (cur) rows.push(cur.trim()); cur = tk.trim(); }
+  }
+  if (cur) rows.push(cur.trim());
+  rows.forEach((r, i) => drawText(r, x, y + i * lh, Object.assign({}, o, { size })));
+  return rows.length * lh;
+}
+
+/* ─────────────── 形状小工具（LLM 常用，放在 e 上） ─────────────── */
+const sh = {
+  rect: (x, y, w, h, fill, r = 8) => {
+    ctx.beginPath();
+    if (r > 0 && ctx.roundRect) ctx.roundRect(x, y, w, h, r); else ctx.rect(x, y, w, h);
+    ctx.fillStyle = fill; ctx.fill();
+  },
+  circle: (x, y, r, fill) => { ctx.beginPath(); ctx.arc(x, y, r, 0, 6.2832); ctx.fillStyle = fill; ctx.fill(); },
+  ring: (x, y, r, fill, w) => { ctx.beginPath(); ctx.arc(x, y, r, 0, 6.2832); ctx.lineWidth = w; ctx.strokeStyle = fill; ctx.stroke(); },
+  tri: (x1, y1, x2, y2, x3, y3, fill) => {
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.lineTo(x3, y3); ctx.closePath();
+    ctx.fillStyle = fill; ctx.fill();
+  },
+  line: (x1, y1, x2, y2, fill, w = 4) => {
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2);
+    ctx.lineWidth = w; ctx.strokeStyle = fill; ctx.lineCap = "round"; ctx.stroke();
+  },
+  /* 星点/雪花等散布物：确定性，不闪（亮度按 seed 固定） */
+  speckle: (n, seed, o = {}) => {
+    const c = o.fill || P.paper;
+    for (let i = 0; i < n; i++) {
+      const a = hash(seed * 131 + i * 7), b = hash(seed * 977 + i * 13);
+      const r = (o.rmin || 1.5) + a * ((o.rmax || 4) - (o.rmin || 1.5));
+      ctx.globalAlpha = (o.amin || 0.30) + b * ((o.amax || 0.85) - (o.amin || 0.30));
+      sh.circle((o.x0 || 0) + a * (o.w || W), (o.y0 || 0) + b * (o.h || 400), r, c);
+    }
+    ctx.globalAlpha = 1;
+  },
+};
+
+/* ─────────────── 摄影机（世界坐标 → 视口） ───────────────
+   scene.camera(e) 返回 { x, y, zoom }：x,y 是视口中心对准的世界坐标；
+   zoom=1 时与世界坐标 1:1。默认不变换，老 scene 完全不受影响。
+   e.camPath([{u,x,y,zoom}, ...])：u 是当前镜头内 0~1 的归一化进度；
+   只给 zoom 时，x/y 沿用上一个关键帧；也可以写 t（秒）代替 u。 */
+function camDefault() { return { x: W / 2, y: H / 2, zoom: 1 }; }
+function camNormalize(c) {
+  const d = camDefault(), o = c || {}, z = Number(o.zoom);
+  const out = {
+    x: Number.isFinite(Number(o.x)) ? Number(o.x) : d.x,
+    y: Number.isFinite(Number(o.y)) ? Number(o.y) : d.y,
+    zoom: Number.isFinite(z) ? clamp(z, 0.4, 4) : 1,
+  };
+  /* 跳格信息：seg=第几段，segU=这一段自己的 0~1，cell=当前格号 */
+  ["seg", "segU", "segStart", "segEnd", "cell"].forEach((k) => {
+    if (o[k] !== undefined) out[k] = o[k];
+  });
+  return out;
+}
+function camPath(keys, e) {
+  const raw = Array.isArray(keys) ? keys : [];
+  const dur = e && e.line ? Math.max(0.2, e.line.end - e.line.start) : 1;
+  const ks = [];
+  raw.forEach((k, i) => {
+    if (!k || typeof k !== "object") return;
+    let u;
+    if (k.u !== undefined) u = Number(k.u);
+    else if (k.t !== undefined) u = (Number(k.t) - (e && e.line ? e.line.start : 0)) / dur;
+    else u = raw.length > 1 ? i / (raw.length - 1) : 0;
+    ks.push({ u: clamp01(u), x: k.x, y: k.y, zoom: k.zoom, cut: !!k.cut });
+  });
+  if (!ks.length) return camDefault();
+  /* 同一个 u 上 cut 排在后面：切点覆盖同一时刻的缓动终点 */
+  ks.sort((a, b) => (a.u - b.u) || ((a.cut ? 1 : 0) - (b.cut ? 1 : 0)));
+  /* 缺省字段沿用上一个关键帧，少写一个 x/y 不会把镜头甩回中心 */
+  let px = W / 2, py = H / 2, pz = 1;
+  ks.forEach((k) => {
+    px = Number.isFinite(Number(k.x)) ? Number(k.x) : px;
+    py = Number.isFinite(Number(k.y)) ? Number(k.y) : py;
+    pz = Number.isFinite(Number(k.zoom)) ? Number(k.zoom) : pz;
+    k.x = px; k.y = py; k.zoom = pz;
+  });
+  const u = e ? clamp01(e.u) : 0;
+  /* 切成几段：每个 cut 是一个新段的起点 */
+  const cuts = [0];
+  for (let i = 1; i < ks.length; i++) if (ks[i].cut) cuts.push(i);
+  const meta = (at) => {
+    let seg = 0;
+    for (let i = 0; i < cuts.length; i++) if (ks[cuts[i]].u <= at) seg = i;
+    const start = ks[cuts[seg]].u;
+    const end = cuts[seg + 1] !== undefined ? ks[cuts[seg + 1]].u : 1;
+    return {
+      seg, segU: clamp01((at - start) / Math.max(1e-6, end - start)),
+      segStart: start, segEnd: end,
+    };
+  };
+  const at = (s, t) => camNormalize(Object.assign({ x: s.x, y: s.y, zoom: s.zoom }, meta(t)));
+  if (u <= ks[0].u) return at(ks[0], u);
+  const last = ks[ks.length - 1];
+  if (u >= last.u) return at(last, u);
+  for (let i = 1; i < ks.length; i++) {
+    const a = ks[i - 1], b = ks[i];
+    if (u < b.u) {
+      if (b.cut) return at(a, u);            /* 切点之前：保持上一格 */
+      const r = (u - a.u) / Math.max(1e-6, b.u - a.u);
+      const k = r * r * (3 - 2 * r);          /* smoothstep：起收都稳 */
+      return at({ x: lerp(a.x, b.x, k), y: lerp(a.y, b.y, k), zoom: lerp(a.zoom, b.zoom, k) }, u);
+    }
+  }
+  return at(last, u);
+}
+/* 大画布分格：2×2 之类的格子按 order 顺序播放，cut 瞬间跳格；
+   moves 可给某一格加推拉/横移。返回的 cam 带 seg/segU/cell，draw 里用 e.cam.cell 判断当前格。 */
+function camGrid(e, o) {
+  const opt = o || {};
+  const cols = Math.max(1, Math.min(6, parseInt(opt.cols || 2, 10)));
+  const rows = Math.max(1, Math.min(6, parseInt(opt.rows || 2, 10)));
+  const cw = Number(opt.cellW) || W;
+  const ch = Number(opt.cellH) || H;
+  const order = (Array.isArray(opt.order) && opt.order.length
+    ? opt.order.map((n) => parseInt(n, 10)).filter((n) => n >= 0 && n < cols * rows)
+    : Array.from({ length: cols * rows }, (_, i) => i));
+  const weights = order.map((_, i) => {
+    const w = Array.isArray(opt.weights) ? Number(opt.weights[i]) : 1;
+    return Number.isFinite(w) && w > 0 ? w : 1;
+  });
+  const total = weights.reduce((a, b) => a + b, 0);
+  let acc = 0;
+  const bounds = weights.map((w) => {
+    const start = acc / total; acc += w;
+    return { start, end: acc / total };
+  });
+  const keys = [];
+  order.forEach((cell, seq) => {
+    const col = cell % cols, row = Math.floor(cell / cols);
+    const cx = col * cw + cw / 2, cy = row * ch + ch / 2;
+    const b = bounds[seq];
+    keys.push({ u: b.start, x: cx, y: cy, zoom: 1, cut: seq > 0 });
+    const mv = (opt.moves && (opt.moves[seq] || opt.moves[cell])) || null;
+    if (mv) {
+      const mz = Number(mv.zoom), mx = Number(mv.x), my = Number(mv.y);
+      keys.push({
+        u: Math.max(b.start + 1e-4, b.end - 1e-3),
+        /* x/y 是相对该格中心的偏移，正数向右/向下 */
+        x: Number.isFinite(mx) ? cx + mx : cx,
+        y: Number.isFinite(my) ? cy + my : cy,
+        zoom: Number.isFinite(mz) ? mz : 1,
+      });
+    }
+  });
+  const cam = camPath(keys, e);
+  cam.cell = order[cam.seg] !== undefined ? order[cam.seg] : 0;
+  return cam;
+}
+function applyCamera(c) {
+  ctx.translate(W / 2, H / 2);
+  ctx.scale(c.zoom, c.zoom);
+  ctx.translate(-c.x, -c.y);
+}
+/* 视差层：depth=0 锁屏，1=主世界，>1 前景（移动更快） */
+function applyLayer(c, depth) {
+  const d = Number.isFinite(Number(depth)) ? Number(depth) : 1;
+  const z = 1 + (c.zoom - 1) * d;
+  const px = W / 2 + (c.x - W / 2) * d;
+  const py = H / 2 + (c.y - H / 2) * d;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.translate(W / 2, H / 2);
+  ctx.scale(z, z);
+  ctx.translate(-px, -py);
+}
+
+/* ─────────────── 背景 ─────────────── */
+function paintBg(hex, o = {}) {
+  /* e.bg 可能被 LLM 在 camera 变换里调用：先回到屏幕空间，保证永远铺满视口 */
+  ctx.save();
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = hex; ctx.fillRect(0, 0, W, H);
+  if (o.vignette) {
+    const g = ctx.createRadialGradient(W / 2, H / 2, H * 0.25, W / 2, H / 2, H * 0.95);
+    g.addColorStop(0, hexA("#000000", 0)); g.addColorStop(1, hexA("#000000", o.vignette));
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  }
+  if (o.glow) {                       /* 静态光晕：不随时间变亮，只做位置/大小变化 */
+    const g = ctx.createRadialGradient(o.glow.x, o.glow.y, 8, o.glow.x, o.glow.y, o.glow.r);
+    g.addColorStop(0, hexA(o.glow.color || P.gold, o.glow.a || 0.22));
+    g.addColorStop(1, hexA(o.glow.color || P.gold, 0));
+    ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  }
+  ctx.restore();
+}
+
+/* ─────────────── 精灵素材（Lottie 离线烘焙成的 PNG 帧序列） ───────────────
+   素材由 tools/lottie2frames.py 一次性烘好存进 assets/lottie/，
+   运行时只做 drawImage——不需要网络、不需要 lottie 库、完全确定。 */
+const SPRITES = {};        /* name -> { frames:[Image], w, h, fps, loaded } */
+
+/* 所有异步素材共用一个待加载计数：只要还有一张没解码完，window.ready 就保持 false，
+   否则渲染器会在图片还没上屏时开始截图（会拍到空帧）。 */
+let _pendingAssets = 0;
+function _assetDone() { if (--_pendingAssets <= 0) window.ready = true; }
+
+function loadSprites() {
+  let manifest = null;
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", "../assets/lottie/manifest.json", false);   /* 同步读，file:// 下需 allow-file-access */
+    xhr.send(null);
+    manifest = JSON.parse(xhr.responseText);
+  } catch (err) {
+    return;                                /* 没有素材时安静跳过，不影响老片子 */
+  }
+  Object.keys(manifest).forEach((name) => {
+    const m = manifest[name];
+    const entry = { frames: new Array(m.frames), w: m.w, h: m.h, fps: m.fps, loaded: 0 };
+    SPRITES[name] = entry;
+    for (let i = 0; i < m.frames; i++) {
+      _pendingAssets++;
+      const img = new Image();
+      const done = () => { entry.loaded++; _assetDone(); };
+      img.onload = done;
+      img.onerror = done;
+      img.src = `../assets/lottie/${m.dir || name}/frame_${String(i).padStart(5, "0")}.png`;
+      entry.frames[i] = img;
+    }
+  });
+}
+
+/* 播放一帧：x = 脚底中心，y = 脚底。返回是否画成功 */
+function drawSprite(name, x, y, o) {
+  const sp = SPRITES[name];
+  if (!sp || sp.loaded <= 0) return false;
+  const opt = o || {};
+  const total = sp.frames.length;
+  const t = (opt.t === undefined ? 0 : opt.t) + (opt.t0 || 0);
+  let idx = Math.floor(t * sp.fps);
+  idx = opt.loop === false ? Math.min(total - 1, Math.max(0, idx)) : ((idx % total) + total) % total;
+  const img = sp.frames[idx];
+  if (!img || !img.complete) return false;
+  const s = opt.scale === undefined ? 1 : opt.scale;
+  const w = sp.w * s, h = sp.h * s;
+  const ax = opt.anchor === undefined ? 0.5 : opt.anchor;
+  ctx.drawImage(img, x - w * ax, y - h, w, h);
+  return true;
+}
+
+/* ─────────────── 通用本地图片素材 ───────────────
+   PLAN.assets = { key: "file:///绝对路径" }，由渲染器按项目 assets/ 目录生成。
+   与 Lottie 精灵共用待加载计数：只要还有图没解码完，window.ready 就保持 false，
+   否则渲染器会在图片还没上屏时开始截图（会拍到空帧）。
+   素材本身是静态位图，运动全部由 draw(e) 里的相机/位移/缩放/视差决定。 */
+const IMAGES = {};          /* key -> Image | null（null = 加载失败） */
+function loadImages() {
+  const map = (PLAN && PLAN.assets) || {};
+  Object.keys(map).forEach((key) => {
+    _pendingAssets++;
+    const img = new Image();
+    img.onload = () => { IMAGES[key] = img; _assetDone(); };
+    img.onerror = () => { IMAGES[key] = null; _assetDone(); };
+    img.src = map[key];
+  });
+}
+function imageOf(name) {
+  const img = IMAGES[name];
+  return (img && img.complete && img.naturalWidth > 0) ? img : null;
+}
+/* cover：铺满并裁掉多余（默认）；contain：完整显示；stretch：拉伸 */
+function drawImageFit(img, x, y, w, h, mode) {
+  const iw = img.naturalWidth, ih = img.naturalHeight;
+  if (!iw || !ih || w <= 0 || h <= 0) return;
+  if (mode === "stretch") { ctx.drawImage(img, x, y, w, h); return; }
+  const s = mode === "contain" ? Math.min(w / iw, h / ih) : Math.max(w / iw, h / ih);
+  const dw = iw * s, dh = ih * s;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(x, y, w, h); ctx.clip();
+  ctx.drawImage(img, x + (w - dw) / 2, y + (h - dh) / 2, dw, dh);
+  ctx.restore();
+}
+
+/* ─────────────── 人物：四种皮肤，共用一套骨架 ───────────────
+   e.actor({ style, x, y, scale, dir, pose, phase, hug, hair, cloth, dress })
+   x,y = 脚底中心（和 e.sprite 一致）；dir=1 朝右；pose=stand|walk|run|bow|hug|reach
+   phase = 走路相位（一般 e.t*1.6）；hug = 0~1 叠加拥抱；style = crayon|shadow|flat|ink
+   同一个人的动作由骨架算，皮肤只决定“长什么样”——换风格不用重写动作。 */
+const ACTOR_STYLES = ["crayon", "shadow", "flat", "ink"];
+const ACTOR_POSES = ["stand", "walk", "run", "bow", "hug", "reach"];
+
+const A_POSE = {
+  stand: { spine: 2, bob: 0, legL: [4, -2], legR: [-4, 2], armL: [8, 8], armR: [-8, 8] },
+  bow: { spine: 18, bob: 0, legL: [3, -2], legR: [-3, 2], armL: [26, 30], armR: [-14, 24] },
+  hug: { spine: 6, bob: 0, legL: [7, -3], legR: [-7, 3], armL: [70, 46], armR: [22, 34] },
+  reach: { spine: 4, bob: 0, legL: [5, -3], legR: [-5, 3], armL: [78, 18], armR: [-8, 8] },
+};
+
+function aWalkPose(p, run) {
+  const a = p * Math.PI * 2;
+  const amp = run ? 36 : 23;
+  const knee = (x) => -Math.max(0, (run ? 44 : 30) * Math.sin(x + 1.1));
+  return {
+    spine: run ? 8 : 2,
+    bob: (run ? 3 : 1.4) * Math.cos(2 * a),
+    legL: [amp * Math.sin(a), knee(a)],
+    legR: [amp * Math.sin(a + Math.PI), knee(a + Math.PI)],
+    armL: [-(run ? 40 : 20) * Math.sin(a), run ? 42 : 16],
+    armR: [-(run ? 40 : 20) * Math.sin(a + Math.PI), run ? 42 : 16],
+  };
+}
+function aMixPose(a, b, k) {
+  const L = (x, y) => [x[0] + (y[0] - x[0]) * k, x[1] + (y[1] - x[1]) * k];
+  return {
+    spine: a.spine + (b.spine - a.spine) * k,
+    bob: a.bob + (b.bob - a.bob) * k,
+    legL: L(a.legL, b.legL), legR: L(a.legR, b.legR),
+    armL: L(a.armL, b.armL), armR: L(a.armR, b.armR),
+  };
+}
+function actorPose(name, phase, hug) {
+  let p = (name === "walk" || name === "run")
+    ? aWalkPose(phase, name === "run")
+    : (A_POSE[name] || A_POSE.stand);
+  if (hug > 0) p = aMixPose(p, A_POSE.hug, clamp01(hug));
+  return p;
+}
+
+/* 剪纸片：两端各留 gap 的缝，关节才不会连成一根线 */
+function aPiece(c, x1, y1, x2, y2, w1, w2, fill, alpha, gap, rim) {
+  const dx = x2 - x1, dy = y2 - y1, len = Math.hypot(dx, dy) || 1;
+  const ux = dx / len, uy = dy / len, px = -uy, py = ux;
+  const ax = x1 + ux * gap, ay = y1 + uy * gap;
+  const bx = x2 - ux * gap, by = y2 - uy * gap;
+  c.save();
+  c.globalAlpha = alpha;
+  c.fillStyle = fill;
+  c.beginPath();
+  c.moveTo(ax + px * w1 / 2, ay + py * w1 / 2);
+  c.lineTo(bx + px * w2 / 2, by + py * w2 / 2);
+  c.lineTo(bx - px * w2 / 2, by - py * w2 / 2);
+  c.lineTo(ax - px * w1 / 2, ay - py * w1 / 2);
+  c.closePath(); c.fill();
+  if (rim) {
+    c.globalAlpha = alpha * 0.24;
+    c.strokeStyle = rim;
+    c.lineWidth = 1;
+    c.beginPath();
+    c.moveTo(ax + px * w1 / 2, ay + py * w1 / 2);
+    c.lineTo(bx + px * w2 / 2, by + py * w2 / 2);
+    c.stroke();
+  }
+  c.restore();
+}
+function aCapsule(c, x1, y1, x2, y2, w, col, alpha) {
+  c.save();
+  c.globalAlpha = alpha === undefined ? 1 : alpha;
+  c.strokeStyle = col; c.lineWidth = w; c.lineCap = "round";
+  c.beginPath(); c.moveTo(x1, y1); c.lineTo(x2, y2); c.stroke();
+  c.restore();
+}
+function aPenLine(c, x1, y1, x2, y2, w, col, alpha) {
+  c.save();
+  c.globalAlpha = alpha; c.strokeStyle = col; c.lineWidth = w; c.lineCap = "round";
+  c.beginPath(); c.moveTo(x1, y1); c.lineTo(x2, y2); c.stroke();
+  c.globalAlpha = alpha * 0.35; c.lineWidth = Math.max(1, w * 0.7);
+  c.beginPath(); c.moveTo(x1 + 1.5, y1 - 1); c.lineTo(x2 + 1.5, y2 - 1); c.stroke();
+  c.restore();
+}
+/* 侧面头型：不是圆，带额头、鼻梁、下巴（皮影用） */
+function aProfileHead(c, r, fill, rim) {
+  c.save();
+  c.fillStyle = fill; c.globalAlpha = 0.97;
+  c.beginPath();
+  c.moveTo(-0.86 * r, -0.12 * r);
+  c.bezierCurveTo(-0.80 * r, -0.95 * r, 0.30 * r, -1.06 * r, 0.60 * r, -0.44 * r);
+  c.bezierCurveTo(0.80 * r, -0.20 * r, 0.92 * r, -0.16 * r, 0.98 * r, -0.02 * r);
+  c.lineTo(0.80 * r, 0.07 * r);
+  c.bezierCurveTo(0.88 * r, 0.28 * r, 0.74 * r, 0.33 * r, 0.62 * r, 0.35 * r);
+  c.bezierCurveTo(0.64 * r, 0.55 * r, 0.42 * r, 0.84 * r, 0.04 * r, 0.90 * r);
+  c.bezierCurveTo(-0.52 * r, 0.88 * r, -0.86 * r, 0.48 * r, -0.86 * r, -0.12 * r);
+  c.closePath(); c.fill();
+  if (rim) { c.globalAlpha = 0.16; c.strokeStyle = rim; c.lineWidth = 1.4; c.stroke(); }
+  c.restore();
+}
+
+function drawInkActor(e, o) {
+  const c = e.ctx, s = o.scale || 1, dir = o.dir || 1;
+  const h = (o.height || 205) * s, hw = (o.hemW || 38) * s, sw = (o.shoulderW || 23) * s;
+  const headR = (o.headR || 24) * s;
+  const t = o.t || 0, lean = o.lean === undefined ? (o.pose === "bow" ? 14 : 0) : o.lean;
+  const reach = o.reach === undefined ? (o.pose === "reach" || o.pose === "hug" ? 30 : 0) : o.reach;
+  const sway = Math.sin(t * 1.15 + (o.seed || 0)) * 3.2 * s;
+  const bob = Math.sin(t * 1.3 + (o.seed || 0)) * 1.6 * s;
+
+  c.save();
+  c.translate(o.x + sway, o.y + bob);
+  c.rotate((lean * Math.PI) / 180);
+  c.scale(dir, 1);
+
+  /* 湿痕 */
+  c.save(); c.globalAlpha = 0.07; c.fillStyle = "#4A453B";
+  c.beginPath(); c.ellipse(0, -h * 0.55, hw * 1.35, h * 0.62, 0, 0, 7); c.fill(); c.restore();
+
+  /* 袍子 */
+  c.save(); c.globalAlpha = 0.93; c.fillStyle = "#1B1916";
+  c.beginPath();
+  c.moveTo(-sw, -h);
+  c.bezierCurveTo(-sw * 1.25, -h * 0.62, -hw * 1.18, -h * 0.22, -hw, 0);
+  const wave = Math.sin(t * 2.2 + (o.seed || 0)) * 4 * s;
+  c.quadraticCurveTo(-hw * 0.5, 8 * s + wave, 0, 4 * s);
+  c.quadraticCurveTo(hw * 0.5, 8 * s - wave, hw, 0);
+  c.bezierCurveTo(hw * 1.10, -h * 0.30, sw * 1.15, -h * 0.70, sw, -h);
+  c.quadraticCurveTo(0, -h - 10 * s, -sw, -h);
+  c.closePath(); c.fill();
+  c.globalAlpha = 0.16; c.strokeStyle = "#EDE6D6"; c.lineWidth = 2.2 * s;
+  c.beginPath(); c.moveTo(-sw * 0.15, -h * 0.86);
+  c.quadraticCurveTo(-hw * 0.28, -h * 0.42, -hw * 0.55, -6 * s); c.stroke();
+  c.beginPath(); c.moveTo(sw * 0.30, -h * 0.82);
+  c.quadraticCurveTo(hw * 0.42, -h * 0.40, hw * 0.62, -8 * s); c.stroke();
+  c.restore();
+
+  /* 手臂 */
+  aPiece(c, -sw * 0.85, -h * 0.86, -sw * 1.15, -h * 0.42, 11 * s, 7 * s, "#1B1916", 0.9, 0, "");
+  aPiece(c, sw * 0.85, -h * 0.86, sw * 1.05 + reach * s, -h * 0.62, 11 * s, 6 * s, "#1B1916", 0.9, 0, "");
+
+  /* 头 + 发 */
+  c.save(); c.translate(0, -h - headR * 0.92);
+  c.fillStyle = "#1B1916"; c.globalAlpha = 0.96;
+  c.beginPath(); c.ellipse(0, 0, headR * 0.92, headR, 0, 0, 7); c.fill();
+  if (o.hair === "bun") {
+    c.beginPath(); c.arc(-headR * 0.55, -headR * 0.62, headR * 0.42, 0, 7); c.fill();
+    aPiece(c, -headR * 0.7, -headR * 0.2, -headR * 1.1, headR * 1.6, 8 * s, 4 * s, "#1B1916", 0.85, 0, "");
+  } else {
+    c.beginPath(); c.ellipse(0, -headR * 0.16, headR * 1.02, headR * 0.62, 0, Math.PI, Math.PI * 2); c.fill();
+  }
+  c.restore();
+
+  /* 脚 */
+  c.save(); c.globalAlpha = 0.55; c.fillStyle = "#1B1916";
+  c.beginPath(); c.ellipse(-9 * s, -2 * s, 11 * s, 4 * s, 0, 0, 7); c.fill();
+  c.beginPath(); c.ellipse(9 * s, -2 * s, 11 * s, 4 * s, 0, 0, 7); c.fill();
+  c.restore();
+  c.restore();
+}
+
+/* 通用像素化：把一块区域按 block 像素重采样（连背景一起），用于像素风格。
+   纯像素操作，只依赖当前帧内容，不影响确定性。 */
+function pixelateRect(c, x0, y0, w, h, block) {
+  x0 = Math.max(0, Math.floor(x0));
+  y0 = Math.max(0, Math.floor(y0));
+  w = Math.min(c.canvas.width - x0, Math.floor(w));
+  h = Math.min(c.canvas.height - y0, Math.floor(h));
+  if (w <= 0 || h <= 0 || block < 2) return;
+  const src = c.getImageData(x0, y0, w, h).data;
+  const prev = c.globalAlpha;
+  c.save();
+  for (let by = 0; by < h; by += block) {
+    for (let bx = 0; bx < w; bx += block) {
+      const x1 = Math.min(bx + block, w), y1 = Math.min(by + block, h);
+      let r = 0, g = 0, b = 0, a = 0, n = 0;
+      for (let yy = by; yy < y1; yy++) {
+        for (let xx = bx; xx < x1; xx++) {
+          const i = (yy * w + xx) * 4, al = src[i + 3] / 255;
+          r += src[i] * al; g += src[i + 1] * al; b += src[i + 2] * al;
+          a += al; n++;
+        }
+      }
+      if (!n || a <= 0) continue;
+      c.globalAlpha = 1;
+      c.fillStyle = "rgb(" + Math.round(r / a) + "," + Math.round(g / a) + ","
+        + Math.round(b / a) + ")";
+      c.fillRect(x0 + bx, y0 + by, block, block);
+    }
+  }
+  c.restore();
+  c.globalAlpha = prev;
+}
+
+function drawActor(e, o) {
+  const style = o.style || "flat";
+  if (ACTOR_STYLES.indexOf(style) < 0) {
+    throw new Error("未知人物风格：" + style + "；可用 " + ACTOR_STYLES.join(" / "));
+  }
+  if (style === "ink") return drawInkActor(e, o);
+
+  const c = e.ctx, s = o.scale || 1, dir = o.dir || 1;
+  const pose = actorPose(o.pose || "stand", o.phase || 0, o.hug || 0);
+  const legLen = 88 * s, thigh = 46 * s, shin = 42 * s;
+  const spine = 78 * s, neck = 14 * s;
+  const headR = (style === "crayon" ? 27 : 24) * s;
+  const halfSh = 18 * s, halfHip = 12 * s;
+  const gap = style === "shadow" ? 3 * s : 0;
+  const cloth = o.cloth || (style === "shadow" ? "#0B0705" : (style === "crayon" ? "#5A7DA8" : "#3C6FD1"));
+  const ink = "#2B2B33";
+  const skin = "#E8B88F";
+  const hair = "#241F2E";
+
+  c.save();
+  c.translate(o.x, o.y + (pose.bob || 0) * s - legLen);
+  c.scale(dir, 1);
+
+  const a1 = (pose.spine * Math.PI) / 180;
+  const chestX = Math.sin(a1) * spine, chestY = -Math.cos(a1) * spine;
+  const sx = Math.cos(a1), sy = Math.sin(a1);
+  const shF = { x: chestX + sx * halfSh, y: chestY + sy * halfSh };
+  const shB = { x: chestX - sx * halfSh, y: chestY - sy * halfSh };
+  const hipF = { x: sx * halfHip, y: sy * halfHip };
+  const hipB = { x: -sx * halfHip, y: -sy * halfHip };
+
+  const limb = (p, ang, rel, l1, l2, w, alpha, col, rim) => {
+    const r1 = (ang * Math.PI) / 180, r2 = ((ang + rel) * Math.PI) / 180;
+    const kx = p.x + Math.sin(r1) * l1, ky = p.y + Math.cos(r1) * l1;
+    const ex = kx + Math.sin(r2) * l2, ey = ky + Math.cos(r2) * l2;
+    if (style === "shadow") {
+      aPiece(c, p.x, p.y, kx, ky, w, w * 0.86, col, alpha, gap, rim);
+      aPiece(c, kx, ky, ex, ey, w * 0.86, w * 0.70, col, alpha, gap, rim);
+    } else if (style === "flat") {
+      aCapsule(c, p.x, p.y, kx, ky, w, col, alpha);
+      aCapsule(c, kx, ky, ex, ey, w * 0.94, col, alpha);
+    } else {
+      aPenLine(c, p.x, p.y, kx, ky, w, col, alpha);
+      aPenLine(c, kx, ky, ex, ey, w * 0.94, col, alpha);
+    }
+    return { kx, ky, ex, ey };
+  };
+
+  /* 后侧肢体 */
+  const legB = limb(hipB, pose.legR[0], pose.legR[1], thigh, shin,
+    style === "shadow" ? 14 * s : 14 * s, 0.6,
+    style === "shadow" ? cloth : (style === "flat" ? "#2C3555" : ink), "");
+  const armB = limb(shB, pose.armR[0], pose.armR[1], 30 * s, 27 * s,
+    style === "flat" ? 11 * s : 8.5 * s, 0.6,
+    style === "flat" ? cloth : (style === "shadow" ? cloth : ink), "");
+
+  /* 皮影：竹签先画，藏在人物后面 */
+  if (style === "shadow") {
+    c.save(); c.globalAlpha = 0.42; c.strokeStyle = "#4A2A16"; c.lineWidth = 2.1 * s;
+    c.beginPath(); c.moveTo(chestX * 0.6, -o.y + 30); c.lineTo(chestX * 0.85, chestY - neck - headR * 0.4); c.stroke();
+    c.beginPath(); c.moveTo(armB.ex * 0.9, -o.y + 44); c.lineTo(armB.ex, armB.ey); c.stroke();
+    c.restore();
+  }
+
+  /* 躯干 */
+  const hem = (o.hem || 60) * s, hemW = (o.hemW || (o.dress ? 44 : 32)) * s;
+  const hemY = Math.max(hipF.y, hipB.y) + hem;
+
+  if (style === "flat") {
+    if (o.dress) {
+      c.save(); c.fillStyle = cloth;
+      c.beginPath();
+      c.moveTo(shF.x, shF.y); c.lineTo(shB.x, shB.y);
+      c.lineTo(-hemW, hemY);
+      c.quadraticCurveTo(0, hemY + 12 * s, hemW, hemY);
+      c.closePath(); c.fill(); c.restore();
+    } else {
+      aCapsule(c, hipF.x * 0.6, hipF.y * 0.4, chestX, chestY, 46 * s, cloth, 1);
+      c.save(); c.fillStyle = cloth;
+      c.beginPath();
+      c.ellipse(hipF.x * 0.3, hipF.y + 8 * s, hemW * 0.82, 15 * s, 0, 0, 7);
+      c.fill(); c.restore();
+    }
+  } else if (style === "shadow") {
+    c.save(); c.globalAlpha = 0.97; c.fillStyle = cloth;
+    c.beginPath();
+    c.moveTo(shF.x - sx * 2, shF.y - sy * 2);
+    c.lineTo(shB.x + sx * 2, shB.y + sy * 2);
+    c.lineTo(-hemW, hemY);
+    c.quadraticCurveTo(0, hemY + 10 * s, hemW, hemY);
+    c.closePath(); c.fill();
+    c.globalAlpha = 0.18; c.strokeStyle = "#F0B45A"; c.lineWidth = 1.4; c.stroke();
+    c.restore();
+  } else {
+    c.save(); c.globalAlpha = 0.68; c.fillStyle = cloth;
+    c.beginPath();
+    c.moveTo(shF.x - sx * 3, shF.y - sy * 3);
+    c.lineTo(shB.x + sx * 3, shB.y + sy * 3);
+    c.quadraticCurveTo(0, hemY + 12 * s, hemW, hemY);
+    c.quadraticCurveTo(0, hemY + 4 * s, -hemW, hemY);
+    c.closePath(); c.fill(); c.restore();
+    aPenLine(c, shF.x - sx * 3, shF.y - sy * 3, hemW, hemY, 3 * s, ink, 0.85);
+    aPenLine(c, shB.x + sx * 3, shB.y + sy * 3, -hemW, hemY, 3 * s, ink, 0.85);
+    aPenLine(c, -hemW, hemY, hemW, hemY, 2.8 * s, ink, 0.8);
+  }
+
+  /* 脖子 + 头 */
+  const nx = chestX + Math.sin(a1) * neck, ny = chestY - Math.cos(a1) * neck;
+  if (style === "flat") aCapsule(c, chestX, chestY, nx, ny, 11 * s, skin, 1);
+  else if (style === "shadow") aPiece(c, chestX, chestY, nx, ny, 8 * s, 7 * s, cloth, 1, 1.2 * s, "");
+  else aPenLine(c, chestX, chestY, nx, ny, 7 * s, ink, 0.8);
+
+  const hx = nx, hy = ny - headR * 0.92;
+  c.save();
+  c.translate(hx, hy);
+
+  if (style === "shadow") {
+    if (o.hair === "bun") {
+      c.fillStyle = cloth;
+      c.beginPath(); c.arc(-headR * 0.7, -headR * 0.42, headR * 0.36, 0, 7); c.fill();
+      c.beginPath();
+      c.moveTo(-headR * 0.80, -headR * 0.10);
+      c.quadraticCurveTo(-headR * 1.55, headR * 1.1, -headR * 1.0, headR * 2.1);
+      c.quadraticCurveTo(-headR * 0.55, headR * 1.2, -headR * 0.45, headR * 0.45);
+      c.closePath(); c.fill();
+    } else {
+      c.fillStyle = cloth;
+      c.beginPath(); c.arc(0, -headR * 0.12, headR * 1.02, Math.PI * 1.02, Math.PI * 1.98); c.fill();
+    }
+    aProfileHead(c, headR, cloth, "#F0B45A");
+  } else {
+    /* 后发 */
+    c.fillStyle = hair;
+    if (o.hair === "bob") {
+      c.beginPath(); c.arc(0, 0, headR * 1.08, 0, 7); c.fill();
+    } else if (o.hair === "long") {
+      c.beginPath(); c.arc(0, 0, headR * 1.06, 0, 7); c.fill();
+      c.beginPath();
+      c.moveTo(-headR * 0.9, 0);
+      c.quadraticCurveTo(-headR * 1.5, headR * 1.6, -headR * 0.95, headR * 2.2);
+      c.quadraticCurveTo(-headR * 0.35, headR * 1.2, 0.05 * headR, headR * 0.1);
+      c.closePath(); c.fill();
+    } else {
+      c.beginPath(); c.arc(0, -headR * 0.05, headR * 1.04, Math.PI * 1.02, Math.PI * 1.98); c.fill();
+    }
+    /* 脸 */
+    c.fillStyle = skin;
+    c.beginPath(); c.arc(0, 0, headR, 0, 7); c.fill();
+    /* 前发 */
+    c.fillStyle = hair;
+    c.beginPath();
+    c.arc(0, -headR * 0.06, headR * 1.0, Math.PI * 1.04, Math.PI * 1.96);
+    c.lineTo(headR * 0.4, -headR * 0.62);
+    c.closePath(); c.fill();
+    /* 五官 */
+    if (style === "crayon") {
+      c.fillStyle = "#FFFFFF";
+      c.beginPath(); c.arc(headR * 0.30, headR * 0.06, 4.4 * s, 0, 7); c.fill();
+      c.beginPath(); c.arc(headR * 0.66, headR * 0.06, 4.2 * s, 0, 7); c.fill();
+      c.fillStyle = ink;
+      c.beginPath(); c.arc(headR * 0.32, headR * 0.08, 2.3 * s, 0, 7); c.fill();
+      c.beginPath(); c.arc(headR * 0.68, headR * 0.08, 2.2 * s, 0, 7); c.fill();
+      c.strokeStyle = ink; c.lineWidth = 1.8 * s; c.lineCap = "round";
+      c.beginPath(); c.moveTo(headR * 0.38, headR * 0.46);
+      c.quadraticCurveTo(headR * 0.5, headR * 0.54, headR * 0.62, headR * 0.44); c.stroke();
+      c.globalAlpha = 0.22; c.fillStyle = "#C9553D";
+      c.beginPath(); c.arc(headR * 0.14, headR * 0.30, 5 * s, 0, 7); c.fill();
+      c.beginPath(); c.arc(headR * 0.74, headR * 0.30, 4.5 * s, 0, 7); c.fill();
+    } else {
+      c.fillStyle = "#241F2E";
+      c.beginPath(); c.arc(headR * 0.28, headR * 0.02, 3 * s, 0, 7); c.fill();
+      c.beginPath(); c.arc(headR * 0.66, headR * 0.02, 3 * s, 0, 7); c.fill();
+      c.strokeStyle = "#241F2E"; c.lineWidth = 2 * s; c.lineCap = "round";
+      c.beginPath(); c.moveTo(headR * 0.36, headR * 0.42);
+      c.quadraticCurveTo(headR * 0.48, headR * 0.52, headR * 0.60, headR * 0.40); c.stroke();
+    }
+  }
+  c.restore();
+
+  /* 前侧肢体 */
+  const legF = limb(hipF, pose.legL[0], pose.legL[1], thigh, shin,
+    style === "shadow" ? 14 * s : 14 * s, 1,
+    style === "shadow" ? cloth : (style === "flat" ? "#2C3555" : ink), "");
+  const armF = limb(shF, pose.armL[0], pose.armL[1], 30 * s, 27 * s,
+    style === "flat" ? 11 * s : 8.5 * s, 1,
+    style === "flat" ? cloth : (style === "shadow" ? cloth : ink), "");
+
+  /* 手 / 鞋 / 铆钉 */
+  if (style === "shadow") {
+    [[shF, shB], [hipF, hipB], [legF.kx, legF.ky], [legB.kx, legB.ky],
+     [armF.kx, armF.ky], [armB.kx, armB.ky]].forEach(([x, y]) => {
+      c.save(); c.globalAlpha = 0.45; c.fillStyle = "#E9A63B";
+      c.beginPath(); c.arc(x, y, 2.8 * s, 0, 7); c.fill(); c.restore();
+    });
+    c.save(); c.globalAlpha = 0.95; c.strokeStyle = cloth; c.lineWidth = 11 * s; c.lineCap = "round";
+    [legF, legB].forEach((p) => {
+      const fa = Math.atan2(p.ex - p.kx, p.ey - p.ky) + 1.15;
+      c.beginPath(); c.moveTo(p.ex, p.ey);
+      c.lineTo(p.ex + Math.sin(fa) * 12 * s, p.ey + Math.cos(fa) * 12 * s); c.stroke();
+    });
+    c.restore();
+  } else {
+    c.save(); c.fillStyle = skin;
+    [armF, armB].forEach((a) => { c.beginPath(); c.arc(a.ex, a.ey, 5.6 * s, 0, 7); c.fill(); });
+    c.restore();
+    c.save();
+    if (style === "flat") {
+      c.fillStyle = "#1A2038";
+      [legF, legB].forEach((p) => { e.sh.rect(p.ex - 5 * s, p.ey - 3 * s, 19 * s, 9 * s, "#1A2038", 4 * s); });
+    } else {
+      c.fillStyle = ink;
+      [legF, legB].forEach((p) => {
+        c.beginPath(); c.ellipse(p.ex + 4 * s, p.ey + 1.5 * s, 8 * s, 4 * s, 0, 0, 7); c.fill();
+      });
+    }
+    c.restore();
+  }
+  c.restore();
+
+  /* 像素风格：把人物连同背景一起按 block 重采样 */
+  if (o.pixelate >= 2) {
+    pixelateRect(c, o.x - 95 * s, o.y - 245 * s, 190 * s, 253 * s, Math.round(o.pixelate));
+  }
+}
+
+/* ─────────────── 歌词样式库（整片一种，由 MV.lyricStyle / PLAN.lyricStyle 指定） ───────────────
+   分工：样式只决定"怎么排、怎么动"；
+        逐字时间轴、淡入淡出、已唱判定由公共层算好传进来（任何样式都不许自己算时间）。
+   `band` 是默认，行为与旧版逐像素一致——没声明样式的老片子完全不受影响。 */
+
+/* 章节标签的中文映射（可被 PLAN.sectionLabels 覆盖） */
+const SEC_ZH = {
+  "Intro": "前奏", "Outro": "尾声", "Interlude": "间奏", "Bridge": "桥段",
+  "Chorus": "副歌", "Pre-Chorus": "导歌", "Verse": "主歌",
+};
+function secZh(s) {
+  if (!s) return "";
+  const custom = (PLAN && PLAN.sectionLabels) || {};
+  if (custom[s]) return custom[s];
+  const m = /^([A-Za-z][A-Za-z-]*)\s*(\d*)$/.exec(s.trim());
+  if (!m) return s;
+  const base = SEC_ZH[m[1]] || m[1];
+  if (!m[2]) return base;
+  const n = +m[2];
+  return base + ("一二三四五六七八九十"[n - 1] || n);
+}
+
+/* 公共层：把一句歌词的排版/时间信息一次算好 */
+function lyricParts(L, t, size) {
+  const chars = Array.from(L.text);
+  const n = chars.length;
+  const gap = Math.round(size * 0.10);
+  let total = 0;
+  for (const c of chars) total += measure(c, size, 900);
+  total += gap * (n - 1);
+  return {
+    chars, n, gap, total,
+    a: seg(L.start, L.start + 0.20, t + ANTICIPATE),
+    fade: 1 - seg(L.end - 0.26, L.end, t),
+    sca: 0.90 + 0.10 * back(seg(L.start, L.start + 0.34, t + ANTICIPATE)),
+    kara: Array.isArray(L.chars) && L.chars.length === n,
+  };
+}
+
+/* 单字状态：是否已唱、唱了多久、卡点包络 */
+function charState(L, t, i, n, kara) {
+  const ct = kara ? L.chars[i][1] : lerp(L.start, L.end, i / Math.max(1, n));
+  const age = t + ANTICIPATE - ct;
+  const on = age >= 0;
+  return { on, age, pop: on ? Math.exp(-age * 4) : 0 };
+}
+
+const LYRIC_STYLES = {
+  /* 居中横幅 + KTV 逐字（默认） */
+  band: { band: [96, 206], draw(t, L, o, K) {
+    const chars = K.chars, n = K.n, gap = K.gap, a = K.a, fade = K.fade;
+    const sca = K.sca, kara = K.kara;
+    const y = 150;
+    let x = (W - K.total) / 2, x0 = x, lastLit = null;
+    for (let i = 0; i < n; i++) {
+      const c = chars[i], w = measure(c, o.size, 900), st = charState(L, t, i, n, kara);
+      const s2 = sca * (1 + 0.12 * st.pop);
+      ctx.save();
+      ctx.globalAlpha = a * fade;
+      ctx.translate(x + w / 2, y);
+      ctx.scale(s2, s2);
+      drawText(c, 0, 0, {
+        size: o.size, fill: st.on ? o.lit : o.base,
+        shadow: o.dark ? "#080C18" : "#CFC6B4", blur: st.on ? 5 * st.pop + 3 : 0, offsetY: 4,
+      });
+      ctx.restore();
+      if (st.on) lastLit = x + w;
+      x += w + gap;
+    }
+    if (kara && lastLit !== null) {
+      ctx.globalAlpha = 0.72 * fade;
+      sh.rect(x0, y + o.size * 0.72, Math.max(0, lastLit - x0), 5, o.lit, 3);
+      ctx.globalAlpha = 1;
+    }
+  }},
+
+  /* 逐字蹦出：物理弹簧入场（会缩过头再弹回）+ 静止时的极轻微呼吸 */
+  shrink: { band: [96, 206], draw(t, L, o, K) {
+    const chars = K.chars, n = K.n, gap = K.gap, a = K.a, fade = K.fade;
+    const sca = K.sca, kara = K.kara;
+    const y = 150;
+    let x = (W - K.total) / 2;
+    for (let i = 0; i < n; i++) {
+      const c = chars[i], w = measure(c, o.size, 900), st = charState(L, t, i, n, kara);
+      if (!st.on) { x += w + gap; continue; }          /* 没唱到：不画 */
+      /* 弹簧：0→1 的过程会过冲（缩过头再弹回），这比 exp 曲线"有重量" */
+      const sp = spring(st.age, { damping: 15, stiffness: 380, mass: 1 });
+      const enter = clamp01(sp);
+      const scale = 1 + 0.42 * (1 - sp);
+      /* 静止后仍有 0.5~0.6px 的噪声漂移，字才不会像贴图 */
+      const nx = noise1(t * 1.7 + i * 13) * 0.6;
+      const ny = noise1(t * 2.1 + i * 7 + 100) * 0.5;
+      ctx.save();
+      ctx.globalAlpha = a * fade * enter;
+      ctx.translate(x + w / 2 + nx, y + ny);
+      ctx.scale(scale, scale);
+      drawText(c, 0, 0, {
+        size: o.size, fill: o.lit,
+        shadow: o.dark ? "#080C18" : "#CFC6B4", blur: 4 * st.pop + 2, offsetY: 4,
+      });
+      ctx.restore();
+      x += w + gap;
+    }
+  }},
+
+  /* 逐字落下：唱到的字从上方 10px 掉下来并淡入；没唱到的不画 */
+  bounce: { band: [96, 206], draw(t, L, o, K) {
+    const chars = K.chars, n = K.n, gap = K.gap, a = K.a, fade = K.fade;
+    const sca = K.sca, kara = K.kara;
+    const y = 150;
+    let x = (W - K.total) / 2, x0 = x, lastLit = null;
+    for (let i = 0; i < n; i++) {
+      const c = chars[i], w = measure(c, o.size, 900), st = charState(L, t, i, n, kara);
+      if (!st.on) { x += w + gap; continue; }        /* 没唱到：不画 */
+      const k = Math.exp(-st.age * 5.5);             /* 1 → 0 */
+      const dy = -10 * k;                            /* 从上方掉下来 */
+      ctx.save();
+      ctx.globalAlpha = a * fade * (1 - k);
+      ctx.translate(x + w / 2, y + dy);
+      ctx.scale(sca, sca);
+      drawText(c, 0, 0, {
+        size: o.size, fill: o.lit,
+        shadow: o.dark ? "#080C18" : "#CFC6B4", blur: 4 * st.pop + 2, offsetY: 4,
+      });
+      ctx.restore();
+      lastLit = x + w;
+      x += w + gap;
+    }
+    if (kara && lastLit !== null) {
+      ctx.globalAlpha = 0.66 * fade;
+      sh.rect(x0, y + o.size * 0.72, Math.max(0, lastLit - x0), 4, o.lit, 2);
+      ctx.globalAlpha = 1;
+    }
+  }},
+
+  /* 竖排靠右，逐字淡入，楷书——国风/古意 */
+  vertical: { band: [130, 520], scrim: "v", draw(t, L, o, K) {
+    const chars = K.chars, n = K.n, a = K.a, fade = K.fade, kara = K.kara;
+    const KAI = '"KaiTi","STKaiti","Kaiti SC","BiauKai","楷体",serif';
+    /* 竖排里空格不占行；字号按"有效字数"自适应 */
+    const rows = [];
+    for (let i = 0; i < n; i++) {
+      const ch = chars[i];
+      if (ch === " " || ch === "　" || ch === "\t") continue;
+      rows.push(i);
+    }
+    const rn = rows.length;
+    if (!rn) return;
+    const size = Math.min(o.size * 0.74, (H * 0.62) / rn / 1.24);
+    const lh = size * 1.24;
+    const x = W - 96;
+    const y0 = Math.max(126, (H - rn * lh) / 2 - 30);
+    let lastY = null;
+    for (let r = 0; r < rn; r++) {
+      const st = charState(L, t, rows[r], n, kara);
+      if (!st.on) continue;                      /* 没唱到：不画（逐字淡入） */
+      const k = Math.exp(-st.age * 7);           /* 1 → 0，约 0.3s */
+      ctx.save();
+      ctx.globalAlpha = a * fade * (1 - k);
+      ctx.translate(x, y0 + r * lh + lh / 2);
+      const s2 = 1 + 0.24 * k;
+      ctx.scale(s2, s2);
+      drawText(chars[rows[r]], 0, 0, {
+        size, weight: 700, font: KAI, fill: o.lit,
+        shadow: o.dark ? "#080C18" : "#CFC6B4", blur: 3, offsetY: 3,
+      });
+      ctx.restore();
+      lastY = y0 + r * lh + lh / 2;
+    }
+    if (kara && lastY !== null) {
+      ctx.globalAlpha = 0.62 * fade;
+      sh.rect(x - size * 0.60, y0, 3, Math.max(0, lastY - y0), o.lit, 2);
+      ctx.globalAlpha = 1;
+    }
+  }},
+
+  /* 贴底居中，逐字淡入——把整幅画面让出来 */
+  bottom: { band: [546, 664], draw(t, L, o, K) {
+    const chars = K.chars, n = K.n, gap = K.gap, a = K.a, fade = K.fade;
+    const sca = K.sca, kara = K.kara;
+    const y = H - 92;
+    let x = (W - K.total) / 2, x0 = x, lastLit = null;
+    for (let i = 0; i < n; i++) {
+      const c = chars[i], w = measure(c, o.size, 900), st = charState(L, t, i, n, kara);
+      if (!st.on) { x += w + gap; continue; }          /* 没唱到：不画 */
+      const k = Math.exp(-st.age * 7);                 /* 1 → 0，约 0.3s */
+      const s2 = sca * (1 + 0.30 * k);
+      ctx.save();
+      ctx.globalAlpha = a * fade * (1 - k);
+      ctx.translate(x + w / 2, y);
+      ctx.scale(s2, s2);
+      drawText(c, 0, 0, {
+        size: o.size, fill: o.lit,
+        shadow: o.dark ? "#080C18" : "#CFC6B4", blur: 4 * st.pop + 2, offsetY: 4,
+      });
+      ctx.restore();
+      lastLit = x + w;
+      x += w + gap;
+    }
+    if (kara && lastLit !== null) {
+      ctx.globalAlpha = 0.70 * fade;
+      sh.rect(x0, y + o.size * 0.72, Math.max(0, lastLit - x0), 5, o.lit, 3);
+      ctx.globalAlpha = 1;
+    }
+  }},
+
+  /* 小物件踩着歌词走 —— 没唱的字淡着，唱到的字被"踩亮"，一个小球一个字一个字走过去 */
+  walk: { band: [58, 206], draw(t, L, o, K) {
+    const chars = K.chars, n = K.n, gap = K.gap, a = K.a, fade = K.fade, kara = K.kara;
+    const y = 150;
+
+    /* 先定位"球正压着的字"——它要被压得抖一下，其余字不动 */
+    let k = -1;
+    for (let i = 0; i < n; i++) if (charState(L, t, i, n, kara).on) k = i;
+
+    let x = (W - K.total) / 2;
+    const centers = [];
+    for (let i = 0; i < n; i++) {
+      const c = chars[i], w = measure(c, o.size, 900), st = charState(L, t, i, n, kara);
+      centers.push(x + w / 2);
+
+      /* 被踩中的字：被压下去 → 弹起来（带一点过冲）→ 落定。只做纵向，不左右摇 */
+      let dy = 0, sq = 0;
+      if (i === k && st.on) {
+        sq = Math.exp(-st.age * 6) * Math.cos(st.age * 16);  /* +1 压到底 → 负数弹起 → 0 静止 */
+        dy = 14 * sq;
+      }
+
+      ctx.save();
+      ctx.globalAlpha = a * fade * (st.on ? 1 : 0.34);
+      ctx.translate(x + w / 2, y + dy);
+      if (sq) ctx.scale(1 + sq * 0.006, 1 - sq * 0.008);     /* 压扁一点，反弹时拉长一点 */
+      drawText(c, 0, 0, {
+        size: o.size, fill: st.on ? o.lit : o.base,
+        shadow: o.dark ? "#080C18" : "#CFC6B4", blur: st.on ? 3 : 0, offsetY: 4,
+      });
+      ctx.restore();
+      x += w + gap;
+    }
+
+    if (k < 0) return;
+
+    const st = charState(L, t, k, n, kara);
+    const p = clamp01(st.age / 0.26);
+    const fromX = k > 0 ? centers[k - 1] : centers[k];
+    const wx = lerp(fromX, centers[k], easeOut(p));
+    const step = Math.sin(p * Math.PI);              /* 迈步：抬起再落下 */
+    const ground = y - o.size * 0.44;                /* 字顶：球压住字的上沿 */
+    const R = 16;
+    const breath = Math.sin(t * 3.1) * 1.2 * (1 - step);
+    const cy = ground - R - step * 14 + breath;
+
+    /* 影子：跟着抬脚变淡变大 */
+    ctx.globalAlpha = a * fade * (0.34 - 0.18 * step);
+    ctx.fillStyle = "#000000";
+    ctx.beginPath(); ctx.ellipse(wx, ground + 5, 14 + 5 * step, 4.2, 0, 0, 7); ctx.fill();
+    ctx.globalAlpha = a * fade;
+
+    /* 一只脚落地、一只抬起来 */
+    ctx.strokeStyle = o.lit; ctx.lineWidth = 4.2; ctx.lineCap = "round";
+    ctx.beginPath(); ctx.moveTo(wx - 5, cy + R - 2); ctx.lineTo(wx - 7, cy + R + 2 + 6 * step); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(wx + 5, cy + R - 2); ctx.lineTo(wx + 8, cy + R + 2 - 5 * step); ctx.stroke();
+
+    /* 球身 */
+    ctx.fillStyle = o.lit;
+    ctx.beginPath(); ctx.arc(wx, cy, R, 0, 7); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,.58)";
+    ctx.beginPath(); ctx.arc(wx - R * 0.34, cy - R * 0.36, R * 0.26, 0, 7); ctx.fill();
+
+    /* 两只眼睛（朝前进方向看） */
+    ctx.fillStyle = "#1A1006";
+    ctx.beginPath(); ctx.arc(wx - 4, cy - 2, 2.3, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(wx + 4, cy - 2, 2.3, 0, 7); ctx.fill();
+  }},
+
+  /* 毛笔字：左侧竖两排，右列先写、左列接着写，落笔带墨晕——国风/书法 */
+  brush: { band: [130, 520], scrim: "none", draw(t, L, o, K) {
+    const chars = K.chars, n = K.n, a = K.a, fade = K.fade, kara = K.kara;
+    const BRUSH = '"STXingkai","KaiTi","STKaiti","Kaiti SC","楷体",serif';
+    /* 空格不占行 */
+    const rows = [];
+    for (let i = 0; i < n; i++) {
+      const ch = chars[i];
+      if (ch === " " || ch === "　" || ch === "\t") continue;
+      rows.push(i);
+    }
+    const rn = rows.length;
+    if (!rn) return;
+
+    /* 竖两排：每列 ceil(rn/2) 字；右列先写（传统从右往左） */
+    const perCol = Math.ceil(rn / 2);
+    const size = Math.min(o.size * 0.82, (H * 0.60) / perCol / 1.26);
+    const lh = size * 1.26;
+    const xLeft = 96;                        /* 左列 */
+    const xRight = xLeft + size * 1.62;      /* 右列（先写） */
+    const y0 = Math.max(126, (H - perCol * lh) / 2 - 30);
+    const ink = o.dark ? "#F4EAD6" : "#1A1410";
+    let lastY = null, lastX = xRight;
+
+    for (let r = 0; r < rn; r++) {
+      const st = charState(L, t, rows[r], n, kara);
+      if (!st.on) continue;
+      const k = Math.exp(-st.age * 6);
+      const col = Math.floor(r / perCol);          /* 0 = 右列 */
+      const cx = col === 0 ? xRight : xLeft;
+      const cy = y0 + (r % perCol) * lh + lh / 2;
+
+      /* 落笔墨晕：只在刚写上的一瞬出现，向外洇开 */
+      if (k > 0.02) {
+        const halo = size * (1.0 + (1 - k) * 1.0);
+        const hg = ctx.createRadialGradient(cx, cy, size * 0.10, cx, cy, halo);
+        hg.addColorStop(0, hexA(ink, 0.22 * k));
+        hg.addColorStop(0.5, hexA(ink, 0.10 * k));
+        hg.addColorStop(1, hexA(ink, 0));
+        ctx.fillStyle = hg;
+        ctx.beginPath(); ctx.arc(cx, cy, halo, 0, 7); ctx.fill();
+      }
+
+      ctx.save();
+      ctx.globalAlpha = a * fade * (1 - k);
+      ctx.translate(cx, cy + size * 0.05 * k);     /* 落笔时微微一顿 */
+      const s2 = 1 + 0.22 * k;
+      ctx.scale(s2, s2);
+      drawText(chars[rows[r]], 0, 0, {
+        size, weight: 400, font: BRUSH, fill: ink,
+        shadow: o.dark ? "#000000" : "#FFFFFF", blur: 7, offsetY: 2,
+      });
+      ctx.restore();
+      lastY = cy; lastX = cx;
+    }
+
+    if (kara && lastY !== null) {
+      /* 一条细墨线，像笔锋一路拖下来 */
+      ctx.globalAlpha = 0.42 * fade;
+      sh.rect(lastX + size * 0.46, y0, 2.4, Math.max(0, lastY - y0), ink, 1);
+      ctx.globalAlpha = 1;
+    }
+  }},
+
+  /* 遮罩揭示：字从下方"擦"上来，像从地里长出来 */
+  wipe: { band: [96, 206], draw(t, L, o, K) {
+    const chars = K.chars, n = K.n, gap = K.gap, a = K.a, fade = K.fade;
+    const kara = K.kara;
+    const y = 150;
+    let x = (W - K.total) / 2, x0 = x, lastLit = null;
+    for (let i = 0; i < n; i++) {
+      const c = chars[i], w = measure(c, o.size, 900), st = charState(L, t, i, n, kara);
+      if (!st.on) { x += w + gap; continue; }
+      const sp = clamp01(spring(st.age, { damping: 18, stiffness: 300, mass: 1 }));
+      const h = o.size * 1.16;
+      const reveal = h * sp;
+      ctx.save();
+      ctx.globalAlpha = a * fade;
+      ctx.beginPath();
+      ctx.rect(x, y - h * 0.52 + (h - reveal), w, reveal);
+      ctx.clip();
+      drawText(c, x + w / 2, y, {
+        size: o.size, fill: o.lit,
+        shadow: o.dark ? "#080C18" : "#CFC6B4", blur: 3, offsetY: 4,
+      });
+      ctx.restore();
+      lastLit = x + w;
+      x += w + gap;
+    }
+    if (kara && lastLit !== null) {
+      ctx.globalAlpha = 0.70 * fade;
+      sh.rect(x0, y + o.size * 0.72, Math.max(0, lastLit - x0), 5, o.lit, 3);
+      ctx.globalAlpha = 1;
+    }
+  }},
+};
+
+/* 每种版式在画面上占的矩形 [x0, y0, x1, y1] —— 画面据此避让（别把主体放进去） */
+const LYRIC_BOX = {
+  band:     [0, 96, W, 206],
+  shrink:   [0, 96, W, 206],
+  bounce:   [0, 96, W, 206],
+  wipe:     [0, 96, W, 206],
+  walk:     [0, 52, W, 206],          /* 多了小球站在字上方的高度 */
+  vertical: [W - 200, 130, W, 520],
+  bottom:   [0, 546, W, 664],
+  brush:    [80, 130, 340, 520],      /* 左侧两列 */
+};
+Object.keys(LYRIC_BOX).forEach(k => { if (LYRIC_STYLES[k]) LYRIC_STYLES[k].box = LYRIC_BOX[k]; });
+
+function lyricStyleName() {
+  return (window.MV && window.MV.lyricStyle) || (PLAN && PLAN.lyricStyle) || "";
+}
+function lyricStyleDef() {
+  return LYRIC_STYLES[lyricStyleName()] || LYRIC_STYLES.band;
+}
+function lyricBoxDef() {
+  return lyricStyleDef().box || LYRIC_BOX[lyricStyleName()] || LYRIC_BOX.band;
+}
+
+/* 歌词渲染入口（保持旧签名，内部转给样式库） */
+function drawLyrics(t, L, o = {}) {
+  if (!L) return;
+  const dark = o.dark !== undefined ? o.dark : true;
+  /* 长句自动缩字号，保证不越出左右安全边（旧行为，必须保留） */
+  const want = o.size || 84;
+  const nc = Array.from(L.text).length;
+  const size = Math.min(want, Math.floor((W - 180) / Math.max(1, nc)));
+  lyricStyleDef().draw(t, L, {
+    size, dark,
+    base: o.base || (dark ? P.paper : P.ink),
+    lit: o.lit || P.gold,
+  }, lyricParts(L, t, size));
+}
+
+/* 歌词带蒙版：范围/方向跟随当前样式（横排盖一条，竖排盖一侧） */
+function lyricScrim(dark) {
+  const st = lyricStyleDef();
+  const B = st.band;
+  if (st.scrim === "none") return;          /* 黑字宣纸这类自带对比度的，不要蒙版 */
+  const ink = dark ? "#000000" : "#FFFFFF";
+  if (st.scrim === "v" || st.scrim === "vl") {
+    const left = st.scrim === "vl";
+    const w = 200;
+    const g = left
+      ? ctx.createLinearGradient(0, 0, w, 0)
+      : ctx.createLinearGradient(W - w, 0, W, 0);
+    g.addColorStop(0, hexA(ink, left ? 0.42 : 0));
+    g.addColorStop(0.5, hexA(ink, 0.42));
+    g.addColorStop(1, hexA(ink, left ? 0 : 0.42));
+    ctx.fillStyle = g;
+    ctx.fillRect(left ? 0 : W - w, B[0] - 40, w, (B[1] - B[0]) + 80);
+    return;
+  }
+  const g = ctx.createLinearGradient(0, B[0] - 46, 0, B[1] + 40);
+  g.addColorStop(0, hexA(ink, 0));
+  g.addColorStop(0.5, hexA(ink, 0.42));
+  g.addColorStop(1, hexA(ink, 0));
+  ctx.fillStyle = g;
+  ctx.fillRect(0, B[0] - 46, W, (B[1] - B[0]) + 86);
+}
+
+/* ─────────────── 引擎 chrome：章节 / 进度 ───────────────
+   全部可配（PLAN.chrome 或 MV.chrome）；默认值与旧版一致，不声明就完全不变。 */
+const CHROME_DEFAULT = { section: "en", sectionAt: "top-left", progress: "top" };
+function chromeCfg() {
+  const src = (window.MV && window.MV.chrome) || (PLAN && PLAN.chrome) || {};
+  return Object.assign({}, CHROME_DEFAULT, src);
+}
+
+function chrome(t, L, dark, total) {
+  const CH = chromeCfg();
+  const lines = TL.lines;
+  if (!lines.length) return;
+  const col = dark ? P.paper : P.ink;
+
+  /* 章节标签：可英文 / 中文 / 隐藏，四个角都能放 */
+  if (CH.section !== "hide" && L) {
+    const raw = L.section || "";
+    const txt = raw ? (CH.section === "zh" ? secZh(raw) : raw) : "";
+    if (txt) {
+      const wch = measure(txt, 15, 700) + 26;
+      const at = CH.sectionAt || "top-left";
+      const right = at.indexOf("right") >= 0;
+      const bottom = at.indexOf("bottom") >= 0;
+      const x = right ? W - 38 - wch : 38;
+      const y = bottom ? H - 52 : 26;
+      ctx.globalAlpha = 0.75;
+      sh.rect(x, y, wch, 26, dark ? hexA("#FFFFFF", 0.14) : hexA("#000000", 0.10), 13);
+      drawText(txt, x + wch / 2, y + 14, { size: 15, weight: 700, fill: col, alpha: 0.9 });
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  /* 进度条：可顶部 / 底部 / 隐藏 */
+  if (CH.progress !== "hide") {
+    const pw = W - 76;
+    const py = CH.progress === "bottom" ? H - 30 : 66;
+    ctx.globalAlpha = 0.22;
+    sh.rect(38, py, pw, 3, dark ? P.white : P.black, 2);
+    ctx.globalAlpha = 0.8;
+    sh.rect(38, py, pw * clamp01(t / total), 3, P.gold, 2);
+    ctx.globalAlpha = 1;
+  }
+}
+
+/* ─────────────── 分镜调度 ─────────────── */
+const BAR = 4 * BEAT;
+const pickCard = (cards, idx) => {
+  if (!cards || !cards.length) return null;
+  let acc = 0;
+  for (const c of cards) {
+    const n = c.bars || 4;
+    if (idx < acc + n) return { c, start: OFF + acc * BAR, len: n * BAR };
+    acc += n;
+  }
+  const c = cards[cards.length - 1], n = c.bars || 4;
+  return { c, start: OFF + (acc - n) * BAR, len: n * BAR };
+};
+
+function seek(tRaw) {
+  const t = clamp(tRaw, 0, Math.max(0, DUR - 1e-6));
+  window.__mvError = null;                  /* 每帧重置错误探针，避免上一帧的错串过来 */
+
+  /* 时间 → 拍域（连续值，不受帧率限制） */
+  const bp = (t - OFF) / BEAT;
+  const bi = Math.floor(bp);
+  const ph = bp - bi;                       // 拍内相位
+  const barIdx = Math.floor(bp / 4);
+  const strong = Math.pow(1 - ph, 4);       // 4 拍一次的强拍包络（只用于位移/形变）
+  const pulse = (k = 6) => Math.exp(-ph * k);
+  const hit = (every = 1) => (bi % every === 0) && ph < 0.5;
+
+  const lines = TL.lines;
+  let li = -1;
+  for (let k = 0; k < lines.length; k++) { if (t + ANTICIPATE >= lines[k].start) li = k; else break; }
+  const L = (li >= 0 && t <= lines[li].end + 0.45) ? lines[li] : null;
+  const firstStart = lines.length ? lines[0].start : 0;
+  const lastEnd = lines.length ? lines[lines.length - 1].end : 0;
+
+  /* 选出这一帧该画哪块：故事镜头 / 正片 / 片头 / 尾奏 / 间奏。
+     故事镜头（MV.shots）按绝对时间覆盖，可跨多句歌词；没有 shots 时完全走旧逻辑。 */
+  let node = null, kind = "", cardT = t, cardU = 0;
+  const SC = window.MV.scenes || [], IN = window.MV.intro || [],
+        OU = window.MV.outro || [], IL = window.MV.interludes || [],
+        SH = window.MV.shots || [];
+  let shot = null, shotIdx = -1;
+  for (let k = 0; k < SH.length; k++) {
+    const s = SH[k];
+    if (t >= s.start && t < s.end) { shot = s; shotIdx = k; break; }
+  }
+
+  if (shot) {
+    node = shot; kind = "scene";
+    cardT = t - shot.start;
+    cardU = clamp01(cardT / Math.max(0.2, shot.end - shot.start));
+  } else if (L) {
+    node = SC[Math.min(li, SC.length - 1)] || null;
+    kind = "scene"; cardT = t - L.start; cardU = clamp01((t - L.start) / Math.max(0.2, L.end - L.start));
+  } else if (t + ANTICIPATE < firstStart) {
+    const p = pickCard(IN, barIdx);
+    if (p) { node = p.c; kind = "intro"; cardT = t - p.start; cardU = clamp01((t - p.start) / Math.max(.2, p.len)); }
+  } else if (t > lastEnd) {
+    const p = pickCard(OU, Math.floor((t - lastEnd) / BAR));
+    if (p) { node = p.c; kind = "outro"; cardT = t - p.start; cardU = clamp01((t - p.start) / Math.max(.2, p.len)); }
+  } else {
+    /* 间奏：找"最近一句唱完之后的空档" */
+    let prev = -1;
+    for (let k = 0; k < lines.length; k++) { if (lines[k].start < t) prev = k; else break; }
+    const gapStart = prev >= 0 ? lines[prev].end : 0;
+    const gapEnd = (prev + 1 < lines.length) ? lines[prev + 1].start : DUR;
+    const inter = IL.find(x => x.afterLine === prev) || IL.find(x => Math.abs((x.from || -1) - gapStart) < 0.75);
+    if (inter && inter.cards && inter.cards.length) {
+      const base = Math.floor((gapStart - OFF) / BAR);
+      const p = pickCard(inter.cards, Math.max(0, barIdx - base));
+      if (p) { node = p.c; kind = "interlude"; cardT = Math.max(gapStart, p.start) - gapStart; cardU = clamp01(cardT / Math.max(.2, gapEnd - gapStart)); }
+    }
+    if (!node) { node = window.MV.filler || null; kind = "gap"; cardT = t - gapStart; cardU = clamp01(cardT / Math.max(.2, gapEnd - gapStart)); }
+  }
+
+  const bg = (node && node.bg) || P.night;
+  const dark = isDark(bg);
+
+  /* ── 交给 LLM 的画：一个干净的环境对象 ── */
+  const e = {
+    ctx, W, H, t, dt: 1 / FPS,
+    i: li, n: lines.length, line: L, kind, cardT, cardU,
+    u: cardU, shotT: cardT,
+    shot: shot, shotIndex: shotIdx, isShot: !!shot, shotU: cardU,
+    shotDur: shot ? Math.max(0.2, shot.end - shot.start)
+                  : (L ? Math.max(0.2, L.end - L.start) : DUR),
+    /* 摄影机：默认 1:1；scene.camera(e) 可覆盖 */
+    cam: camDefault(),
+    camPath: (keys) => camPath(keys, e),
+    camGrid: (o) => camGrid(e, o),
+    /* 屏幕空间：标题/标签/颗粒，不受摄影机缩放影响 */
+    screen: (fn) => {
+      ctx.save();
+      try { ctx.setTransform(1, 0, 0, 1, 0, 0); if (fn) fn(); }
+      finally { ctx.restore(); }
+    },
+    /* 视差层：0=锁屏，1=主世界，>1=前景 */
+    layer: (depth, fn) => {
+      ctx.save();
+      try { applyLayer(e.cam, depth); if (fn) fn(); }
+      finally { ctx.restore(); }
+    },
+    beat: bp, beatIdx: bi, bar: barIdx, phase: ph,
+    bpm: TL.bpm || 60 / BEAT,
+    strong, pulse, hit,
+    /* 确定性随机：纯函数，同 seed 恒同值（不许用 Math.random，会让逐帧不可复现） */
+    rnd: (s) => hash(s),
+    hash, clamp, clamp01, lerp, seg, easeOut, easeIn, easeIO, back, elastic, wave,
+    P, sh, drawText, drawParagraph, measure, hexA, isDark,
+    /* 精灵素材：e.sprite("walk", x, y脚底, {scale, t0, loop, anchor}) */
+    sprite: (name, x, y, o) => drawSprite(name, x, y, Object.assign({ t: t }, o || {})),
+    sprites: SPRITES,
+    /* 本地图片素材（引擎按 MV.assets 声明生成、落到项目 assets/，无外链）：
+       e.drawImg(key, x, y, w, h, {mode:"cover"|"contain"|"stretch", alpha}) 返回是否画成功；
+       e.img(key) 直接取 Image 对象（不可用时为 null）；e.imgSize(key) 取原始像素尺寸。 */
+    drawImg: (name, x, y, w, h, o) => {
+      const img = imageOf(name);
+      if (!img) return false;
+      const opt = o || {};
+      ctx.save();
+      if (opt.alpha !== undefined) ctx.globalAlpha = clamp01(opt.alpha);
+      drawImageFit(img, x, y, w, h, opt.mode || "cover");
+      ctx.restore();
+      return true;
+    },
+    img: (name) => imageOf(name),
+    imgSize: (name) => {
+      const i = imageOf(name);
+      return i ? { w: i.naturalWidth, h: i.naturalHeight } : null;
+    },
+    /* 人物：四种皮肤共用一套骨架。e.actor({style,x,y,scale,dir,pose,phase,hug,hair,cloth,dress}) */
+    actor: (o) => drawActor(e, Object.assign({ t: t }, o || {})),
+    actorStyles: ACTOR_STYLES,
+    actorPoses: ACTOR_POSES,
+    bg: paintBg, scrim: lyricScrim, dark,
+    plan: PLAN,
+    /* 歌词版式信息：画面据此避让（lyricBox 是完整矩形，lyricBand 只给 y 范围，兼容旧码） */
+    lyricStyle: lyricStyleName(),
+    lyricBand: lyricStyleDef().band,
+    lyricBox: lyricBoxDef(),
+    lines, dur: DUR, barSec: BAR,
+    chars: L && Array.isArray(L.chars) ? L.chars : null,
+    /* 该句已唱到的字序号（-1 表示还没开口）；做逐字叙事时很有用 */
+    sung: (() => {
+      if (!L || !Array.isArray(L.chars)) return -1;
+      let k = -1;
+      for (let j = 0; j < L.chars.length; j++) if (t + ANTICIPATE >= L.chars[j][1]) k = j;
+      return k;
+    })(),
+  };
+  window.__e = e;            /* 供 API 清单导出器读取；对画面无任何影响 */
+
+  /* 0) 摄影机：scene.camera(e) 只算一次，draw 全程用同一台机器 */
+  let cam = camDefault();
+  if (node && typeof node.camera === "function") {
+    try { cam = camNormalize(node.camera(e)); }
+    catch (err) { window.__mvError = String((err && err.stack) || err); }
+  }
+  e.cam = cam;
+
+  /* 1) 背景（屏幕空间，永远铺满视口） */
+  paintBg(bg, (node && node.vignette !== undefined) ? { vignette: node.vignette } : {});
+  /* 2) LLM 的画面（世界坐标 + 摄影机） */
+  let drawError = null;
+  ctx.save();
+  applyCamera(cam);
+  try {
+    if (node && typeof node.draw === "function") node.draw(e);
+    if (kind === "scene" && L && typeof window.MV.lyricFx === "function") window.MV.lyricFx(e);
+  } catch (err) {
+    drawError = err;
+  }
+  ctx.restore();
+  if (drawError) {
+    window.__mvError = String((drawError && drawError.stack) || drawError);
+    ctx.fillStyle = "#7A1F1F"; ctx.fillRect(0, 0, W, H);
+    drawText("画面代码出错：" + String(drawError && drawError.message || drawError),
+      W / 2, H / 2, { size: 24, fill: "#fff", maxW: W - 120 });
+  }
+  /* 3) 引擎 chrome：安全蒙版 + KTV 歌词 + 章节/进度
+        __noChrome 只给运动探针用：判断"这一镜本身有没有动"时，
+        必须排除歌词跳字和进度条——它们一直在动，会把静止镜头盖过去。 */
+  if (!window.__noChrome && !PLAIN) {
+    if (kind === "scene") {
+      lyricScrim(dark);
+      drawLyrics(t, L, { dark, size: (node && node.lyricSize) || 84 });
+    }
+    chrome(t, L, dark, DUR);
+  }
+
+  window.__mvKind = kind;
+  window.__mvLine = li;
+  return t;
+}
+
+/* ─────────────── 给校验器用的探针 ─────────────── */
+window.frameHash = function () {
+  const d = ctx.getImageData(0, 0, W, H).data;
+  let h = 2166136261;
+  for (let i = 0; i < d.length; i += 997) { h ^= d[i]; h = Math.imul(h, 16777619) >>> 0; }
+  const lum = (d[0] * 0.299 + d[1] * 0.587 + d[2] * 0.114);
+  return { hash: h >>> 0, r: d[0], g: d[1], b: d[2], lum0: lum };
+};
+/* 画面是否"什么都没动"：把两帧缩到 240x135 再逐像素比。
+   为什么先降采样：细线（雨丝、涟漪）和亚像素位移在全分辨率稀疏取样下几乎采不到，
+   会误判成静止；缩到小图后每格是 5x5 的均值，这类运动就显出来了。
+   返回 { mean, changed }：mean = 平均亮度差(0~255)，changed = 变化>4 级的像素占比(0~1)。 */
+window.motionScore = function (t1, t2) {
+  const w = 240, h = 135;
+  const off = document.createElement("canvas");
+  off.width = w; off.height = h;
+  const oc = off.getContext("2d", { willReadFrequently: true });
+  const grab = (t) => {
+    seek(t);
+    oc.drawImage(cv, 0, 0, w, h);
+    return oc.getImageData(0, 0, w, h).data;
+  };
+  window.__noChrome = true;
+  const a = grab(t1);
+  const b = grab(t2);
+  window.__noChrome = false;
+  const n = w * h;
+  let sum = 0, changed = 0;
+  for (let i = 0; i < n; i++) {
+    const p = i * 4;
+    const la = a[p] * 0.299 + a[p + 1] * 0.587 + a[p + 2] * 0.114;
+    const lb = b[p] * 0.299 + b[p + 1] * 0.587 + b[p + 2] * 0.114;
+    const d = Math.abs(la - lb);
+    sum += d;
+    if (d > 4) changed++;
+  }
+  return { mean: sum / n, changed: changed / n };
+};
+/* 抽查：这一帧是不是"空"（整幅几乎同色）；以及画面是否越出安全区由像素验收负责 */
+window.probe = function (t) {
+  seek(t);
+  const d = ctx.getImageData(0, 0, W, H).data;
+  let min = 255, max = 0, sum = 0, n = 0;
+  for (let i = 0; i < d.length; i += 401 * 4) {
+    const l = d[i] * 0.299 + d[i + 1] * 0.587 + d[i + 2] * 0.114;
+    if (l < min) min = l; if (l > max) max = l; sum += l; n++;
+  }
+  return { t, kind: window.__mvKind, line: window.__mvLine,
+           meanLum: sum / n, range: max - min, error: window.__mvError || null };
+};
+
+window.MV = Object.assign(window.MV || {}, {
+  W, H, FPS, TL, PLAN, P, seek, drawText, drawParagraph, measure, sh, hash,
+  img: imageOf, imgSize: (name) => {
+    const i = imageOf(name);
+    return i ? { w: i.naturalWidth, h: i.naturalHeight } : null;
+  },
+  scenes: [], intro: [], interludes: [], outro: [], filler: null,
+  /* 供校验器读取：可用的歌词版式清单与各自占用区（避免校验器里再抄一份） */
+  lyricStyles: Object.keys(LYRIC_STYLES),
+  lyricBoxes: LYRIC_BOX,
+});
+/* ── API 自描述 ──
+   给 api_spec.py 导出用：只登记"光看形参名说不清"的接口。
+   说明写在引擎里而不是提示词里，实现一改说明跟着改，不会漂移。 */
+window.__apiDoc = {
+  "e.sprite": [
+    "画序列帧素材（透明 PNG 序列，已离线烘焙，渲染时不联网）。",
+    "e.sprite(name, x, y, { scale, t0, loop, anchor })",
+    "  x,y = 底边中点；anchor 调水平锚点（0=左 / 0.5=中 / 1=右）；",
+    "  loop:false 只播一遍并停在末帧。可用素材名见 e.sprites 的键。",
+  ].join("\n"),
+  "e.actor": [
+    "画一个人（四种皮肤共用一套骨架：换 style 不换动作）。",
+    "e.actor({ style, x, y, scale, dir, pose, phase, hug, hair, cloth, dress, pixelate })",
+    "  style: " + ACTOR_STYLES.join(" | "),
+    "  x,y = 脚底中心；dir: 1 朝右 / -1 朝左；scale 1.0 ≈ 250px 高。",
+    "  pose: " + ACTOR_POSES.join(" | ") + "；walk/run 用 phase（一般 e.t*1.6）驱动步态。",
+    "  hug: 0~1，叠加拥抱（在 walk/stand 之上混合，可做“走过去抱住”）。",
+    "  hair: short | long | bun | bob；cloth: 衣服主色；dress:true 画长裙，否则画大衣。",
+    "  pixelate: 像素块大小（≥2 生效，6~10 适合像素风格）；会把人物附近连同背景一起像素化。",
+    "  例：e.actor({style:'shadow', x:520, y:620, dir:1, pose:'walk', phase:e.t*1.6});",
+    "  皮影/水墨为剪影，没有五官；扁平/绘本有简单五官。",
+  ].join("\n"),
+  "scene.camera": [
+    "在 scene 对象上可选：camera(e) { return { x, y, zoom }; }",
+    "  x,y = 视口中心对准的世界坐标（默认 W/2,H/2）；zoom=1 为原始视口。",
+    "  用 e.camPath([{u,x,y,zoom}, ...]) 做确定性关键帧：u=0~1 是当前镜头内进度；",
+    "  只给 zoom 时 x/y 沿用上一个关键帧；也可以写 t（秒）代替 u。",
+    "  关键帧加 cut:true 表示硬切：切点之前保持上一格，到 u 瞬间跳过去，不做缓动。",
+    "  大画布分格用 e.camGrid({cols,rows,cellW,cellH,order,weights,moves}) 一次生成。",
+    "  开了 camera 后 draw 里仍是世界坐标；标题/标签/颗粒请包进 e.screen(fn)。",
+  ].join("\n"),
+  "e.camGrid": [
+    "大画布分格 + 跳格：e.camGrid({ cols, rows, cellW, cellH, order, weights, moves })",
+    "  cols×rows = 格子总数，cellW/cellH = 每格尺寸（一般等于视口）；",
+    "  order = 播放顺序（格号从 0 开始，按行优先），weights = 每格时长权重；",
+    "  moves = { 格号或序号: { zoom, x, y } }，给该格在停留期间加推拉/横移；",
+    "  x/y 是相对该格中心的偏移（正数向右/向下），只写 zoom 就围绕中心推。",
+    "  返回值 e.cam 带 seg（第几段）、segU（该段 0~1）、cell（当前格号）。",
+    "  draw 里用 e.cam.cell 判断当前格，e.cam.segU 驱动该格自己的动画。",
+  ].join("\n"),
+  "e.screen": [
+    "e.screen(fn)：在屏幕空间画（不受 camera 缩放/位移影响），适合标题、标签、颗粒。",
+    "  例：e.screen(() => e.drawText('最后一次', 960, 120, {size:64, fill:'#E9A63B'}));",
+  ].join("\n"),
+  "e.layer": [
+    "e.layer(depth, fn)：视差层。depth=0 锁屏，1=主世界（与 draw 相同），>1 前景移动更快。",
+    "  背景层建议 depth 0.3~0.6，前景雨/尘 depth 1.1~1.4；每层都要自己画得比视口大。",
+  ].join("\n"),
+  "e.drawImg": [
+    "画一张本地图片素材（由引擎按 MV.assets 声明生成并落盘到本段 assets/，无外链）。",
+    "e.drawImg(key, x, y, w, h, { mode, alpha })",
+    "  mode: cover（默认，铺满并裁掉多余）/ contain（完整显示）/ stretch（拉伸）；",
+    "  alpha: 0~1 透明度；返回 false 表示这张图不可用，此时请用图形兜底。",
+    "  可用 key 见本段 MV.assets 的键；图片是静态位图，运动靠相机/位移/缩放/视差驱动。",
+  ].join("\n"),
+  "e.img": [
+    "e.img(key)：取已加载的 Image 对象（不可用时为 null），用于自定义裁剪/遮罩绘制。",
+    "e.imgSize(key)：取原始像素尺寸 { w, h }（不可用时为 null）。",
+    "  直接画请优先用 e.drawImg；需要自己算裁切/多重描边时才取 Image 对象。",
+  ].join("\n"),
+};
+
+window.seek = seek;
+/* 素材是异步加载的：有素材就等图全部 onload，没有就立刻 ready（老片子零影响） */
+window.ready = false;
+loadSprites();
+loadImages();
+if (_pendingAssets === 0) window.ready = true;
+</script>
+</body>
+</html>

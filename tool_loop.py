@@ -27,8 +27,10 @@ from custom_agent_manager import custom_agent_manager, is_agent_tool
 from context_manager import (
     ContextTracker, SessionState, CompactResult,
     estimate_tokens, compact_if_needed,
-    apply_model_specific_params, CHARS_PER_TOKEN,
+    apply_model_specific_params, resolve_effective_protocol, keep_thinking_history,
+    CHARS_PER_TOKEN,
 )
+from model_presets import find_preset
 from file_diff_tracker import file_diff_tracker, _diff_has_changes
 from sigma_logger import log
 
@@ -47,6 +49,18 @@ def _cancel_questionnaire_retransmit(request_id: str):
 
 # request_id -> asyncio.Future (用于 tool_timeout 等待用户选择)
 _pending_tool_timeouts: dict[str, asyncio.Future] = {}
+
+# 长任务视频工具：不设超时，一直跑到完成（避免没做完就被判超时/跳过）。
+# 覆盖：影视级生成、HTML 动画、水彩逐帧渲染、合成（含规格归一化重编码）。
+_NO_TIMEOUT_TOOLS = {
+    "director",
+    "video_cinematic_generate",
+    "opendesign_video",
+    "manim_video",
+    "blender_video",
+    "compose_video",
+    "lyric_mv",
+}
 
 
 def resolve_tool_timeout(request_id: str, choice: str) -> bool:
@@ -68,15 +82,59 @@ def resolve_questionnaire(session_id: str, answers: list[dict]) -> bool:
     return False
 
 
+# 文本字段候选键：不同模型会用不同命名承载同一语义，在边界处统一取用。
+_TEXT_KEYS = (
+    "text", "label", "value", "title", "content",
+    "question", "prompt", "name", "description", "desc",
+)
+# 集合容器候选键：分别用于从包裹对象中取出问题列表、选项列表。
+_QUESTION_COLLECTION_KEYS = ("questions", "question_list", "questions_list", "items", "list", "data")
+_OPTION_COLLECTION_KEYS = ("items", "item", "options", "choices", "values", "list", "data")
+
+# 题型别名 -> 前端契约值。仅用于把外部输入的同义写法收敛到固定契约，
+# 属于系统边界归一化，不参与任何打分或匹配决策。
+_QUESTION_TYPE_ALIASES = {
+    "single_choice": "single_choice", "single": "single_choice", "singlechoice": "single_choice",
+    "single_select": "single_choice", "single-select": "single_choice", "radio": "single_choice",
+    "choice": "single_choice", "select": "single_choice", "one": "single_choice",
+    "单选": "single_choice", "单选题": "single_choice",
+    "multi_choice": "multi_choice", "multiple_choice": "multi_choice", "multichoice": "multi_choice",
+    "multi": "multi_choice", "multiple": "multi_choice", "multi_select": "multi_choice",
+    "multi-select": "multi_choice", "checkbox": "multi_choice", "checkboxes": "multi_choice",
+    "多选": "multi_choice", "多选题": "multi_choice",
+    "open": "open", "text": "open", "input": "open", "textarea": "open", "free": "open",
+    "freeform": "open", "free_text": "open", "open_ended": "open",
+    "开放": "open", "问答": "open", "填空": "open",
+}
+
+
+def _load_json_like(value):
+    """尝试把 JSON 字符串（含 ``` 代码围栏）解析为 Python 对象；失败则原样返回。
+
+    某些模型/网关会把嵌套的数组或对象参数序列化成字符串再塞进 arguments，
+    这里在边界处统一还原，避免把合法输入判为非法。"""
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z0-9_-]*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text).strip()
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return value
+
+
 def _questionnaire_text(value, field: str) -> str | None:
     """将 LLM 输出的文本值规范为前端可直接渲染的字符串。"""
+    value = _load_json_like(value)
     if isinstance(value, str):
         value = value.strip()
         return value or None
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return str(value)
     if isinstance(value, dict):
-        for key in ("label", "text", "value"):
+        for key in _TEXT_KEYS:
             text = _questionnaire_text(value.get(key), field)
             if text:
                 return text
@@ -84,49 +142,124 @@ def _questionnaire_text(value, field: str) -> str | None:
 
 
 def _questionnaire_options(value) -> list[str] | None:
-    """从直接数组或常见集合容器中提取选择项，并规范为字符串数组。"""
+    """从直接数组、JSON 字符串、包裹对象或映射中提取选择项，规范为字符串数组。"""
+    value = _load_json_like(value)
     if isinstance(value, dict):
-        for key in ("items", "item", "options"):
+        for key in _OPTION_COLLECTION_KEYS:
             if key in value:
-                return _questionnaire_options(value[key])
-        return None
+                picked = _questionnaire_options(value[key])
+                if picked:
+                    return picked
+        # 形如 {"选项A": "说明", "选项B": "说明"} 的映射：取键作文本项
+        if value and all(
+            isinstance(v, (str, int, float)) and not isinstance(v, bool)
+            for v in value.values()
+        ):
+            return [str(k) for k in value]
+        # 单个选项对象：{"text": "..."} / {"label": "..."}
+        single = _questionnaire_text(value, "option")
+        return [single] if single else None
     if not isinstance(value, list):
         return None
+    # 单层嵌套列表 [[...]] 展平
     if len(value) == 1 and isinstance(value[0], list):
         value = value[0]
     options = [_questionnaire_text(option, "option") for option in value]
-    return options if options and all(option is not None for option in options) else None
+    options = [option for option in options if option is not None]
+    return options or None
+
+
+def _normalize_question_type(value, has_options: bool) -> str:
+    """将题型写法归一化到契约枚举；无法识别时按有无选项推断，避免整体失败。"""
+    text = _questionnaire_text(value, "type")
+    if text:
+        key = text.strip().lower().replace(" ", "_")
+        if key in _QUESTION_TYPE_ALIASES:
+            return _QUESTION_TYPE_ALIASES[key]
+    return "single_choice" if has_options else "open"
+
+
+def _coerce_question_list(value) -> list:
+    """把 questions 的多种形态收敛为问题对象列表。
+
+    兼容：JSON 字符串 / 包裹对象（含 questions、items 等键）/ 单个问题对象 / 数组。"""
+    value = _load_json_like(value)
+    if isinstance(value, dict):
+        for key in _QUESTION_COLLECTION_KEYS:
+            if key in value:
+                nested = _coerce_question_list(value[key])
+                if nested:
+                    return nested
+        # 看起来像一个问题对象时包成单元素列表
+        if any(k in value for k in ("text", "question", "title", "type", "options", "id")):
+            return [value]
+        return []
+    if isinstance(value, list):
+        if len(value) == 1 and isinstance(value[0], list):
+            value = value[0]
+        return [item for item in value if isinstance(item, (dict, str))]
+    return []
 
 
 def _normalize_questionnaire(tool_input) -> tuple[dict | None, str | None]:
-    """将不同模型的 ask_user 参数收敛为固定的前端问卷契约。"""
+    """将不同模型的 ask_user 参数宽容地收敛为固定的前端问卷契约。
+
+    只做边界归一化，尽量不因模型的表述差异而拒绝：questions 允许 JSON 字符串、
+    包裹对象或单问题对象；题型允许同义写法；选项允许字符串/映射；id 缺失自动生成。
+    """
+    tool_input = _load_json_like(tool_input)
     if not isinstance(tool_input, dict):
         return None, "工具输入必须是对象"
 
-    title = _questionnaire_text(tool_input.get("title"), "title") or "请回答以下问题"
+    raw_title = _questionnaire_text(tool_input.get("title"), "title")
+    title = raw_title or "请回答以下问题"
+
     raw_questions = tool_input.get("questions")
-    if not isinstance(raw_questions, list) or not raw_questions:
-        return None, "questions 必须是非空数组"
+    if raw_questions is None:
+        for key in ("question", "items", "list", "questions_list"):
+            if key in tool_input:
+                raw_questions = tool_input[key]
+                break
+    raw_list = _coerce_question_list(raw_questions)
 
     questions = []
-    valid_types = {"single_choice", "multi_choice", "open"}
-    for index, raw_question in enumerate(raw_questions, start=1):
-        if not isinstance(raw_question, dict):
-            return None, f"questions[{index}] 必须是对象"
-        question_id = _questionnaire_text(raw_question.get("id"), "id")
-        text = _questionnaire_text(raw_question.get("text"), "text")
-        question_type = _questionnaire_text(raw_question.get("type"), "type")
-        if not question_id or not text or question_type not in valid_types:
-            return None, f"questions[{index}] 缺少有效的 id、text 或 type"
+    for index, raw_question in enumerate(raw_list, start=1):
+        if isinstance(raw_question, str):
+            raw_question = {"text": raw_question}
+        text = None
+        for key in ("text", "question", "title", "label", "content", "prompt", "description", "desc"):
+            text = _questionnaire_text(raw_question.get(key), "text")
+            if text:
+                break
+        if not text:
+            continue  # 无题干的问题无法渲染，跳过而非整体失败
 
-        question = {"id": question_id, "text": text, "type": question_type, "required": raw_question.get("required") is not False}
+        question_id = _questionnaire_text(raw_question.get("id"), "id") or f"q{index}"
+        raw_options = raw_question.get("options")
+        options = _questionnaire_options(raw_options) if raw_options is not None else None
+        question_type = _normalize_question_type(raw_question.get("type"), bool(options))
+
+        question = {
+            "id": question_id,
+            "text": text,
+            "type": question_type,
+            "required": raw_question.get("required") is not False,
+        }
         if question_type != "open":
-            options = _questionnaire_options(raw_question.get("options"))
-            if options is None:
-                return None, f"questions[{index}].options 必须是可提取为字符串数组的集合"
-            question["options"] = options
+            if not options:
+                # 选择题却没给出可用选项：降级为开放问答，保证一定能渲染
+                question["type"] = "open"
+            else:
+                question["options"] = options
         questions.append(question)
 
+    if not questions:
+        # 兜底：模型给出标题却没有可渲染的问题（如 questions 为空）时，
+        # 用标题作为单个开放问题，保证问卷能渲染、任务能继续，而不是直接中断。
+        if raw_title:
+            questions.append({"id": "q1", "text": raw_title, "type": "open", "required": True})
+        else:
+            return None, "questions 未包含任何可渲染的问题"
     return {"title": title, "questions": questions}, None
 
 
@@ -167,9 +300,23 @@ class ToolLoop:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
-        self.protocol = protocol
         self.language = language
         self.llm_params = llm_params or {}
+        # 端点不支持当前思考档位时自动切到能生效的协议（如 Kimi Code 的 Anthropic 端点控制不了档位）。
+        # 只在精确命中 provider + protocol + 档位时切换，其他组合保持原协议。
+        self.provider = self.llm_params.get("provider", "generic")
+        protocol = resolve_effective_protocol(
+            self.provider,
+            protocol,
+            self.llm_params.get("thinking", "default"),
+            self.model,
+        )
+        self.protocol = protocol
+        # 是否把思考内容随 assistant 历史回传（由模型家族声明）
+        self._keep_thinking_history = keep_thinking_history(self.provider, self.model)
+        # 输出上限默认值由模型预设给出，避免各协议各写一套
+        preset = find_preset(self.provider, self.model)
+        self._default_max_tokens = preset.recommended_max_tokens if preset else 16384
         self.skill_manager = skill_manager
         self.max_iterations = max_iterations
         self.todo_manager = todo_manager
@@ -269,6 +416,18 @@ class ToolLoop:
 
         prompt += self._build_memory_hint()
 
+        prompt += (
+            "## 视频制作（重要）\n\n"
+            "- **凡是要「做视频 / 生成动画短片 / 出成片」的需求，统一调用 `director`（导演组）**，由它编排各部门；"
+            "不要自己手写动画脚本，也不要尝试绕过导演直接控制画面引擎。\n"
+            "- 导演首轮返回「制作蓝图 + need_confirm」：你必须用 `ask_user` 把蓝图给用户确认；确认后带 `plan` 再调 `director` 执行。\n"
+            "- 导演自带断点续做：若上次中断/程序关闭，用同一 `project` 再次调用 `director` 即从断点继续，不要重头重排。\n"
+            "- **微调/改几处：必须用 `director(project=\"同名\", patch=\"<只写改动项>\")`，绝不要重发整份 plan**"
+            "（重发整份 plan 会因措辞/时长微差触发全片重渲——那不是微调，是重做）。patch 只写要改的那个别分镜字段。\n"
+            "- 仅当用户明确要求「只做旁白 / 只做字幕」时，才直接调用 `narration` / `subtitle`；合成一般由导演调度。\n"
+            "- **严禁把任何文件写入 Sigma 本体目录**（尤其 `skills/**/engine/`）；一切中间产物与成片都放当前项目目录。\n\n"
+        )
+
         if headers:
             prompt += "可用技能：\n\n"
             for skill_name, header in headers.items():
@@ -280,20 +439,25 @@ class ToolLoop:
             "- 如果某些操作依赖前一个操作的结果，则分步进行\n"
             "- 目标是减少不必要的轮次，提升执行效率\n\n"
             "文件读取（重要）：\n"
-            "- 所有文件读取必须使用 batch_read，不要逐个调用 read\n"
-            "- 即使只读 1 个文件也优先用 batch_read（设置 purpose 可获得精准摘要）\n\n"
+            "- 文本/代码/文档/PDF/表格等文件一律用 batch_read，不要逐个调用 read\n"
+            "- 即使只读 1 个文件也优先用 batch_read（设置 purpose 可获得精准摘要）\n"
+            "- 图片文件（.png/.jpg/.jpeg/.webp/.gif/.bmp）直接用 read_image 读取，"
+            "不要用 batch_read 绕一层，也不要用 read 去读图片\n"
+            "- read_image 默认返回简要概述（最快）；需要逐字提取文字/表格/票据时用 image_quality=high "
+            "或在 prompt 里明确要求，否则不要让它做详细转写\n"
+            "- read_image 的 image_quality：文字/表格/票据用 high，一般理解用 balanced，快速预览用 low\n\n"
             "文件写入（重要）：\n"
             "- Word 文档：直接用 write_docx 工具，传 output_path + doc_type + outline（大纲/指令）\n"
             "  · write_docx 内置子 Agent 会独立生成完整文档，不占用主对话 token\n"
             "- 代码/文本文件：用 write 工具，传 file_path + content\n"
             "- 修改现有文件：用 edit 批量模式（edits [{old_str, new_str}, ...]），同一文件多处修改一次完成，不要多次调用 edit\n"
             "- Excel 表格：用 write_xlsx，content 传 JSON 格式的 sheets 数据\n"
-            "- PPT：用 convert_pptx，content 传 .pptd 输入文件路径\n"
+            "- PPT：用 convert_pptx，input_path 传 .pptd 主文件路径（必须走该技能：先产出 .pptd + pages/*.page，再转换；不要自己写 python-pptx 脚本重建）\n"
             "- 多个独立文件可并行调用，一次调用写一个文件\n"
             "- 不要在回复文本中直接输出文档内容，必须通过工具写入\n\n"
             "bash 使用边界（重要）：\n"
             "- bash 仅用于运行命令（测试、构建、安装、git、服务管理），不用于文件操作\n"
-            "- ❌ 读文件 → 用 batch_read，不要 cat/type\n"
+            "- ❌ 读文件 → 用 batch_read（图片用 read_image），不要 cat/type\n"
             "- ❌ 搜索文本 → 用 grep，不要 grep -r\n"
             "- ❌ 搜索文件 → 用 find，不要 find / dir\n"
             "- ❌ 写文件 → 用 write/edit，不要 echo/cat >/New-Item\n\n"
@@ -442,8 +606,16 @@ class ToolLoop:
             log.info(f"[Round {iteration}] {len(tool_calls)} tool call(s): {[tc['name'] for tc in tool_calls]}")
             last_had_tool_calls = True
 
-            # 构造 assistant 消息（含 tool_use blocks）
+            # 构造 assistant 消息（思考块在前 + tool_use blocks）
+            # 仅对明确要求保留推理上下文的 provider 回传，其他模型保持原有消息结构不变。
             assistant_content = []
+            if self._keep_thinking_history:
+                if self.protocol == "openai":
+                    reasoning_text = llm_result.get("reasoning_content") or ""
+                    if reasoning_text:
+                        assistant_content.append({"type": "thinking", "thinking": reasoning_text})
+                else:
+                    assistant_content.extend(llm_result.get("thinking_blocks") or [])
             for tc in tool_calls:
                 assistant_content.append({
                     "type": "tool_use",
@@ -480,9 +652,6 @@ class ToolLoop:
             # ── 处理 ask_user ──
             for tc in ask_user_calls:
                 tc_input = tc.get("input", {})
-                # #region debug-point A:ask-user-input
-                asyncio.create_task(httpx.AsyncClient(timeout=0.5).post("http://127.0.0.1:7777/event", json={"sessionId": "ask-user-chatbar", "runId": "pre-fix", "hypothesisId": "A", "location": "tool_loop.py:ask_user", "msg": "[DEBUG] 收到 ask_user 原始输入", "data": {"input_type": type(tc_input).__name__, "questions_type": type(tc_input.get("questions")).__name__ if isinstance(tc_input, dict) else None, "questions": [{"keys": sorted(question.keys()) if isinstance(question, dict) else [], "id_type": type(question.get("id")).__name__ if isinstance(question, dict) else None, "text_type": type(question.get("text")).__name__ if isinstance(question, dict) else None, "type_type": type(question.get("type")).__name__ if isinstance(question, dict) else None, "options_type": type(question.get("options")).__name__ if isinstance(question, dict) else None, "option_item_types": [type(option).__name__ for option in question.get("options", [])] if isinstance(question, dict) and isinstance(question.get("options"), list) else []} for question in tc_input.get("questions", [])] if isinstance(tc_input, dict) and isinstance(tc_input.get("questions"), list) else []}}))
-                # #endregion
                 normalized_questionnaire, validation_error = _normalize_questionnaire(tc_input)
                 if validation_error:
                     result_content = json.dumps({
@@ -631,8 +800,14 @@ class ToolLoop:
                 err = tr.get("content", "")
                 if not err:
                     continue
-                # 用「工具名 + 错误消息前 80 字符」作为指纹
-                consecutive_error_key = f"{tr['name']}:{err[:80]}"
+                # 结构化错误类别优先（如 validation）：同一工具的不同字段报错归为一类，
+                # 避免两种参数错误交替出现时计数器反复归零、熔断失效。
+                kind = tr.get("error_kind") or ""
+                if kind:
+                    consecutive_error_key = f"{tr['name']}:{kind}"
+                else:
+                    # 无类别时用「工具名 + 错误消息前 80 字符」作为指纹
+                    consecutive_error_key = f"{tr['name']}:{err[:80]}"
                 break
             if consecutive_error_key:
                 if consecutive_error_key == self._last_consecutive_error:
@@ -687,6 +862,28 @@ class ToolLoop:
                     messages.pop()
                     continue
             break
+
+    @staticmethod
+    def _strip_thinking_history(messages: list) -> None:
+        """原地剥离历史 assistant 消息中的 thinking 块。
+
+        同一任务内的多轮工具循环需要回传思考内容，避免每轮重复思考；
+        任务结束后若继续保留，历史会不断累积大段 thinking/signature 挤占上下文，
+        因此在任务收尾时清理，只影响跨任务的历史，不影响已经完成的轮次。
+        """
+        for msg in messages:
+            if msg.get("role") != "assistant":
+                continue
+            content = msg.get("content")
+            if not isinstance(content, list):
+                continue
+            kept = [
+                b for b in content
+                if not (isinstance(b, dict) and b.get("type") == "thinking")
+            ]
+            # 极端情况（assistant 只有 thinking 块）不剥离，避免产生空 content
+            if kept and len(kept) != len(content):
+                msg["content"] = kept
 
     # ─── 上下文压缩 ───
 
@@ -902,6 +1099,29 @@ class ToolLoop:
                 changed_files.append((path_str, False))
             self._snapshot_cache[path_str] = mtime
 
+        # 一批新文件里只自动打开一个“交付物”，否则前端会逐个弹标签页，
+        # 最后停在 scenes.js / timeline.json 这类内部文件上，真正的 HTML 反而看不到。
+        # 优先级：HTML > 文档 > 图片 > 其他；同优先级取最新。
+        def _preview_rank(p: str) -> int:
+            ext = Path(p).suffix.lower()
+            if ext == ".html":
+                return 0
+            if ext in {".docx", ".xlsx", ".pptx", ".pdf"}:
+                return 1
+            if ext in {".md", ".png", ".jpg", ".jpeg", ".webp", ".svg"}:
+                return 2
+            return 3
+
+        def _mtime(p: str) -> float:
+            try:
+                return os.path.getmtime(p)
+            except OSError:
+                return 0.0
+
+        new_paths = [p for p, is_new in changed_files if is_new]
+        preview_path = (sorted(new_paths, key=lambda p: (_preview_rank(p), -_mtime(p)))[0]
+                        if new_paths else None)
+
         for file_path, is_new in changed_files:
             try:
                 file_name = os.path.basename(file_path)
@@ -912,7 +1132,14 @@ class ToolLoop:
                     ".ts": "typescript", ".tsx": "typescript", ".jsx": "javascript",
                     ".html": "html", ".css": "css", ".json": "json",
                     ".yaml": "yaml", ".yml": "yaml", ".xml": "xml",
+                    ".mp3": "audio", ".wav": "audio", ".m4a": "audio", ".aac": "audio",
+                    ".flac": "audio", ".ogg": "audio", ".opus": "audio", ".wma": "audio", ".aiff": "audio",
                 }.get(suffix, "file")
+
+                if is_new and file_path != preview_path:
+                    # 同批次的其它新文件：只记快照，不自动打开（避免抢走交付物预览）
+                    file_diff_tracker.snapshot_file(file_path)
+                    continue
 
                 # 推送修改开始
                 await queue.put({
@@ -1040,6 +1267,8 @@ class ToolLoop:
         """
         调用 LLM 流式接口，按 protocol 分流 Anthropic / OpenAI。
         返回 {"tool_calls": [...], "had_text": bool}，
+        并附带思考内容（Anthropic: thinking_blocks，OpenAI: reasoning_content），
+        是否回传历史由 self._keep_thinking_history 决定。
         """
         if self.protocol == "openai":
             return await self._call_llm_openai(messages, tools, queue)
@@ -1055,7 +1284,7 @@ class ToolLoop:
         }
         payload = {
             "model": self.model,
-            "max_tokens": self.llm_params.get("max_tokens") or (32768 if self.llm_params.get("provider") == "minimax" else 16384),
+            "max_tokens": self.llm_params.get("max_tokens") or self._default_max_tokens,
             "stream": True,
             "system": self.system_prompt,
             "messages": messages,
@@ -1093,6 +1322,7 @@ class ToolLoop:
                         return None
 
                     blocks: dict[int, dict] = {}
+                    thinking_blocks: dict[int, dict] = {}  # index -> {thinking, signature}（供历史回传）
                     tool_calls = []
                     had_text = False
                     text_buf: list[str] = []      # 收集文本内容用于日志
@@ -1127,6 +1357,11 @@ class ToolLoop:
                                 "text": "",
                                 "input_json": "",
                             }
+                            if block_type == "thinking":
+                                thinking_blocks[index] = {
+                                    "thinking": block.get("thinking", ""),
+                                    "signature": block.get("signature", ""),
+                                }
                             # 初始化 canvas 流式追踪
                             if block_type == "tool_use" and block.get("name") == "canvas_update":
                                 canvas_stream_state[index] = 0
@@ -1149,7 +1384,13 @@ class ToolLoop:
                                 text = delta.get("thinking", "")
                                 block["text"] += text
                                 thinking_buf.append(text)
+                                if index in thinking_blocks:
+                                    thinking_blocks[index]["thinking"] += text
                                 await queue.put({"type": "text", "content": text, "contentType": "thinking"})
+                            elif delta_type == "signature_delta":
+                                # Anthropic thinking 块的签名，回传历史时必须原样带上
+                                if index in thinking_blocks:
+                                    thinking_blocks[index]["signature"] += delta.get("signature", "")
                             elif delta_type == "input_json_delta":
                                 block["input_json"] += delta.get("partial_json", "")
                                 # canvas_update 流式解析：实时提取 elements 数组中的完整对象
@@ -1237,7 +1478,13 @@ class ToolLoop:
                         if empty_inputs:
                             log.warning(f"[LLM Warning] 以下工具调用输入为空（可能因 token 截断）: {empty_inputs}")
 
-                    return {"tool_calls": tool_calls, "had_text": had_text}
+                    # 思考块按出现顺序返回，供需要保留推理上下文的模型回传历史
+                    thinking_out = [
+                        {"type": "thinking", "thinking": v["thinking"], "signature": v["signature"]}
+                        for _, v in sorted(thinking_blocks.items())
+                        if v.get("thinking")
+                    ]
+                    return {"tool_calls": tool_calls, "had_text": had_text, "thinking_blocks": thinking_out}
 
         except Exception as e:
             import traceback, sys
@@ -1256,7 +1503,7 @@ class ToolLoop:
         }
         payload: dict = {
             "model": self.model,
-            "max_tokens": self.llm_params.get("max_tokens") or (32768 if self.llm_params.get("provider") == "minimax" else 16384),
+            "max_tokens": self.llm_params.get("max_tokens") or self._default_max_tokens,
             "stream": True,
             "messages": self._convert_to_openai_messages(messages),
         }
@@ -1295,6 +1542,7 @@ class ToolLoop:
                     tool_calls: list[dict] = []
                     had_text = False
                     text_buf: list[str] = []
+                    reasoning_buf: list[str] = []  # 收集推理内容，供需要保留推理上下文的模型回传历史
                     tool_call_buf: dict[int, dict] = {}  # index -> {id, name, arguments}
 
                     async for line in resp.aiter_lines():
@@ -1318,6 +1566,7 @@ class ToolLoop:
 
                         reasoning = delta.get("reasoning_content") or delta.get("reasoning")
                         if reasoning:
+                            reasoning_buf.append(reasoning)
                             await queue.put({"type": "text", "content": reasoning, "contentType": "thinking"})
 
                         # 文本
@@ -1369,7 +1618,11 @@ class ToolLoop:
                     elif had_text:
                         log.info(f"[LLM Response] text-only, {len(''.join(text_buf))} chars")
 
-                    return {"tool_calls": tool_calls, "had_text": had_text}
+                    return {
+                        "tool_calls": tool_calls,
+                        "had_text": had_text,
+                        "reasoning_content": "".join(reasoning_buf),
+                    }
 
         except Exception as e:
             log.error(f"[LLM Error] {e}")
@@ -1392,8 +1645,9 @@ class ToolLoop:
             content = m.get("content", "")
             if role == "assistant":
                 if isinstance(content, list):
-                    # 含 tool_use 的 assistant 消息：拆出文本与 tool_calls
+                    # 含 tool_use 的 assistant 消息：拆出文本、推理内容与 tool_calls
                     text_parts = []
+                    reasoning_parts = []
                     tool_calls = []
                     for block in content:
                         if not isinstance(block, dict):
@@ -1409,11 +1663,16 @@ class ToolLoop:
                             })
                         elif block.get("type") == "text":
                             text_parts.append(block.get("text", ""))
+                        elif block.get("type") == "thinking":
+                            # 内部 thinking 块 → OpenAI 协议的 reasoning_content（仅对开启回传的 provider 存在）
+                            reasoning_parts.append(block.get("thinking", ""))
                     entry: dict = {
                         "role": "assistant",
                         # OpenAI 规范：有 tool_calls 时 content 可为 null；这里保留文本以兼容更多实现
                         "content": "".join(text_parts) if text_parts else None,
                     }
+                    if reasoning_parts:
+                        entry["reasoning_content"] = "".join(reasoning_parts)
                     if tool_calls:
                         entry["tool_calls"] = tool_calls
                     result.append(entry)
@@ -1560,35 +1819,33 @@ class ToolLoop:
                     lambda: self.skill_manager.dispatch(tool_name, **tool_input),
                 )
 
-            timeout = self.tool_timeout
-            # 长耗时工具：视频生成 / PPT 转换 / 深度研究 / 子 Agent 等
-            if tool_name == "video_produce":
-                # 完整流水线（旁白→画面→合成），最耗时，给足余量
-                timeout = max(timeout, 1800)
-            elif tool_name == "opendesign_video":
-                # LLM 写 HTML + hyperframes 渲染，最耗时，给足余量
-                timeout = max(timeout, 900)
-            elif tool_name == "pdoom_render":
-                # animation_painter 逐帧水彩渲染，串行/并行均较慢，给足余量
-                timeout = max(timeout, 900)
-            elif tool_name in ("video_auto", "video_compose"):
-                timeout = max(timeout, 600)
-            elif tool_name in ("video_scene", "convert_pptx", "deep_research",
-                               "generate_image", "sandbox_run", "batch_read",
-                               "doubao_tts"):
-                timeout = max(timeout, 300)
-            elif tool_name in ("sub_agent", "custom_agent"):
-                timeout = max(timeout, 600)
+            if tool_name in _NO_TIMEOUT_TOOLS:
+                # 长任务视频工具：不设超时，等到跑完（否则没做完就被判超时/跳过）
+                result = await asyncio.wrap_future(executor_future)
+            else:
+                timeout = self.tool_timeout
+                # 长耗时工具：PPT 转换 / 深度研究 / 子 Agent 等
+                if tool_name == "video_produce":
+                    # 完整流水线（旁白→画面→合成），最耗时，给足余量
+                    timeout = max(timeout, 1800)
+                elif tool_name in ("video_auto", "video_compose"):
+                    timeout = max(timeout, 600)
+                elif tool_name in ("video_scene", "convert_pptx", "deep_research",
+                                   "generate_image", "sandbox_run", "batch_read",
+                                   "doubao_tts"):
+                    timeout = max(timeout, 300)
+                elif tool_name in ("sub_agent", "custom_agent"):
+                    timeout = max(timeout, 600)
 
-            try:
-                result = await asyncio.wait_for(
-                    asyncio.wrap_future(executor_future),
-                    timeout=timeout,
-                )
-            except asyncio.TimeoutError:
-                result = await self._handle_tool_timeout(
-                    tool_call, tool_name, tool_input, executor_future, timeout, queue,
-                )
+                try:
+                    result = await asyncio.wait_for(
+                        asyncio.wrap_future(executor_future),
+                        timeout=timeout,
+                    )
+                except asyncio.TimeoutError:
+                    result = await self._handle_tool_timeout(
+                        tool_call, tool_name, tool_input, executor_future, timeout, queue,
+                    )
 
             # ── 空输入检测：LLM 因 token 截断生成空工具调用时，注入 skill spec 帮助恢复 ──
             if not getattr(result, "success", False) and not tool_input:
@@ -1642,6 +1899,7 @@ class ToolLoop:
             "id": tool_call["id"],
             "name": tool_name,
             "success": success,  # 供熔断器识别失败结果
+            "error_kind": (getattr(result, "details", None) or {}).get("error_kind", ""),
             "content": content[:80000] if len(content) > 80000 else content,  # LLM 上下文上限 80K 字符
         }
 

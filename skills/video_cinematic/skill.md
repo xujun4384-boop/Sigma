@@ -1,22 +1,27 @@
 # video_cinematic skill
+# ⚠️ 制作视频统一走 director 导演组；本技能是「影视级画面引擎」，一般由导演调度（受套餐视频额度限制）。
 # 电影级 AI 视频生成（纯 prompt，不走代码）。区别于 video_card（竖版无声卡片）与 video_produce（带旁白完整流水线）。
 # ---------------------------------------------------------------------------
 # 摘要
-# 电影级 AI 视频生成。基于 MiniMax-Hailuo-2.3 模型，通过纯文本提示词驱动，
-# 生成具有电影感画面的高质量视频。
+# 电影级 AI 视频生成。服务商由 Settings → Skill Keys → 影视级视频生成 选择：
+#   - minimax（默认）：MiniMax-Hailuo-2.3
+#   - ark：火山方舟 / 豆包 Seedance 系列
+# 通过纯文本提示词驱动，生成具有电影感画面的高质量视频。
 #
 # 与现有视频 skill 的核心区别：
 #   - video_generate → HTML Canvas 动画录制（程序化、可逐帧控制）
 #   - video_auto     → 新闻竖版卡片视频（自动配图+打字机字幕）
 #   - video_custom   → 自定义竖版视频（手动指定素材+样式）
-#   - video_cinematic → MiniMax-Hailuo-2.3 电影级 AI 视频（纯 prompt 驱动）
+#   - video_cinematic → 所选服务商的电影级 AI 视频（纯 prompt 驱动）
 #
 # ⚠️ 重要特性：
 #   1. 纯提示词生成：只接受文本 prompt，不支持图片/视频/音频参考输入
 #   2. 生成后不可修改：任务一旦提交即消耗配额，无法中途调整或重新编辑
-#   3. 每次调用消耗 1 次视频生成配额（Token Plan 用户每日赠送 3 条 Hailuo2.3 视频）
-#   4. Hailuo-2.3 支持 [运镜指令] 语法，可实现精确镜头控制
-#   5. 【无声视频】Hailuo-2.3 生成的是无声视频，不含原生音轨。如需 BGM，请另行调用 generate_music 生成后，再用 video_compose 叠加
+#   3. 每次调用消耗一次视频额度；套餐不再单独显示每日视频条数，按统一周额度扣减。
+#      - 不再查询视频额度接口；提交后按实际生成扣减，具体以对应服务商控制台为准。
+#      - 导演组默认每支片只用 1 段 cinematic，用户可在 ask_user 明确要求 0/2/3 段。
+#   4. 支持 [运镜指令] 语法（Hailuo 与 Seedance 均支持 prompt 内的镜头描述）
+#   5. 【无声视频】两个服务商默认都生成无声视频，不含原生音轨。
 #
 # ## 使用场景
 # - 电影级短片/预告片
@@ -27,7 +32,7 @@
 #
 # 包含 2 种工具:
 #   video_cinematic_storyboard - 分镜脚本设计（LLM 将用户意图拆解为电影分镜）
-#   video_cinematic_generate   - 电影级视频生成（提交 MiniMax-Hailuo-2.3 文生视频任务）
+#   video_cinematic_generate   - 电影级视频生成（提交所选服务商的文生视频任务）
 # ---------------------------------------------------------------------------
 
 # ═══ 核心工作流程 ═══
@@ -35,7 +40,7 @@
 # 步骤 1: 分镜脚本设计
 #   video_cinematic_storyboard(
 #     user_intent="用户想要视频的文字描述",
-#     total_duration=30,           # 默认 30s = 3 个 10s 分镜，正好用完每日赠送
+#     total_duration=30,           # 默认 30s = 3 个 10s 分镜（按实际需要调整）
 #     style="cinematic"            # 视觉风格参考
 #   )
 #   → 返回: {"scenes": [{"prompt": "...", "duration": 10, "camera": "...", "mood": "..."}]}
@@ -52,7 +57,7 @@
 # 步骤 3: 多镜拼接（可选，使用 video_compose）
 #   如果需要多个分镜拼接成完整短片，使用 video_generate 的 video_compose 工具。
 #   ⚠️ 注意：video_compose 默认**不叠加字幕、不生成 BGM**，只做纯净拼接。
-#   如需音乐或字幕，需显式传 bgm_enabled=true 和 subtitles 参数。
+#   如需字幕，需显式传 subtitles 参数。
 
 # ═══ 何时选用 video_cinematic（而非其他视频 skill） ═══
 
@@ -60,7 +65,7 @@
 #    - 用户要"电影感"、"大片感"、"AI 生成画面"
 #    - 内容偏概念/氛围/艺术，不需要精确控制每帧
 #    - 接受"生成后不可修改"的限制
-#    - 使用 Token Plan 套餐赠送的每日 3 条视频额度
+#    - 接受按套餐视频额度扣减（不再单独赠送每日条数）
 #
 # ❌ 不选 video_cinematic：
 #    - 需要精确控制动画每帧 → 选 video_generate
@@ -75,20 +80,20 @@
 #    无法在生成过程中调整 prompt、修改参数或取消任务。
 #    因此，调用 video_cinematic_generate 前，必须确保 prompt 已经过精心打磨。
 #
-# 2. 【每日 3 条赠送额度】
-#    Token Plan 订阅用户每日赠送 3 条 Hailuo2.3 视频生成额度。
-#    此额度每日重置，未使用不结转。
-#    额度用完后，仍可通过按量计费 API Key 继续调用（768P 6s ≈ 2 元/条，1080P 6s ≈ 3.5 元/条）。
+# 2. 【视频额度】
+#    套餐不再单独赠送/显示每日视频条数；每次生成按套餐统一周额度扣减。
+#    实测 6 秒 768P 约扣 7% 周额度，10 秒 768P 约扣 14%（以控制台为准）。
+#    额度用完后，可购买积分或改用按量计费 API Key（768P 6s ≈ 2 元，10s ≈ 4 元）。
 #
 # 3. 【纯文本驱动】
 #    本 skill 仅支持文生视频（T2V），不支持图片/视频/音频参考输入。
 #    如需图生视频，请直接使用 MiniMax API 或后续扩展。
 #
-# 4. 【时长限制 & 配额最大化利用】
-#    Hailuo-2.3 模型 + 768P 分辨率下，单镜最长 10 秒（1080P 仅支持 6 秒）。
-#    Token Plan 每日赠送的 3 条视频按条数计算，**不分时长**。
-#    因此每条分镜应尽量用满 10 秒，3 条即可拼出 30 秒完整短片。
-#    如果时长不够，再走按量计费 API Key 续命。
+# 4. 【时长限制】
+#    - MiniMax Hailuo：768P 下单镜最长 10 秒（1080P 仅支持 6 秒）。
+#    - 火山方舟 Seedance 1.0 Pro：支持 2~12 秒整数时长；具体档位以所选模型为准。
+#    额度按实际生成扣减：6 秒和 10 秒分别计价，不存在“按条数用满 10 秒更划算”。
+#    按剪辑需要选时长即可；10 秒约为 6 秒消耗的两倍。
 
 # ═══ 输出目录约定 ═══
 
@@ -100,8 +105,9 @@
 # 首次使用需安装:
 #   pip install httpx
 #
-# API 配置（由 Sigma 统一管理）:
-#   - MiniMax Token Plan API Key（视频赠送额度，Hailuo2.3 模型）
+# API 配置（由 Sigma 统一管理，Settings → Skill Keys → 影视级视频生成）:
+#   - 选择 minimax：填 MiniMax Token Plan API Key（Hailuo2.3）
+#   - 选择 ark：填火山方舟 API Key（豆包 Seedance；可填 Model ID 或 Endpoint ID）
 #   - LLM API（Anthropic Messages 协议）：分镜脚本设计
 # ---------------------------------------------------------------------------
 
@@ -136,22 +142,22 @@
 #   }
 
 # ── video_cinematic_generate ──
-# 提交 MiniMax-Hailuo-2.3 文生视频任务并等待完成。
+# 提交所选服务商（minimax / ark）的文生视频任务并等待完成。
 #
 # 参数:
 #   prompt (string, 必填) 视频生成提示词（建议英文，效果最佳）
 #   output_path (string, 必填) 输出 MP4 文件路径
-#   duration (integer, 可选, 默认10) 视频时长（秒），6 或 10。默认 10 用满赠送额度
-#   resolution (string, 可选, 默认"768P") 分辨率：768P / 1080P。768P 支持 10s；1080P 仅 6s
+#   duration (integer, 可选, 默认10) 视频时长（秒），通常 6 或 10
+#   resolution (string, 可选, 默认"768P") 分辨率：768P / 1080P（ark 会自动换算为 720p / 1080p）
 #   poll_interval (integer, 可选, 默认10) 轮询间隔（秒）
 #   max_wait (integer, 可选, 默认1800) 最大等待时间（秒）
 #
 # 返回:
 #   {
-#     "task_id": "MiniMax 任务 ID",
+#     "task_id": "服务商任务 ID",
 #     "status": "succeeded",
 #     "output_path": "本地视频路径",
-#     "video_url": "MiniMax CDN 地址",
+#     "video_url": "CDN 地址",
 #     "duration": 10,
 #     "resolution": "768P",
 #     "size_mb": 12.5

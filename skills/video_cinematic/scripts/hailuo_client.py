@@ -2,7 +2,7 @@
 hailuo_client - MiniMax-Hailuo-2.3 视频生成客户端
 
 封装 MiniMax-Hailuo-2.3 文生视频(t2v) API 调用（/v1/video_generation）。
-适用于 Token Plan 订阅用户的每日 3 条视频赠送额度。
+适用于 Token Plan 订阅 Key 或按量计费 API Key；额度按实际生成扣减。
 """
 import time
 from pathlib import Path
@@ -346,3 +346,6 @@ def generate_cinematic_video(
         "video_width": task.get("video_width", 0),
         "video_height": task.get("video_height", 0),
     }
+
+
+

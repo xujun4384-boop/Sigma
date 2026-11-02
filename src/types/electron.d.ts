@@ -1,3 +1,68 @@
+/** 思考档位：default = 跟随模型默认（不注入参数） */
+export type ThinkingOptionId =
+  | 'default' | 'off' | 'on' | 'auto'
+  | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
+
+/** 兼容历史配置值，读取时统一归一成 ThinkingOptionId */
+export type LegacyThinkingId = 'adaptive' | 'enabled' | 'disabled'
+
+export interface SamplingSpec {
+  default: number | null
+  min: number | null
+  max: number | null
+}
+
+/** 模型预设：由后端 /api/model-presets 下发，前端据此渲染表单 */
+export interface ModelPreset {
+  provider: string
+  providerLabel: string
+  model: string
+  label: string
+  family: string
+  familyLabel: string
+  protocol: 'anthropic' | 'openai'
+  baseUrl: string
+  context: number
+  maxOutput: number | null
+  recommendedMaxTokens: number
+  vision: boolean
+  toolCall: boolean
+  thinkingOptions: ThinkingOptionId[]
+  thinkingOptionsByProtocol: Record<'anthropic' | 'openai', ThinkingOptionId[]>
+  /** 思考档位的补充说明（如关闭会路由到哪个模型） */
+  thinkingNote: string
+  sampling: {
+    temperature: SamplingSpec | null
+    topP: SamplingSpec | null
+    topK: SamplingSpec | null
+  }
+}
+
+export interface ProviderPreset {
+  id: string
+  label: string
+  defaultProtocol: 'anthropic' | 'openai'
+  baseUrls: Partial<Record<'anthropic' | 'openai', string>>
+  /** 是否提供余额/用量查询接口 */
+  supportsBalance: boolean
+  models: ModelPreset[]
+}
+
+export interface FamilyPreset {
+  id: string
+  label: string
+  options: string[]
+  thinkingOptions: ThinkingOptionId[]
+  temperature: boolean
+  topP: boolean
+  topK: boolean
+}
+
+export interface ModelRegistry {
+  providers: ProviderPreset[]
+  families: FamilyPreset[]
+}
+
 export interface LLMEntry {
   id: string
   name: string
@@ -5,13 +70,19 @@ export interface LLMEntry {
   apiKey: string
   model: string
   protocol: 'anthropic' | 'openai'
-  provider?: 'generic' | 'deepseek' | 'kimi-code' | 'minimax' | 'ark'
-  /** 思考模式：自适应 / 强制开启 / 关闭 */
-  thinking?: 'adaptive' | 'enabled' | 'disabled'
+  provider?: string
+  /** 命中的模型家族，用于未带注册表时的兜底展示 */
+  family?: string
+  /** 思考档位；历史值 adaptive/enabled/disabled 仍可读入，加载时自动归一 */
+  thinking?: ThinkingOptionId | LegacyThinkingId
+  /** 以下为用户覆盖值；留空表示使用模型预设默认 */
   contextSize?: number
   maxTokens?: number
   temperature?: number
   topP?: number
+  topK?: number
+  /** 是否支持图片输入（用户可覆盖预设） */
+  vision?: boolean
 }
 
 export interface SkillKeysConfig {
@@ -26,12 +97,23 @@ export interface SkillKeysConfig {
   imageMinimaxApiKey?: string
   imageMinimaxBaseUrl?: string
   imageMinimaxModel?: string
-  musicGenApiKey: string
-  musicGenBaseUrl: string
-  musicGenModel: string
+  /** 音乐生成 provider：腾讯云 TokenHub（默认）/ MiniMax 开放平台 */
+  musicGenProvider?: 'tencent_tokenhub' | 'minimax'
+  musicGenApiKey?: string
+  musicGenBaseUrl?: string
+  musicGenModel?: string
+  /** 高德 Web端(JS API) Key 与安全密钥（视频里的真实地图/路线） */
+  amapJsKey?: string
+  amapSecurityCode?: string
   minimaxVideoApiKey: string
+  /** 影视级视频生成服务商：minimax（Hailuo）/ ark（火山方舟 Seedance） */
+  cinematicVideoProvider?: 'minimax' | 'ark'
+  videoArkApiKey?: string
+  videoArkBaseUrl?: string
+  videoArkModel?: string
   doubaoVoiceApiKey: string
-  opendesignLlmId?: string
+  /** 配音音色 ID（豆包 2.0），留空则用内置默认；可选项来自 /api/doubao-voices */
+  doubaoVoiceSpeaker?: string
   webSearchProvider: 'kimi' | 'tavily' | 'custom'
   webSearchApiKey: string
   webSearchBaseUrl: string
@@ -62,6 +144,8 @@ export interface SkillKeysConfig {
   gmailImapPort: string
   volcAccessKey?: string
   volcSecretKey?: string
+  /** 读图专用 LLM：config.llms 里的 id；留空 = 跟随主 LLM */
+  visionLlmId?: string
 }
 
 export interface KimiConfig {
@@ -81,7 +165,7 @@ export interface FolderTreeItem {
   type: 'folder' | 'workspace-folder' | 'file' | 'docx' | 'xlsx' | 'pptx' | 'pdf' | 'markdown' |
         'python' | 'javascript' | 'typescript' | 'java' | 'cpp' | 'c' | 'csharp' |
         'go' | 'rust' | 'php' | 'ruby' | 'swift' | 'kotlin' | 'html' | 'css' |
-        'json' | 'xml' | 'yaml' | 'shell' | 'powershell' | 'batch' | 'ini' | 'toml' | 'text' | 'image' | 'video'
+        'json' | 'xml' | 'yaml' | 'shell' | 'powershell' | 'batch' | 'ini' | 'toml' | 'text' | 'image' | 'video' | 'audio'
   path: string
   children?: FolderTreeItem[]
 }
@@ -153,6 +237,10 @@ export interface ElectronAPI {
   showNotification: (title: string, body: string) => Promise<boolean>
   getSystemSounds: () => Promise<SystemSound[]>
   previewSound: (soundPath: string) => Promise<boolean>
+  enterComputerUseMode: (config: { baseUrl: string; apiKey: string; model: string; protocol: string; name?: string; provider?: string; thinking?: string; contextSize?: number; maxTokens?: number; temperature?: number; topP?: number }) => Promise<{ success: boolean; error?: string }>
+  exitComputerUseMode: () => Promise<{ success: boolean; error?: string }>
+  getComputerUseMode: () => Promise<{ success: boolean; active: boolean }>
+  onComputerUseModeChange: (callback: (active: boolean) => void) => () => void
 }
 
 declare global {

@@ -380,7 +380,7 @@ class NetworkBridgeTool(BaseTool):
     # ─── Vision 截图分析 ───
 
     def _handle_analyze_screenshot(self, params: dict) -> dict:
-        """截图并返回文件路径，由主 LLM 通过 batch_read 读取。"""
+        """截图并返回文件路径，由主 LLM 通过 read_image 读取。"""
         source = params.get("source", "visible")  # visible | full
         screenshot_action = "screenshot" if source == "visible" else "cdp_screenshot"
         # 透传 format/quality 等截图参数
@@ -406,12 +406,12 @@ class NetworkBridgeTool(BaseTool):
                 "error": "截图结果中没有文件路径",
             }
 
-        # 返回文件路径，由主 LLM 通过 batch_read 读取
+        # 返回文件路径，由主 LLM 通过 read_image 读取
         return {
             "action": "analyze_screenshot",
             "success": True,
             "data": {
-                "analysis": f"[截图已完成，文件路径: {screenshot_path}。可使用 batch_read 读取]",
+                "analysis": f"[截图已完成，文件路径: {screenshot_path}。可使用 read_image 读取]",
                 "screenshot_path": screenshot_path,
             },
         }

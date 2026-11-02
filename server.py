@@ -14,7 +14,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from skills.manager import SkillManager, ALL_SKILLS
+from skills.doubao_tts.voices import list_voices as list_doubao_voices
 from skills.todo_manager import TodoManager
+from vision_llm import set_vision_llm_config
 from skills.project_memory import (
     ProjectScanTool, MemoryReadTool, MemoryRecordTool,
     _get_overview_path, _get_history_path, _ensure_memory_dir,
@@ -33,32 +35,19 @@ def _get_sigma_history_path() -> Path:
 def _ensure_sigma_memory_dir():
     SIGMA_MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
-def _resolve_opendesign_llm_config(config: dict, skill_keys: dict) -> dict:
-    """根据 skill_keys.opendesignLlmId 从 config.llms 复用 LLM 配置。
-
-    返回空 dict 表示未配置（opendesign 将回退主 LLM）。
-    匹配规则：id / name / model 任一相等即可。
-    """
-    llm_id = (skill_keys.get("opendesignLlmId") or "").strip()
-    if not llm_id:
-        return {}
-    for llm in (config.get("llms") or []):
-        if not isinstance(llm, dict):
-            continue
-        if llm.get("id") == llm_id or llm.get("name") == llm_id or llm.get("model") == llm_id:
-            return {
-                "base_url": llm.get("baseUrl", ""),
-                "api_key": llm.get("apiKey", ""),
-                "model": llm.get("model", ""),
-                "protocol": llm.get("protocol", "anthropic"),
-            }
-    return {}
-
 from context_manager import SessionState, ContextTracker, apply_model_specific_params
+from model_presets import PROVIDERS, find_preset, registry_payload
 from tool_loop import ToolLoop, resolve_questionnaire, resolve_tool_timeout
 from file_watcher import get_watcher
 from network_bridge_manager import bridge_manager
 from custom_agent_manager import custom_agent_manager
+from computer_use.manager import computer_use_manager
+from cancellation import (
+    get_token, release_token, cancel_session, install_process_guard,
+)
+
+# 安装子进程守卫：会话取消时自动终止该会话派生的全部子进程
+install_process_guard()
 
 
 def _ensure_network_bridge_memory():
@@ -150,6 +139,15 @@ async def get_available_skills():
             "tool_names": info.get("tool_names", []),
         })
     return {"skills": skills}
+
+
+@app.get("/api/doubao-voices")
+async def get_doubao_voices():
+    """返回豆包语音可选音色列表（单一数据源：skills/doubao_tts/voices.py）。
+
+    前端 Settings 的「配音音色」下拉据此渲染，label 为中文名，不暴露 zh_ 音色 ID。
+    """
+    return {"voices": list_doubao_voices()}
 
 
 @app.post("/api/agent-ai-generate")
@@ -331,7 +329,7 @@ async def test_llm(request: Request):
             if protocol == "anthropic":
                 payload = {
                     "model": model,
-                    "max_tokens": 50,
+                    "max_tokens": 1024,
                     "messages": [{"role": "user", "content": "Hi"}],
                 }
                 apply_model_specific_params(payload, model, protocol)
@@ -355,7 +353,7 @@ async def test_llm(request: Request):
                 # OpenAI 兼容协议
                 payload = {
                     "model": model,
-                    "max_tokens": 50,
+                    "max_tokens": 1024,
                     "messages": [{"role": "user", "content": "Hi"}],
                 }
                 apply_model_specific_params(payload, model, protocol)
@@ -411,6 +409,12 @@ async def test_llm(request: Request):
 
     except Exception as e:
         return {"success": False, "error": str(e)}
+
+
+@app.get("/api/model-presets")
+async def model_presets():
+    """模型预设清单：前端据此渲染服务商 / 模型 / 高级配置，不再各自维护一份。"""
+    return registry_payload()
 
 
 @app.post("/api/model-info")
@@ -489,7 +493,7 @@ async def llm_balance(request: Request):
     api_key = body.get("apiKey") or ""
     base_url = (body.get("baseUrl") or "").rstrip("/")
 
-    if provider not in ("deepseek", "kimi-code", "minimax", "ark"):
+    if not (provider in PROVIDERS and PROVIDERS[provider].supports_balance):
         return {"success": False, "error": f"Provider '{provider}' does not support balance query"}
     if not api_key:
         return {"success": False, "error": "Missing API Key"}
@@ -624,98 +628,6 @@ async def _query_volc_balance(client: httpx.AsyncClient, ak: str, sk: str):
             "credit_limit": result.get("CreditLimit"),
         }
     }
-
-
-@app.post("/api/test-opendesign")
-async def test_opendesign(request: Request):
-    """测试 opendesign 专用 LLM 连接（从 llms 列表选中的模型）。"""
-    import httpx
-
-    body = await request.json()
-    base_url = (body.get("baseUrl") or "").rstrip("/")
-    api_key = body.get("apiKey") or ""
-    model = body.get("model") or ""
-    protocol = body.get("protocol") or "anthropic"
-
-    if not base_url or not api_key or not model:
-        return {"success": True, "text": "（未选择，将跟随主 LLM）"}
-
-    log.info(f"[TestOpenDesign] 测试: model={model}, base_url={base_url[:60]}, protocol={protocol}")
-
-    try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            if protocol == "anthropic":
-                payload = {"model": model, "max_tokens": 50, "messages": [{"role": "user", "content": "Hi"}]}
-                apply_model_specific_params(payload, model, protocol)
-                request_url = f"{base_url}/v1/messages" if "/v1" not in base_url else f"{base_url}/messages"
-                resp = await client.post(
-                    request_url,
-                    headers={"Authorization": f"Bearer {api_key}", "anthropic-version": "2023-06-01", "content-type": "application/json"},
-                    json=payload,
-                )
-            else:
-                payload = {"model": model, "max_tokens": 50, "messages": [{"role": "user", "content": "Hi"}]}
-                apply_model_specific_params(payload, model, protocol)
-                request_url = f"{base_url}/v1/chat/completions" if "/v1" not in base_url else f"{base_url}/chat/completions"
-                resp = await client.post(
-                    request_url,
-                    headers={"Authorization": f"Bearer {api_key}", "content-type": "application/json"},
-                    json=payload,
-                )
-
-            if resp.status_code != 200:
-                error_text = await resp.aread()
-                return {"success": False, "error": f"HTTP {resp.status_code}: {error_text.decode()[:200]}"}
-
-            data = resp.json()
-            if protocol == "anthropic":
-                content = data.get("content", [])
-                text = "".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
-            else:
-                choices = data.get("choices", [])
-                text = choices[0].get("message", {}).get("content", "") if choices else ""
-
-            if text.strip():
-                return {"success": True, "text": text.strip()}
-            return {"success": False, "error": "返回内容为空"}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
-
-
-@app.post("/api/test-music")
-async def test_music(request: Request):
-    """测试 MiniMax 音乐模型是否可调用，不保存生成音频。"""
-    import httpx
-
-    body = await request.json()
-    api_key = body.get("apiKey") or ""
-    base_url = (body.get("baseUrl") or "https://api.minimaxi.com/v1").rstrip("/")
-    model = body.get("model") or "music-3.0"
-    if not api_key:
-        return {"success": False, "error": "Missing MiniMax music API key"}
-
-    payload = {
-        "model": model,
-        "prompt": "短小的钢琴纯音乐测试片段，明亮、舒缓",
-        "is_instrumental": True,
-    }
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await client.post(
-                f"{base_url}/music_generation",
-                headers={"Authorization": f"Bearer {api_key}"},
-                json=payload,
-            )
-        data = response.json()
-        base_resp = data.get("base_resp") or {} if isinstance(data, dict) else {}
-        if response.status_code >= 400 or base_resp.get("status_code") not in (0, None):
-            message = base_resp.get("status_msg") or data.get("message") or str(data)
-            return {"success": False, "error": f"{model}: {message}", "model": model, "status": response.status_code}
-        return {"success": True, "model": model, "message": f"{model} 可调用", "response": data}
-    except httpx.TimeoutException:
-        return {"success": False, "error": f"{model}: request timeout"}
-    except Exception as error:
-        return {"success": False, "error": f"{model}: {error}"}
 
 
 def _check_mail163_smtp(address: str, auth_code: str, host: str, port: int):
@@ -1220,6 +1132,42 @@ async def _record_network_bridge_memory(
         log.warning(f"[NB Memory] 记录异常: {e}")
 
 
+def _apply_vision_llm_config(config: dict | None) -> None:
+    """按 Settings 的 skillKeys.visionLlmId（llms 列表里的 id）注入读图专用模型。
+
+    只在请求携带完整 llms 列表时生效（主聊天 / 配置同步）；浏览器面板、computer_use
+    这类只带激活模型的请求不会误清除已选配置。
+    """
+    cfg = config or {}
+    if not isinstance(cfg.get("llms"), list):
+        return
+    sk = cfg.get("skillKeys") or {}
+    llm_id = str(sk.get("visionLlmId") or "").strip()
+    entry = None
+    if llm_id:
+        entry = next((l for l in cfg["llms"] if str(l.get("id")) == llm_id), None)
+    if not entry:
+        set_vision_llm_config(None)
+        return
+    base_url = (entry.get("baseUrl") or "").rstrip("/")
+    api_key = entry.get("apiKey") or ""
+    model = entry.get("model") or ""
+    if not (base_url and api_key and model):
+        set_vision_llm_config(None)
+        return
+    set_vision_llm_config({
+        "base_url": base_url,
+        "api_key": api_key,
+        "model": model,
+        "protocol": entry.get("protocol") or "anthropic",
+        "provider": entry.get("provider") or "generic",
+        "thinking": entry.get("thinking") or "default",
+    })
+    log.info(
+        f"[Vision] 读图模型: {model} "
+        f"({entry.get('protocol') or 'anthropic'}/{entry.get('provider') or 'generic'})")
+
+
 async def _execute_custom_agent_chat(
     user_message: str,
     custom_agent: dict,
@@ -1235,6 +1183,7 @@ async def _execute_custom_agent_chat(
     
     Agent 能看到完整的对话历史，执行结果回注到会话中。
     """
+    _apply_vision_llm_config(config)
     import httpx
 
     agent_name = custom_agent.get("name", "unknown")
@@ -1274,7 +1223,8 @@ async def _execute_custom_agent_chat(
     # 对 LLM 暴露的有效工具集：Agent 选择的工具 + 基础工具（todo_write）
     _BASE_TOOLS = {"todo_write"}
     effective_tools = set(agent_tools) | _BASE_TOOLS
-    skill_manager = SkillManager(
+    skill_manager = SkillManager.acquire(
+        cache_key=f"{session_id}:agent:{agent_name}",
         cwd=skill_mgr_cwd,
         web_search_provider=skill_keys.get("webSearchProvider", "kimi"),
         web_search_api_key=skill_keys.get("webSearchApiKey", ""),
@@ -1293,12 +1243,19 @@ async def _execute_custom_agent_chat(
             "imageMinimaxModel" if skill_keys.get("imageGenProvider") == "minimax" else "imageArkModel",
             skill_keys.get("imageGenModel", ""),
         ),
-        music_gen_api_key=skill_keys.get("musicGenApiKey", ""),
-        music_gen_base_url=skill_keys.get("musicGenBaseUrl", "https://api.minimaxi.com/v1"),
-        music_gen_model=skill_keys.get("musicGenModel", "music-3.0"),
         minimax_video_api_key=skill_keys.get("minimaxVideoApiKey", ""),
+        cinematic_video_provider=skill_keys.get("cinematicVideoProvider", "minimax"),
+        video_ark_api_key=skill_keys.get("videoArkApiKey", ""),
+        video_ark_base_url=skill_keys.get("videoArkBaseUrl", ""),
+        video_ark_model=skill_keys.get("videoArkModel", ""),
         doubao_voice_api_key=skill_keys.get("doubaoVoiceApiKey", ""),
-        opendesign_llm_config=_resolve_opendesign_llm_config(config, skill_keys),
+        doubao_voice_speaker=skill_keys.get("doubaoVoiceSpeaker", ""),
+        music_gen_provider=skill_keys.get("musicGenProvider", ""),
+        music_gen_api_key=skill_keys.get("musicGenApiKey", ""),
+        music_gen_base_url=skill_keys.get("musicGenBaseUrl", ""),
+        music_gen_model=skill_keys.get("musicGenModel", ""),
+        amap_js_key=skill_keys.get("amapJsKey", ""),
+        amap_security_code=skill_keys.get("amapSecurityCode", ""),
         wechat_appid=skill_keys.get("wechatAppId", ""),
         wechat_appsecret=skill_keys.get("wechatAppSecret", ""),
         wechat_relay_url=skill_keys.get("wechatRelayUrl", ""),
@@ -1330,7 +1287,7 @@ async def _execute_custom_agent_chat(
             "model": model,
             "protocol": protocol,
             "provider": provider,
-            "thinking": config.get("thinking") or "adaptive",
+            "thinking": config.get("thinking") or "default",
         },
         todo_manager=todo_manager,
         backup_enabled=backup_enabled,
@@ -1342,8 +1299,10 @@ async def _execute_custom_agent_chat(
     )
 
     queue = asyncio.Queue()
-    cancel_event = asyncio.Event()
+    cancel_event = get_token(session_id)
     _cancel_events[session_id] = cancel_event
+    # 让工具线程可见本会话令牌（供长循环检查 + 子进程自动登记）
+    skill_manager.cancel_token = cancel_event
 
     async def producer():
         client = None
@@ -1390,6 +1349,10 @@ async def _execute_custom_agent_chat(
             })
 
             while turn_count < max_turns:
+                # ── 取消检查：用户停止后立即跳出 Agent 循环 ──
+                if cancel_event.is_set():
+                    log.info(f"[CustomAgent Chat] 已取消，跳出循环 (turn={turn_count})")
+                    break
                 turn_count += 1
 
                 await queue.put({
@@ -1503,6 +1466,10 @@ async def _execute_custom_agent_chat(
 
                 # 执行工具
                 for tc in tool_calls:
+                    # 取消后不再派发后续工具
+                    if cancel_event.is_set():
+                        log.info("[CustomAgent Chat] 已取消，停止派发后续工具")
+                        break
                     tool_name = tc["name"]
                     await queue.put({
                         "type": "tool_start",
@@ -1646,6 +1613,7 @@ async def _execute_custom_agent_chat(
         finally:
             await queue.put({"type": "chat_complete"})
             _cancel_events.pop(session_id, None)
+            release_token(session_id)
             if client:
                 await client.aclose()
 
@@ -1755,6 +1723,7 @@ async def _execute_chat(
     request: Request | None = None,
 ):
     """核心 chat 执行逻辑，供 /api/chat 和 /api/panel-chat 共用。"""
+    _apply_vision_llm_config(config)
     # 注入额外上下文（如浏览器标签页信息、工作目录等）
     ctx_parts = []
     if working_dir:
@@ -1770,13 +1739,16 @@ async def _execute_chat(
     api_key = config.get("apiKey") or ""
     model = config.get("model") or "kimi-for-coding"
     provider = config.get("provider") or "generic"
+    # 默认值全部来自模型预设：用户显式填写 > 预设默认 > 不注入
+    preset = find_preset(provider, model)
     llm_params = {
         "provider": provider,
-        "thinking": config.get("thinking") or "adaptive",
-        "context_size": config.get("contextSize") or (1_000_000 if provider == "minimax" else None),
-        "max_tokens": config.get("maxTokens") or (32768 if provider == "minimax" else None),
-        "temperature": config.get("temperature") if config.get("temperature") is not None else (1.0 if provider == "minimax" else None),
-        "top_p": config.get("topP") if config.get("topP") is not None else (0.95 if provider == "minimax" else None),
+        "thinking": config.get("thinking") or "default",
+        "context_size": config.get("contextSize") or (preset.context if preset else None),
+        "max_tokens": config.get("maxTokens") or (preset.recommended_max_tokens if preset else None),
+        "temperature": config.get("temperature"),
+        "top_p": config.get("topP"),
+        "top_k": config.get("topK"),
     }
 
     if not api_key:
@@ -1793,7 +1765,7 @@ async def _execute_chat(
         protocol=protocol,
         active=True,
         provider=provider,
-        thinking=config.get("thinking") or "adaptive",
+        thinking=config.get("thinking") or "default",
     )
     # 推送最新配置到已连接的浏览器扩展
     asyncio.create_task(bridge_manager._push_llm_configs())
@@ -1834,7 +1806,7 @@ async def _execute_chat(
 
     todo_manager = _get_todo_manager(session_id)
     session_state = _get_session_state(session_id)
-    context_tracker = ContextTracker(model, llm_params["context_size"])
+    context_tracker = ContextTracker(model, llm_params["context_size"], provider)
     existing_messages = _session_messages.get(session_id, [])
 
     skill_keys = config.get("skillKeys", {}) or {}
@@ -1848,7 +1820,8 @@ async def _execute_chat(
         f"skillKeys keys={list(skill_keys.keys())}"
     )
     skill_mgr_cwd = working_dir if working_dir and os.path.isdir(working_dir) else "."
-    skill_manager = SkillManager(
+    skill_manager = SkillManager.acquire(
+        cache_key=f"{session_id}:main",
         cwd=skill_mgr_cwd,
         web_search_provider=skill_keys.get("webSearchProvider", "kimi"),
         web_search_api_key=skill_keys.get("webSearchApiKey", ""),
@@ -1867,12 +1840,19 @@ async def _execute_chat(
             "imageMinimaxModel" if skill_keys.get("imageGenProvider") == "minimax" else "imageArkModel",
             skill_keys.get("imageGenModel", ""),
         ),
-        music_gen_api_key=skill_keys.get("musicGenApiKey", ""),
-        music_gen_base_url=skill_keys.get("musicGenBaseUrl", "https://api.minimaxi.com/v1"),
-        music_gen_model=skill_keys.get("musicGenModel", "music-3.0"),
         minimax_video_api_key=skill_keys.get("minimaxVideoApiKey", ""),
+        cinematic_video_provider=skill_keys.get("cinematicVideoProvider", "minimax"),
+        video_ark_api_key=skill_keys.get("videoArkApiKey", ""),
+        video_ark_base_url=skill_keys.get("videoArkBaseUrl", ""),
+        video_ark_model=skill_keys.get("videoArkModel", ""),
         doubao_voice_api_key=skill_keys.get("doubaoVoiceApiKey", ""),
-        opendesign_llm_config=_resolve_opendesign_llm_config(config, skill_keys),
+        doubao_voice_speaker=skill_keys.get("doubaoVoiceSpeaker", ""),
+        music_gen_provider=skill_keys.get("musicGenProvider", ""),
+        music_gen_api_key=skill_keys.get("musicGenApiKey", ""),
+        music_gen_base_url=skill_keys.get("musicGenBaseUrl", ""),
+        music_gen_model=skill_keys.get("musicGenModel", ""),
+        amap_js_key=skill_keys.get("amapJsKey", ""),
+        amap_security_code=skill_keys.get("amapSecurityCode", ""),
         wechat_appid=skill_keys.get("wechatAppId", ""),
         wechat_appsecret=skill_keys.get("wechatAppSecret", ""),
         wechat_relay_url=skill_keys.get("wechatRelayUrl", ""),
@@ -1904,7 +1884,7 @@ async def _execute_chat(
             "model": model,
             "protocol": config.get("protocol", "anthropic"),
             "provider": provider,
-            "thinking": config.get("thinking") or "adaptive",
+            "thinking": config.get("thinking") or "default",
         },
         todo_manager=todo_manager,
         backup_enabled=backup_enabled,
@@ -1929,8 +1909,10 @@ async def _execute_chat(
     )
 
     queue = asyncio.Queue()
-    cancel_event = asyncio.Event()
+    cancel_event = get_token(session_id)
     _cancel_events[session_id] = cancel_event
+    # 让工具线程可见本会话令牌（供长循环检查 + 子进程自动登记）
+    skill_manager.cancel_token = cancel_event
 
     async def producer():
         log.info(f"[Chat Request] session={session_id}, model={model}, history={len(existing_messages)} msgs")
@@ -1987,10 +1969,13 @@ async def _execute_chat(
             # 任务被中断/取消时也要保存当前上下文，避免下一次任务丢失中断后的内容
             if tool_loop.messages:
                 tool_loop._strip_dangling_tool_use(tool_loop.messages)
+                # 任务结束：剥离历史中的思考块，避免跨任务累积挤占上下文
+                tool_loop._strip_thinking_history(tool_loop.messages)
                 _session_messages[session_id] = tool_loop.messages
             await queue.put({"type": "chat_complete"})
             log.info("[Chat Complete]")
             _cancel_events.pop(session_id, None)
+            release_token(session_id)
 
     producer_task = asyncio.create_task(producer())
 
@@ -2081,7 +2066,7 @@ async def panel_chat(request: Request):
         "model": cfg["model"],
         "protocol": cfg.get("protocol", "anthropic"),
         "provider": cfg.get("provider", "generic"),
-        "thinking": cfg.get("thinking", "adaptive"),
+        "thinking": cfg.get("thinking", "default"),
     }
 
     # 注入浏览器标签页上下文 + 插件专用强制规则
@@ -2146,13 +2131,11 @@ async def tool_timeout_answer(request: Request):
 
 @app.post("/api/stop-task")
 async def stop_task(request: Request):
-    """取消指定会话正在运行的任务。"""
+    """取消指定会话正在运行的任务：置位取消标志并终止该会话全部子进程。"""
     body = await request.json()
     session_id = body.get("session_id", "default")
-    cancel_event = _cancel_events.get(session_id)
-    if cancel_event:
-        cancel_event.set()
-        log.info(f"[Stop Task] session={session_id}")
+    if cancel_session(session_id):
+        log.info(f"[Stop Task] session={session_id} 已取消，子进程已终止")
         return {"success": True}
     return {"success": False, "error": "No active task for this session"}
 
@@ -2211,6 +2194,7 @@ async def network_bridge_llm_configs():
 async def network_bridge_sync_configs(request: Request):
     """接收主程序前端同步的 LLM 配置列表和 Vision 配置。"""
     body = await request.json()
+    _apply_vision_llm_config(body)
     llms = body.get("llms", [])
     if not llms:
         return {"success": False, "error": "llms 不能为空"}
@@ -2223,7 +2207,7 @@ async def network_bridge_sync_configs(request: Request):
         model = entry.get("model", "")
         protocol = entry.get("protocol", "anthropic")
         provider = entry.get("provider", "generic")
-        thinking = entry.get("thinking", "adaptive")
+        thinking = entry.get("thinking", "default")
         if name and api_key and base_url:
             bridge_manager.register_llm_config(
                 name=name,
@@ -2266,6 +2250,109 @@ async def network_bridge_vision_config():
     if not config:
         return {"success": False, "error": "Vision 配置未同步，请在主程序 Settings 中配置 vision key"}
     return {"success": True, "config": config}
+
+
+# ─── Computer Use：桌面自动化模式 ───
+
+_COMPUTER_USE_SESSION = "computer-use"
+
+
+@app.get("/api/computer-use/status")
+async def computer_use_status():
+    """Computer Use 会话状态与当前可用能力。"""
+    from computer_use.engine import DesktopController
+    return {
+        "state": computer_use_manager.state(),
+        "capabilities": DesktopController().capabilities(),
+    }
+
+
+@app.get("/api/computer-use/frame")
+async def computer_use_frame():
+    """供悬浮窗轮询：返回状态 + 最新一帧画面(dataURL) + 动作日志。"""
+    snap = computer_use_manager.snapshot()
+    frame = snap.get("frame")
+    if frame and frame.get("image"):
+        snap["frame_url"] = f"data:{frame.get('mime', 'image/jpeg')};base64,{frame['image']}"
+    # 避免把原始 base64 重复返给前端
+    if snap.get("frame"):
+        snap["frame"] = {k: v for k, v in snap["frame"].items() if k != "image"}
+    return snap
+
+
+@app.post("/api/computer-use/config")
+async def computer_use_config(request: Request):
+    """主程序进入模式时同步当前激活的 LLM 配置，供 Computer Use 会话使用。"""
+    body = await request.json()
+    computer_use_manager.set_llm_config(body.get("config") or {})
+    return {"success": True}
+
+
+@app.post("/api/computer-use/control")
+async def computer_use_control(request: Request):
+    """人机协同指令：暂停 / 继续 / 接管 / 交还 / 停止 / 纠正。"""
+    body = await request.json()
+    action = (body.get("action") or "").strip()
+    text = body.get("text", "")
+
+    if action == "pause":
+        computer_use_manager.set_state("paused", "用户已暂停")
+    elif action == "resume":
+        computer_use_manager.set_state("running", "已继续")
+    elif action == "takeover":
+        computer_use_manager.set_state("taken_over", "用户已接管控制")
+    elif action == "handback":
+        computer_use_manager.set_state("running", "用户已交还控制")
+    elif action == "stop":
+        computer_use_manager.stop("用户已停止")
+    elif action == "correct":
+        computer_use_manager.post_correction(text)
+    else:
+        return {"success": False, "error": f"未知控制指令: {action}"}
+
+    return {"success": True, "state": computer_use_manager.state()}
+
+
+@app.post("/api/computer-use/chat")
+async def computer_use_chat(request: Request):
+    """悬浮窗发起 Computer Use 任务：仅启用 computer_use skill 的对话回路。"""
+    body = await request.json()
+    message = (body.get("message") or "").strip()
+    if not message:
+        return {"error": "Message cannot be empty"}
+
+    cfg = computer_use_manager.get_llm_config()
+    if not cfg or not cfg.get("apiKey"):
+        return {"error": "尚未同步 LLM 配置，请先在主程序发起一次对话或在设置中保存 API Key"}
+
+    computer_use_manager.start(task=message)
+
+    extra_context = [
+        "[系统规则: 你正处于 Computer Use 桌面自动化模式，只能使用 computer_use 工具操作当前电脑。]\n"
+        "[1. 优先 uia_tree 读取控件树，用 click_element / set_element_value 按元素操作；"
+        "仅当控件树无法覆盖目标时才降级 screenshot + 坐标。]\n"
+        "[2. screenshot 会返回对当前画面的文字识别（description 字段），你只能依据工具真实返回的 "
+        "description / nodes / results 下结论，看不到图片本身。任何「已完成/已打开/已成功」都必须有"
+        "对应的 description 或 uia_tree 佐证，并在答复中说明依据来自哪一步返回。]\n"
+        "[3. 禁止编造数据：磁盘容量、文件名、金额、数量等具体数值必须来自 uia_tree / screenshot 的实际返回，"
+        "不得凭常识或印象估算；拿不到就如实说拿不到。]\n"
+        "[4. 失败如实说：若某步失败或无法确认，必须明确说明失败并换方式重试，绝不允许把未完成的任务说成已完成。]\n"
+        "[5. 【达成即止】用户要的是「打开/查看某物」，不是穷尽界面。一旦目标已达成并确认"
+        "（例如此电脑窗口已打开），立即汇报所见内容并结束，不得为收集额外信息继续在已达成目标的窗口里点击探索。]\n"
+        "[6. 打开桌面图标或文件用双击（double_click_element，或 click_element 加 clicks:2 / button:'double'）；"
+        "拖拽用 drag，长按用 long_press，键盘用 type_text / hotkey。]\n"
+        "[7. 若工具返回 user_correction，必须立即按用户纠正调整计划。]"
+    ]
+
+    return await _execute_chat(
+        user_message=message,
+        config=cfg,
+        session_id=_COMPUTER_USE_SESSION,
+        max_iterations=int(body.get("maxIterations", 30)),
+        extra_context=extra_context,
+        enabled_skills=["computer_use"],
+        request=request,
+    )
 
 
 def load_config():

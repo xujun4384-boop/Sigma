@@ -13,6 +13,8 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+from cancellation import ToolCancelledError
+
 # 每个 stage 的整体重试上限（含其内部子任务的重试）。
 # 画面生成等 stage 内部已对每段独立重试，这里只需兜底一次，避免「段内 6 次 × 段数 × stage 6 次」的重试风暴。
 MAX_RETRY = 3
@@ -34,6 +36,20 @@ STAGE_LABELS = {
     "video": "画面生成",
     "compose": "合成",
 }
+
+
+def _cancel_requested(skill_manager) -> bool:
+    """是否已请求取消。优先看 SkillManager 携带的会话令牌（跨线程可靠），
+    其次看当前执行上下文的令牌。"""
+    tok = getattr(skill_manager, "cancel_token", None)
+    if tok is not None and tok.is_set():
+        return True
+    try:
+        from cancellation import cancelled
+
+        return cancelled()
+    except Exception:
+        return False
 
 # Stage 0 脚本设计的 system prompt（让 design LLM 根据需求设计脚本）
 _SCRIPT_PROMPT = """你是一位视频脚本设计师。根据用户需求，设计一个完整的视频脚本。
@@ -101,7 +117,7 @@ def run_pipeline(
     project: str,
     speaker: str,
     skill_manager,
-    opendesign_llm_config: dict,
+    llm_config: dict,
     fps: int,
     width: int,
     height: int,
@@ -159,10 +175,12 @@ def run_pipeline(
         progress(f"▶ 阶段 {STAGE_LABELS[stage]}...")
         last_err = None
         for attempt in range(1, MAX_RETRY + 1):
+            if _cancel_requested(skill_manager):
+                raise ToolCancelledError("用户已取消，视频流水线终止")
             try:
                 artifacts = _run_stage(
                     stage, brief, out, work_dir, parts_root, project, speaker,
-                    skill_manager, opendesign_llm_config,
+                    skill_manager, llm_config,
                     fps, width, height, artifacts, progress,
                 )
                 completed.add(stage)
@@ -185,18 +203,18 @@ def run_pipeline(
 
 
 def _run_stage(stage, brief, out, work_dir, parts_root, project, speaker,
-               skill_manager, opendesign_llm_config,
+               skill_manager, llm_config,
                fps, width, height, artifacts, progress):
     if stage == "script":
-        return _stage_script(brief, artifacts, opendesign_llm_config, progress)
+        return _stage_script(brief, artifacts, llm_config, progress)
     if stage == "narration":
         return _stage_narration(artifacts, parts_root, project, speaker, skill_manager, progress)
     if stage == "storyboard":
-        return _stage_storyboard(artifacts, opendesign_llm_config, progress)
+        return _stage_storyboard(artifacts, llm_config, progress)
     if stage == "images":
         return _stage_images(parts_root, project, artifacts, skill_manager, progress)
     if stage == "video":
-        return _stage_video(out, parts_root, project, artifacts, opendesign_llm_config, skill_manager, fps, width, height, progress)
+        return _stage_video(out, parts_root, project, artifacts, skill_manager, fps, width, height, progress)
     if stage == "compose":
         return _stage_compose(out, parts_root, project, artifacts, skill_manager, fps, width, height, progress)
     raise ValueError(f"未知阶段: {stage}")
@@ -204,19 +222,27 @@ def _run_stage(stage, brief, out, work_dir, parts_root, project, speaker,
 
 # ── Stage 0: 脚本设计（design LLM） ──
 
-def _stage_script(brief, artifacts, opendesign_llm_config, progress):
-    from skills.opendesign.scripts.renderer import call_llm_text
+def _stage_script(brief, artifacts, llm_config, progress):
+    from skills.opendesign.scripts.renderer import (
+        call_llm_text, _call_with_token_fallback,
+        LONG_OUTPUT_MAX_TOKENS, LONG_OUTPUT_TOKEN_FALLBACKS,
+    )
 
-    cfg = opendesign_llm_config
+    cfg = llm_config
     if not (cfg.get("base_url") and cfg.get("api_key") and cfg.get("model")):
         raise RuntimeError("design LLM 未配置，无法设计脚本")
 
-    raw = call_llm_text(
-        system_prompt=_SCRIPT_PROMPT,
-        context=f"用户需求：\n{brief}",
-        base_url=cfg["base_url"], api_key=cfg["api_key"], model=cfg["model"],
-        protocol=cfg.get("protocol", "anthropic"),
-        max_tokens=4096,
+    raw = _call_with_token_fallback(
+        lambda budget: call_llm_text(
+            system_prompt=_SCRIPT_PROMPT,
+            context=f"用户需求：\n{brief}",
+            base_url=cfg["base_url"], api_key=cfg["api_key"], model=cfg["model"],
+            protocol=cfg.get("protocol", "anthropic"),
+            provider=cfg.get("provider"), thinking=cfg.get("thinking"),
+            max_tokens=budget,
+        ),
+        max_tokens=LONG_OUTPUT_MAX_TOKENS,
+        fallbacks=LONG_OUTPUT_TOKEN_FALLBACKS,
     )
     parsed = _parse_script(raw)
     if not parsed or not parsed.get("scenes"):
@@ -303,10 +329,13 @@ def _stage_narration(artifacts, parts_root, project, speaker, skill_manager, pro
 
 # ── Stage 2: 画面规划（design LLM 决定图需求） ──
 
-def _stage_storyboard(artifacts, opendesign_llm_config, progress):
-    from skills.opendesign.scripts.renderer import call_llm_text
+def _stage_storyboard(artifacts, llm_config, progress):
+    from skills.opendesign.scripts.renderer import (
+        call_llm_text, _call_with_token_fallback,
+        LONG_OUTPUT_MAX_TOKENS, LONG_OUTPUT_TOKEN_FALLBACKS,
+    )
 
-    cfg = opendesign_llm_config
+    cfg = llm_config
     if not (cfg.get("base_url") and cfg.get("api_key") and cfg.get("model")):
         raise RuntimeError("design LLM 未配置，无法进行画面规划")
 
@@ -321,12 +350,17 @@ def _stage_storyboard(artifacts, opendesign_llm_config, progress):
         f"旁白总时长：{artifacts.get('total_duration', 0)} 秒\n"
         f"分镜（含旁白文案与画面描述）：\n{json.dumps(scenes, ensure_ascii=False, indent=2)}\n"
     )
-    raw = call_llm_text(
-        system_prompt=_STORYBOARD_PROMPT,
-        context=context,
-        base_url=cfg["base_url"], api_key=cfg["api_key"], model=cfg["model"],
-        protocol=cfg.get("protocol", "anthropic"),
-        max_tokens=4096,
+    raw = _call_with_token_fallback(
+        lambda budget: call_llm_text(
+            system_prompt=_STORYBOARD_PROMPT,
+            context=context,
+            base_url=cfg["base_url"], api_key=cfg["api_key"], model=cfg["model"],
+            protocol=cfg.get("protocol", "anthropic"),
+            provider=cfg.get("provider"), thinking=cfg.get("thinking"),
+            max_tokens=budget,
+        ),
+        max_tokens=LONG_OUTPUT_MAX_TOKENS,
+        fallbacks=LONG_OUTPUT_TOKEN_FALLBACKS,
     )
     images = _parse_image_plan(raw)
     artifacts["image_plan"] = images
@@ -483,7 +517,7 @@ def _merge_audios(vo_paths, output_path):
     return str(output_path)
 
 
-def _stage_video(out, parts_root, project, artifacts, opendesign_llm_config, skill_manager, fps, width, height, progress):
+def _stage_video(out, parts_root, project, artifacts, skill_manager, fps, width, height, progress):
     segments = _split_segments(artifacts)
     n = len(segments)
 
@@ -503,6 +537,8 @@ def _stage_video(out, parts_root, project, artifacts, opendesign_llm_config, ski
             return
         last_err = None
         for attempt in range(1, SEG_RETRY + 1):
+            if _cancel_requested(skill_manager):
+                raise ToolCancelledError("用户已取消，停止画面生成")
             try:
                 _generate_segment(seg, seg_dir, project, artifacts, skill_manager, fps, width, height, progress)
                 return
