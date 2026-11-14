@@ -21,6 +21,8 @@
   `process` / `fs` / `child_process` / `Date.now` / `Math.random` / `setTimeout` /
   `setInterval` / `requestAnimationFrame` / `window` / `document` / 外部 URL / CSS 动画。
 - 静态检查通过后渲染；渲染错误或视觉问题会回灌给 LLM 重写。
+- **只做 2D**：运行环境是 DOM / SVG / Canvas 2D，没有 three.js / WebGL，import 白名单也不含它们。
+  需要真 3D 开场时不要在这里硬写——交给导演组改用 `blender` 或 `opendesign` 的 three.js。
 - 视觉闸门：3 帧拼图交给主多模态 LLM，按空帧、可读性、裁切、覆盖、钩子力打分；
   6 分及以上且无硬伤才通过。视觉模型不可用时退化为“空白/纯色检测”。
 

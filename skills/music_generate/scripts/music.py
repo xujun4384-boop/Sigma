@@ -22,6 +22,28 @@ DEFAULT_AUDIO_FORMAT = "mp3"
 DEFAULT_SAMPLE_RATE = 44100
 DEFAULT_BITRATE = 256000
 
+# 纯音乐模式的提示词外壳。
+# 为什么要有它：音乐模型对「无人声」这类否定句不敏感，甚至在提示词里出现
+# “人声/演唱/vocal” 反而会把它当成素材线索。所以这里改成**先正面声明器乐**、
+# 再把编曲落成具体乐器，最后才补一句排除项；并且由工具统一加，不靠上游 LLM 自觉。
+INSTRUMENTAL_PREFIX = "纯器乐配乐，全部声部由乐器演奏。"
+INSTRUMENTAL_SUFFIX = (
+    "编曲：合成器铺底，弦乐与钢琴承担主旋律，鼓组与打击乐提供节奏。"
+    "只做器乐，不安排主唱或合唱声部。"
+)
+
+
+def instrumental_prompt(prompt: str) -> str:
+    """把任意风格描述包装成「器乐优先」的提示词。
+
+    结构固定：正面声明 → 用户风格 → 具体编曲与排除项。
+    这样即使上游只写了一句"史诗感"，产出也不会落到歌曲形态。
+    """
+    text = (prompt or "").strip().strip("。.;；")
+    if not text:
+        text = "现代感科技配乐，节奏清晰，适合做视频背景"
+    return f"{INSTRUMENTAL_PREFIX}风格与情绪：{text}。{INSTRUMENTAL_SUFFIX}"
+
 # provider → 端点信息与默认模型。新增厂商在此登记即可（无需改动调用逻辑）。
 PROVIDER_SPECS = {
     "tencent_tokenhub": {
@@ -161,6 +183,9 @@ def generate(*, api_key: str, output_path: str, prompt: str,
     prompt = (prompt or "").strip()
     if not prompt:
         raise ValueError("prompt 不能为空")
+    if instrumental:
+        # 纯音乐模式统一加器乐外壳：不依赖上游怎么写，避免落到歌曲/哼唱形态
+        prompt = instrumental_prompt(prompt)
     if not instrumental and not (lyrics or "").strip() and not auto_lyrics:
         raise ValueError(
             "非纯音乐模式需要提供 lyrics（自定义歌词）或开启 auto_lyrics（自动写词）"
@@ -198,4 +223,6 @@ def generate(*, api_key: str, output_path: str, prompt: str,
         "model": mdl,
         "provider": prov,
         "provider_label": provider_label(prov),
+        "prompt": prompt,
+        "extra_info": extra,
     }

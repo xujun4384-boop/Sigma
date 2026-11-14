@@ -1075,6 +1075,7 @@ _BIBLE_SYS = """你是这支 MV 的美术总监。编导方案已经定了「每
 {
  "protagonist": "整片不变的视觉主体：优先考虑一件物件、一个场景或一种光影结构，也可以是一个/一组人物；写清它长什么样、什么颜色、占据画面多大",
  "character": {"applies": true, "who": "如果片中有固定人物：是谁/什么身份", "hair": "固定的发型与发色", "cloth": "固定的服装与配色", "colors": ["#RRGGBB", "#RRGGBB"], "scale": "人物高度约占画面的比例"},
+ "cast": [{"role": "friend-a", "name": "配角名", "hair": "发型", "outfit": "服装", "colors": ["#RRGGBB"], "note": "与主角的区分点"}],
  "stage": {"location": "整片固定的舞台/主场景（一场戏只在一个世界里）", "background": ["固定背景元素"], "light": "固定光位与色调", "camera": "默认机位与轴线"},
  "continuity": ["整片只允许哪些变化（机位/景别/灯光/道具/动作）", "明确禁止的变化（换场景/换主体/换服装等）"],
  "paletteArc": [{"section": "段落名", "colors": ["#RRGGBB", "#RRGGBB"], "mood": "一句话情绪"}],
@@ -1090,9 +1091,11 @@ _BIBLE_SYS = """你是这支 MV 的美术总监。编导方案已经定了「每
    不要写「唯美」「电影感」「氛围感」这类无法执行的说法。
    画面里画不画人由内容决定；如果要画，尽量贴近所选风格的画法；
    这一风格不适合正面人物时，就用背影、远景或只画物件。
-3. **character 是跨批次的一致性档案**：片中如果出现固定人物（哪怕是背影），必须把发型、服装、主色、
+3. **character 是主角的一致性档案**：片中如果出现主角（哪怕是背影），必须把发型、服装、主色、
    身高比例钉死，后面每一批都照这套画，不许换发色/换衣服；片中不需要固定人物时 applies=false，
    其余字段留空字符串即可。
+   **配角写进 cast**：每个配角给 role（小写英文/连字符，如 friend-a）、name、发型、服装、主色
+   和「与主角的区分点」；数量按内容定、最多 4 个，没有配角就给空数组。
 4. motifs 必须是具体物件（伞、扁担、一盏灯……），不能是抽象概念。
 5. **stage / continuity 是表演型的硬约束**：整片只能发生在同一个舞台/主场景里；
    后续每句画面只允许机位、景别、灯光、道具和动作变化，不许换场景、换主体、换服装。
@@ -1152,14 +1155,11 @@ MV.filler = { bg:"#101828", draw(e){...} };
 """
 
 
-# 本技能**不用思考模式**（thinking=disabled）。
-# 原因：每批任务只是"按规格写 6 段 canvas 绘制代码"，输出 6~14KB，正常生成几十秒。
-# 而自适应思考（框架默认 adaptive）让每批耗时在 38s ~ 996s 之间乱跳，且思考期间
-# 服务端**零输出**——超时风险全压在这一段上：实测 timeout 从 900 收到 300 之后，
-# 连着两次都在第 300 秒整被掐断。关掉思考后每批应回到分钟以内。
-# 这里只声明本技能的取向，不改框架默认（主对话仍是 adaptive）；
-# 想改回思考模式：设环境变量 LYRIC_MV_THINKING=adaptive 即可。
-THINKING_MODE = os.environ.get("LYRIC_MV_THINKING", "disabled")
+# 思考档位默认跟随调用方配置，**不再强制关闭**：
+# 有些模型（如 Kimi K3.1）根本关不掉思考，强行注入 off 无效；统一按"正常思考"处理，
+# 把余量放在停滞超时（600s）与输出预算（整体 128k，思考 token 也在里面）上。
+# 想在本技能内单独关闭思考：设环境变量 LYRIC_MV_THINKING=disabled 即可。
+THINKING_MODE = os.environ.get("LYRIC_MV_THINKING", "")
 
 # 输出预算：**思考 token 也算在 max_tokens 里**，实际思考量常超过正文；
 # 统一按整体给足（见 context_manager.LONG_OUTPUT_MAX_TOKENS），
@@ -1175,7 +1175,8 @@ OUT_TOKEN_FALLBACKS = LONG_OUTPUT_TOKEN_FALLBACKS
 
 def _llm(system, ctx, cfg, meta_label=""):
     """单次调用。
-    timeout=360：关掉思考后实测每批落在 76~220 秒，给 1.6 倍余量。
+    timeout=600：这是"停滞超时"（连续这么久没有任何数据才判失败）。长思考模型思考期间
+    可能长时间不吐正文，给足余量；真正卡死由用户取消兜底。
     attempts=1：重试统一交给上层 _ask（它知道错在哪、且只重来这一小段），
     两层都重试会叠成很长的等待。
 
@@ -1197,7 +1198,7 @@ def _llm(system, ctx, cfg, meta_label=""):
             base_url=cfg["base_url"], api_key=cfg["api_key"],
             model=cfg["model"], protocol=cfg.get("protocol", "anthropic"),
             provider=cfg.get("provider"), thinking=cfg.get("thinking") or THINKING_MODE,
-            max_tokens=mt, timeout=360, attempts=1, on_meta=on_meta)
+            max_tokens=mt, timeout=600, attempts=1, on_meta=on_meta)
 
     # 先按预算上限要；通道不接受这个 max_tokens 才逐档下调。
     # 注意：「输出被截断」是模型真把预算用完了，降档只会更糟，必须直接报错。
@@ -1494,6 +1495,179 @@ def st_bible(w, tl, plan, brief, cfg, force=False, mode="performance"):
     return False, f"3 次不通过：{errs[:3]}"
 
 
+SHOTLIST_VERSION = 1
+
+_SHOTLIST_SYS = """你是 MV 的分镜导演。读歌词时间轴、编导方案、视觉圣经和用户要求，
+把整首歌切成一串可拍的镜头，给画面作者逐镜的指令。
+只输出 JSON：
+{
+ "shots": [
+   {"start": 0.0, "end": 6.5, "section": "Verse 1",
+    "size": "景别（大全景/全景/中景/近景/特写/空镜）",
+    "camera": "机位与运动（固定/推/拉/横移/摇/俯拍/仰拍/手持/跟拍）",
+    "subject": "这一镜的主体（谁/什么东西/哪处环境）",
+    "action": "画面里发生什么（具体的动作或光影变化）",
+    "cast": ["这一镜出场的角色 key（角色表里的 role，空镜可为空数组）"],
+    "change": "与上一镜的差别（第一镜写「开场」）"}
+ ]
+}
+
+硬性要求：
+1. shots 从 0 连续铺满到 {DURATION}s，首尾相接，不留空档、不重叠；每镜 3~12 秒。
+2. 按段落与情绪切，不按歌词句机械切；一个镜头可以跨多句。
+3. 相邻两镜至少在景别 / 机位 / 主体 / 动作里换一项；禁止连续两镜同景别、同主体、同构图。
+4. 允许纯环境空镜（size=空镜，subject 写环境，cast 为空）：不要每镜都摆全员合影。
+5. 主体写清是谁；配角按视觉圣经的固定造型，不要把主角复制成多个人。
+6. 严格服从视觉圣经的世界、角色、服装与连续性；但机位、景别、主体可以大胆变化。
+7. cast 只能填角色表里存在的 role，不要自造角色；不在这一镜的人不要写进 cast。
+8. 只输出 JSON。
+"""
+
+
+def _character_file(w) -> Path | None:
+    """整组角色文件的来源：环境变量（事务注入）优先，其次 out_dir 里的 art 目录。"""
+    env = os.environ.get("LYRIC_MV_CHARACTER", "").strip()
+    if env:
+        p = Path(env)
+        candidates = [p.parent / "characters.json", p]
+    else:
+        candidates = [w / "art" / "characters.json", w / "art" / "character.json",
+                      w / "characters.json", w / "character.json"]
+    return next((p for p in candidates if p.exists()), None)
+
+
+def _cast_roles(w) -> list[dict]:
+    """项目里已确认的角色表：[{role, name}]。没有定妆文件就返回空（镜头表不写 cast）。"""
+    p = _character_file(w)
+    if p:
+        try:
+            doc = json.loads(p.read_text(encoding="utf-8-sig"))
+        except Exception:
+            doc = None
+        if isinstance(doc, dict) and isinstance(doc.get("characters"), list):
+            out = []
+            for c in doc["characters"]:
+                if not isinstance(c, dict):
+                    continue
+                spec = c.get("spec") if isinstance(c.get("spec"), dict) else c
+                role = str(c.get("role") or "").strip()
+                if role:
+                    out.append({"role": role, "name": str(spec.get("name") or role)})
+            if out:
+                return out
+        if isinstance(doc, dict) and isinstance(doc.get("proportions"), dict):
+            return [{"role": "hero", "name": str(doc.get("name") or "主角")}]
+    return []
+
+
+def st_shotlist(w, tl, plan, brief, cfg, force=False):
+    """performance 模式的逐镜镜头表：景别/机位/主体/动作/与上一镜的差异。
+
+    非致命：生成失败就退回「按段落自动分镜」，不拦片；成功时画面作者每镜都会
+    拿到具体镜头要求，并对上一镜的构图做出变化。
+    """
+    p = w / "shots.json"
+    dur = float(tl.get("duration") or 0)
+    cast_file = _character_file(w)
+    sig = sha(w / "timeline.json", w / "plan.json", w / "visual-bible.json", brief or "",
+              cast_file if cast_file else "")
+    if p.exists() and not force:
+        try:
+            old = json.loads(p.read_text(encoding="utf-8-sig"))
+        except Exception:
+            old = {}
+        if int(old.get("_v") or 0) >= SHOTLIST_VERSION and old.get("_sig") == sig:
+            log(f"镜头表复用：{len(old.get('shots') or [])} 镜")
+            return True, "复用"
+
+    ctx, _ = _ctx_common(tl, brief)
+    ctx += "\n\n编导方案：\n" + json.dumps(plan, ensure_ascii=False)[:4000]
+    bt = _bible_text(w)
+    if bt:
+        ctx += "\n\n视觉圣经（世界/角色/连续性必须遵守）：\n" + bt[:3000]
+    roles = _cast_roles(w)
+    if roles:
+        ctx += ("\n\n可用角色（每镜的 cast 只能填这些 role，不要自造角色）：\n"
+                + "\n".join(f"- {r['role']}：{r['name']}" for r in roles))
+    ctx += f"\n\n歌长 {dur:.2f}s：镜头必须从 0 连续铺到 {dur:.2f}s。"
+
+    errs = []
+    for k in (1, 2, 3):
+        c2 = ctx + ("\n\n上次被拒，只修这些问题：\n" + "\n".join(errs) if errs else "")
+        try:
+            dump(f"shotlist-prompt-{k}", c2)
+            raw = _llm(_SHOTLIST_SYS.replace("{DURATION}", f"{dur:.2f}"), c2, cfg,
+                       meta_label=f"shotlist-{k}")
+            dump(f"shotlist-raw-{k}", raw)
+            doc = _json_of(raw)
+        except Exception as e:
+            errs = [f"JSON 解析失败：{e}"]
+            log(f"镜头表 第{k}次 ✗ {errs[0]}")
+            continue
+
+        raw_shots = doc.get("shots") if isinstance(doc, dict) else None
+        clean = []
+        for s in (raw_shots if isinstance(raw_shots, list) else []):
+            if not isinstance(s, dict):
+                continue
+            try:
+                a, b = float(s.get("start")), float(s.get("end"))
+            except (TypeError, ValueError):
+                continue
+            clean.append({
+                "start": round(a, 3), "end": round(b, 3),
+                "section": str(s.get("section") or "").strip(),
+                "size": str(s.get("size") or "").strip(),
+                "camera": str(s.get("camera") or "").strip(),
+                "subject": str(s.get("subject") or "").strip(),
+                "action": str(s.get("action") or "").strip(),
+                "change": str(s.get("change") or "").strip(),
+                "cast": [str(x).strip() for x in (s.get("cast") or [])
+                         if isinstance(x, (str, int)) and str(x).strip()]
+                        if isinstance(s.get("cast"), list) else [],
+            })
+        if not isinstance(raw_shots, list):
+            errs = ["缺 shots 数组"]
+        elif len(clean) != len(raw_shots):
+            errs = ["有镜头缺 start/end 或不是对象"]
+        else:
+            errs = []
+            if not (8 <= len(clean) <= 28):
+                errs.append(f"镜头数 {len(clean)} 不在 8~28 之间")
+        if not errs:
+            for i, s in enumerate(clean):
+                span = s["end"] - s["start"]
+                if span < 3.0:
+                    errs.append(f"第 {i + 1} 镜只有 {span:.1f}s，太短（≥3s）")
+                elif span > 12.0:
+                    errs.append(f"第 {i + 1} 镜有 {span:.1f}s，太长（≤12s）")
+                for key, label in (("size", "景别"), ("camera", "机位"),
+                                   ("subject", "主体"), ("action", "动作")):
+                    if not s[key]:
+                        errs.append(f"第 {i + 1} 镜缺{label}")
+                if i > 0 and not s["change"]:
+                    errs.append(f"第 {i + 1} 镜缺「与上一镜的差别」")
+                if roles:
+                    known = {r["role"] for r in roles}
+                    unknown = [c for c in s["cast"] if c not in known]
+                    if unknown:
+                        errs.append(f"第 {i + 1} 镜 cast 里有不存在的角色 {unknown}"
+                                    f"（可用：{sorted(known)}）")
+            errs.extend(_shot_coverage_errors(clean, dur))
+        if errs:
+            errs = errs[:8]
+            log(f"镜头表 第{k}次 ✗ {'；'.join(errs[:3])}")
+            continue
+
+        clean.sort(key=lambda s: s["start"])
+        p.write_text(json.dumps({
+            "_v": SHOTLIST_VERSION, "_sig": sig, "_mode": "performance", "shots": clean,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        log(f"镜头表完成（第 {k} 次）：{len(clean)} 镜")
+        return True, f"{len(clean)} 镜"
+    return False, ("；".join(errs[:3]) if errs else "未生成")
+
+
 def _bible_text(w):
     """把 visual-bible.json 渲染成注入每批提示词的短文本。"""
     f = w / "visual-bible.json"
@@ -1532,9 +1706,15 @@ def _bible_text(w):
             if isinstance(c, dict):
                 name = str(c.get("name") or "").strip()
                 look = str(c.get("look") or "").strip()
+                if not look:
+                    look = "；".join(x for x in (
+                        str(c.get("hair") or "").strip(),
+                        str(c.get("outfit") or "").strip()) if x)
                 colors = " ".join(str(x) for x in (c.get("colors") or []) if str(x).strip())
+                note = str(c.get("note") or "").strip()
                 if name or look:
-                    rows.append(f"{name}（{look}" + (f"，{colors}" if colors else "") + "）")
+                    rows.append(f"{name}（{look}" + (f"，{colors}" if colors else "")
+                                + (f"；{note}" if note else "") + "）")
             elif str(c).strip():
                 rows.append(str(c))
         if rows:
@@ -3272,7 +3452,7 @@ def st_render(w, st, tl, plan, scenes, song, fps):
 def st_render_tsx(w, st, tl, plan, song, fps, force=False):
     """Remotion 引擎的渲染段：bundle → renderMedia → 混音。"""
     out = w / "mv.mp4"
-    sig = sha((w / "timeline.json"), (w / "render-plan.json"), song)
+    sig = sha((w / "timeline.json"), (w / "render-plan.json"), song, (w / "look.json"))
     if not force and ok_cached(st, "render", sig) and out.exists():
         log("成片复用")
         return True, "复用", out
@@ -3373,9 +3553,11 @@ def st_accept(st, out):
 
 LABEL = {"env": "环境自检", "audio": "音源准备", "grid": "拍网格", "align": "逐字对齐",
          "mode": "模式判断", "plan": "编导编排", "typeplan": "字效方案",
+         "shotlist": "镜头表",
          "scenes": "画面代码", "render": "逐帧渲染", "accept": "出片验收"}
 STEP = {"env": "⓪", "audio": "①", "grid": "②", "align": "③", "mode": "③·4",
-        "plan": "④", "typeplan": "④·5T", "scenes": "⑤", "render": "⑥", "accept": "⑦"}
+        "plan": "④", "typeplan": "④·5T", "shotlist": "④·6", "scenes": "⑤",
+        "render": "⑥", "accept": "⑦"}
 
 
 def hdr(name):
@@ -3417,6 +3599,9 @@ def main():
                     help="为每个段落生成一张 AI 氛围底图（需要配置图片生成 Key）")
     ap.add_argument("--max-images", type=int, default=6,
                     help="最多生成几张段落底图，默认 6")
+    ap.add_argument("--look", default="",
+                    help='渲染外观 JSON（自由配置），例如 {"pixel":{"block":4,"colors":24}}；'
+                         "不传则沿用 out_dir 里已有的 look.json")
     ap.add_argument("--run", action="store_true")
     ap.add_argument("--engine", default=os.environ.get("LYRIC_MV_ENGINE", "canvas"),
                     choices=["canvas", "remotion"],
@@ -3431,6 +3616,20 @@ def main():
     w = Path(args.work).resolve()
     w.mkdir(parents=True, exist_ok=True)
     open_log(w)
+
+    # 渲染外观（像素化等）：显式传入优先，其次用外部注入的环境变量；都没有就沿用已有配置
+    raw_look = (args.look or os.environ.get("LYRIC_MV_LOOK", "")).strip()
+    if raw_look:
+        try:
+            look_doc = json.loads(raw_look)
+        except Exception as e:
+            log(f"❌ look 不是合法 JSON：{e}")
+            return 1
+        if not isinstance(look_doc, dict):
+            log("❌ look 必须是 JSON 对象")
+            return 1
+        (w / "look.json").write_text(json.dumps(look_doc, ensure_ascii=False, indent=2),
+                                     encoding="utf-8")
     st = load_state(w)
     fset = {x for x in args.force.split(",") if x}
     stop = args.stop_after.strip()
@@ -3704,7 +3903,18 @@ def main():
         if not ok:
             log(f"⚠ 视觉圣经未生成（{note}），画面只按编导方案画")
 
-        # 4·6 可选：段落氛围底图（AI 插画层）。未配置 Key 或生成失败都只跳过，不拦片。
+        # 4·6 镜头表：每一镜的景别/机位/主体/动作/与上一镜的差异。
+        # 没有它时画面作者只能按段落自由发挥，同段落的多镜会收敛成同一张构图。
+        log("④·6 镜头表（逐镜导演指令）")
+        ok_sl, note_sl = st_shotlist(w, tl, plan, args.brief, cfg, force="shotlist" in fset)
+        if ok_sl:
+            log(f"镜头表：{note_sl}")
+        else:
+            log(f"⚠ 镜头表未生成（{note_sl}），退回按段落自动分镜")
+        if halt("shotlist"):
+            return 0
+
+        # 4·7 可选：段落氛围底图（AI 插画层）。未配置 Key 或生成失败都只跳过，不拦片。
         if args.with_images:
             log("④· 段落底图（可选 AI 插画层）")
             keys = ensure_section_images(w, tl, plan, args.max_images)
@@ -3723,9 +3933,11 @@ def main():
         asset_keys = ",".join(sorted((plan.get("assets") or {}).keys()))
         type_sig = sha(w / "type-plan.json") if (w / "type-plan.json").exists() else ""
         emph_sig = sha(w / "type-emphasis.json") if (w / "type-emphasis.json").exists() else ""
-        sig_scenes = ("v6:mode:" + mode
+        shot_sig = sha(w / "shots.json") if (w / "shots.json").exists() else ""
+        sig_scenes = ("v7:mode:" + mode
                       + (f"|type:{type_sig}" if type_sig else "")
                       + (f"|emph:{emph_sig}" if emph_sig else "")
+                      + (f"|shots:{shot_sig}" if shot_sig else "")
                       + (f"|img:{asset_keys}" if asset_keys else ""))
     if TSX_ENGINE:
         sig_scenes += "|engine:remotion"
@@ -3739,11 +3951,18 @@ def main():
         if has_missing:
             log("上次有镜头没画出来，重跑画面段补画（已通过的镜头会复用）")
         if TSX_ENGINE:
-            # 开放模式：自动分镜 → 定妆（硬闸门）→ 并行拍镜 → 闸门
+            # 开放模式：镜头表（performance）→ 定妆（硬闸门）→ 并行拍镜 → 闸门
+            shot_list = []
+            if mode == "performance" and (w / "shots.json").exists():
+                try:
+                    shot_list = json.loads(
+                        (w / "shots.json").read_text(encoding="utf-8-sig")).get("shots") or []
+                except Exception:
+                    shot_list = []
             ok, note, scenes = remotion_artist.generate(
                 w, tl, plan, args.brief, cfg, _llm, dump, mode=mode,
                 story=story if mode == "narrative" else None,
-                force="scenes" in fset)
+                shots=shot_list, force="scenes" in fset)
         elif mode == "narrative":
             ok, note, scenes = st_story_scenes(
                 w, st, tl, plan, story, cfg, force="scenes" in fset)
@@ -3834,7 +4053,7 @@ def main():
     # 6 渲染
     hdr("render")
     plan_used = w / ("render-plan.json" if TSX_ENGINE else "plan.json")
-    sig_render = sha((w / "timeline.json"), plan_used, scenes, song)
+    sig_render = sha((w / "timeline.json"), plan_used, scenes, song, (w / "look.json"))
     if cached("render", sig_render) and (w / "mv.mp4").exists():
         log("跳过 逐帧渲染")
         out = w / "mv.mp4"

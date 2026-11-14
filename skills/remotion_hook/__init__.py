@@ -10,6 +10,7 @@
 """
 import subprocess
 import sys
+import json
 from pathlib import Path
 
 from skills.base import BaseTool, ToolParameter, ToolResult
@@ -47,6 +48,8 @@ class RemotionHookTool(BaseTool):
         ToolParameter("width", "integer", "画布宽，默认 1920", required=False, default=1920),
         ToolParameter("height", "integer", "画布高，默认 1080", required=False, default=1080),
         ToolParameter("fps", "integer", "帧率，默认 30", required=False, default=30),
+        ToolParameter("character", "string", "已确认的定妆参数 JSON；有角色时供自由发挥镜头使用",
+                      required=False, default=""),
     ]
 
     def __init__(self, cwd: str = ".", llm_config: dict = None, **kwargs):
@@ -68,6 +71,7 @@ class RemotionHookTool(BaseTool):
         width: int = 1920,
         height: int = 1080,
         fps: int = 30,
+        character: str = "",
         **kwargs,
     ) -> ToolResult:
         template = str(template or "title").strip().lower()
@@ -97,6 +101,15 @@ class RemotionHookTool(BaseTool):
             "height": int(height or 1080),
             "fps": int(fps or 30),
         }
+
+        if str(character or "").strip():
+            char_path = self._resolve_path(character)
+            if not char_path.exists():
+                return ToolResult.fail(f"定妆参数不存在：{char_path}")
+            try:
+                spec["character"] = json.loads(char_path.read_text(encoding="utf-8-sig"))
+            except Exception as e:
+                return ToolResult.fail(f"定妆参数读取失败：{e}")
 
         # 自由发挥：LLM 写 TSX → 渲染 → 视觉闸门；不过再回退模板。
         if mode in ("auto", "freeform"):
@@ -132,6 +145,8 @@ class RemotionHookTool(BaseTool):
                 return ToolResult.fail("未配置多模态主 LLM，无法自由发挥")
 
         self._emit_progress(f"Remotion 钩子渲染中（{template} / {duration:g}s）...")
+        if spec.get("character"):
+            self._emit_progress("模板不含角色骨架；本段若必须出现已定妆人物，请用自由发挥模式")
         cmd = [
             sys.executable, str(RENDERER),
             "--template", template,

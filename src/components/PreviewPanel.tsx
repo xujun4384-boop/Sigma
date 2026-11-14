@@ -31,6 +31,8 @@ import CodeDiffViewer from './CodeDiffViewer'
 import { useTranslation } from '../i18n/I18nContext'
 import SigmaLoadingAnimation from './SigmaLoadingAnimation'
 import CanvasPanel from './CanvasPanel'
+import { paintBus } from '../paint/bus'
+import { characterBus } from '../characters/bus'
 import './PreviewPanel.css'
 
 interface Tab { path: string; name: string; type: string; isTerminal?: boolean; command?: string; content?: string }
@@ -100,6 +102,14 @@ export default function PreviewPanel({ file, fileDiffState, fileDiffQueueLength,
   useEffect(() => {
     if (canvasPatch) setCategory('canvas')
   }, [canvasPatch])
+
+  // 模型开始往画布上画时，自动切到画布页签
+  useEffect(() => paintBus.onActivity(() => setCategory('canvas')), [])
+
+  // 定妆预览推到画布上时，同样自动切过去——等待确认的东西不该藏在别的页签后面
+  useEffect(() => characterBus.subscribe(preview => {
+    if (preview) setCategory('canvas')
+  }), [])
 
   // 检测文件变化：HTML 切到 HTML 分类，其他文件切回 Files 分类
   useEffect(() => {
@@ -287,9 +297,10 @@ export default function PreviewPanel({ file, fileDiffState, fileDiffQueueLength,
         </>
       )}
 
-      {category === 'canvas' && (
-        <CanvasView canvasPatch={canvasPatch} onCanvasPatchApplied={onCanvasPatchApplied} />
-      )}
+      {/* 画布常驻挂载：切到其它页签只隐藏不卸载，否则图层与笔迹会全部丢失 */}
+      <div className="preview-canvas-slot" style={{ display: category === 'canvas' ? 'flex' : 'none' }}>
+        <CanvasPanel />
+      </div>
 
       {category === 'html' && (
         <HtmlView file={file} />
@@ -324,12 +335,6 @@ function CategoryButtons({ category, onSelect, t }: {
       ))}
     </>
   )
-}
-
-// ── 画布占位区 ──
-
-function CanvasView({ canvasPatch, onCanvasPatchApplied }: { canvasPatch?: { canvasName: string; operation: 'add' | 'replace'; elements: any[] } | null; onCanvasPatchApplied?: () => void }) {
-  return <CanvasPanel onCanvasPatch={canvasPatch ?? undefined} onCanvasPatchApplied={onCanvasPatchApplied} />
 }
 
 // ── HTML 渲染区 ──

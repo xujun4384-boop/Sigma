@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "sigma": {
+      "command": "python",
+      "args": ["C:\\path\\to\\sigma\\mcp_server\\server.py"],
+      "env": {
+        "SIGMA_BACKEND_URL": "http://127.0.0.1:8765",
+        "SIGMA_PROJECT_DIR": "C:\\path\\to\\sigma"
+      }
+    }
+  }
+}

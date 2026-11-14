@@ -20,7 +20,7 @@ import threading
 from sigma_logger import log
 from cancellation import current_cancel_token
 from skills.base import BaseTool, ToolResult
-from skills.canvas import CanvasUpdateTool
+from skills.canvas import CanvasDrawTool, CanvasReviewTool
 from skills.file_operations import ReadTool, WriteTool, EditTool, BashTool
 from skills.web_search import WebSearchTool
 from skills.task_management import TodoWriteTool
@@ -50,6 +50,7 @@ from skills.longread import LongreadTool
 from skills.writing_polish import WritingPolishTool
 from skills.ask_user import AskUserTool
 from skills.network_bridge import NetworkBridgeTool
+from skills.javis_bridge import JavisBridgeTool
 from skills.wechat_publisher import WeChatPublisherTool
 from skills.mail_163 import Mail163Tool
 from skills.wecom_email import WecomEmailTool
@@ -68,17 +69,20 @@ from skills.video_cinematic import VideoCinematicStoryboardTool, VideoCinematicG
 from skills.footage_video import FootageVideoTool
 from skills.map_video import MapVideoTool
 from skills.opendesign import OpendesignVideoTool
+from skills.webpage import WebpageVideoTool
 from skills.doubao_tts import DoubaoTTS
 from skills.narration import NarrationTool
 from skills.music_generate import MusicGenerateTool
 from skills.sfx import SfxTool
 from skills.subtitle import SubtitleTool
 from skills.director import DirectorTool
+from skills.product_director import ProductDirectorTool
 from skills.video_review import VideoReviewTool
 from skills.title_overlay import TitleOverlayTool
 from skills.video_produce import VideoProduceTool
 from skills.compose_video import ComposeVideoTool
 from skills.lyric_mv import LyricMvTool
+from skills.character import CharacterSheetTool
 from skills.styled_video import StyledVideoTool
 from skills.remotion_hook import RemotionHookTool
 from skills.manim import ManimVideoTool
@@ -110,7 +114,7 @@ _INTERNAL_TOOLS = {
     "video_scene", "video_compose",
     "video_auto", "video_custom", "video_overlay",
     "video_produce", "doubao_tts",
-    "opendesign_video", "manim_video", "blender_video", "styled_video",
+    "opendesign_video", "webpage_video", "manim_video", "blender_video", "styled_video",
     "video_cinematic_storyboard", "video_cinematic_generate",
     "footage_video",
     "map_video",
@@ -120,7 +124,8 @@ _INTERNAL_TOOLS = {
 
 # 所有工具类的注册表
 ALL_TOOL_CLASSES: dict[str, type] = {
-    "canvas_update": CanvasUpdateTool,
+    "canvas_draw": CanvasDrawTool,
+    "canvas_review": CanvasReviewTool,
     "edit": EditTool,
     "bash": BashTool,
     "web_search": WebSearchTool,
@@ -143,6 +148,7 @@ ALL_TOOL_CLASSES: dict[str, type] = {
     "writing_polish": WritingPolishTool,
     "ask_user": AskUserTool,
     "network_bridge": NetworkBridgeTool,
+    "javis_bridge": JavisBridgeTool,
     "project_scan": ProjectScanTool,
     "memory_read": MemoryReadTool,
     "memory_record": MemoryRecordTool,
@@ -160,6 +166,7 @@ ALL_TOOL_CLASSES: dict[str, type] = {
     "footage_video": FootageVideoTool,
     "map_video": MapVideoTool,
     "opendesign_video": OpendesignVideoTool,
+    "webpage_video": WebpageVideoTool,
     "manim_video": ManimVideoTool,
     "blender_video": BlenderVideoTool,
     "doubao_tts": DoubaoTTS,
@@ -168,10 +175,12 @@ ALL_TOOL_CLASSES: dict[str, type] = {
     "sfx": SfxTool,
     "subtitle": SubtitleTool,
     "director": DirectorTool,
+    "product_director": ProductDirectorTool,
     "video_review": VideoReviewTool,
     "title_overlay": TitleOverlayTool,
     "video_produce": VideoProduceTool,
     "lyric_mv": LyricMvTool,
+    "character_sheet": CharacterSheetTool,
     "styled_video": StyledVideoTool,
     "remotion_hook_generate": RemotionHookTool,
     "wechat_publish": WeChatPublisherTool,
@@ -220,8 +229,8 @@ ALL_TOOL_CLASSES: dict[str, type] = {
 # Skill → 包含的工具名映射
 ALL_SKILLS: dict[str, dict] = {
     "canvas": {
-        "label": "画布编辑",
-        "tool_names": ["canvas_update"],
+        "label": "绘画画布",
+        "tool_names": ["canvas_draw", "canvas_review"],
     },
     "file_operations": {
         "label": "文件操作",
@@ -315,6 +324,10 @@ ALL_SKILLS: dict[str, dict] = {
         "label": "网络桥接",
         "tool_names": ["network_bridge"],
     },
+    "javis_bridge": {
+        "label": "Javis 跨机沟通",
+        "tool_names": ["javis_bridge"],
+    },
     "project_memory": {
         "label": "项目记忆",
         "tool_names": ["project_scan", "memory_read", "memory_record", "memory_update"],
@@ -330,6 +343,10 @@ ALL_SKILLS: dict[str, dict] = {
     "lyric_mv": {
         "label": "歌词 MV",
         "tool_names": ["lyric_mv"],
+    },
+    "character": {
+        "label": "角色定妆",
+        "tool_names": ["character_sheet"],
     },
     "compose_video": {
         "label": "视频合成",
@@ -358,6 +375,10 @@ ALL_SKILLS: dict[str, dict] = {
     "director": {
         "label": "导演组",
         "tool_names": ["director"],
+    },
+    "product_director": {
+        "label": "产品演示导演",
+        "tool_names": ["product_director"],
     },
     "video_review": {
         "label": "成片审查",
@@ -493,6 +514,8 @@ class SkillManager:
                  amap_security_code: str = "",
                  wechat_appid: str = "", wechat_appsecret: str = "",
                  wechat_relay_url: str = "", wechat_relay_key: str = "",
+                 javis_bridge_url: str = "", javis_bridge_key: str = "",
+                 javis_agent_id: str = "", javis_peer_id: str = "",
                  fengniao_api_key: str = "", flyai_api_key: str = "",
                  baidu_map_auth_token: str = "",
                  mail163_address: str = "", mail163_auth_code: str = "",
@@ -537,6 +560,10 @@ class SkillManager:
         self.wechat_appsecret = wechat_appsecret
         self.wechat_relay_url = wechat_relay_url
         self.wechat_relay_key = wechat_relay_key
+        self.javis_bridge_url = javis_bridge_url
+        self.javis_bridge_key = javis_bridge_key
+        self.javis_agent_id = javis_agent_id
+        self.javis_peer_id = javis_peer_id
         self.fengniao_api_key = fengniao_api_key
         self.flyai_api_key = flyai_api_key
         self.baidu_map_auth_token = baidu_map_auth_token
@@ -870,6 +897,12 @@ class SkillManager:
                     cwd=str(self.cwd),
                     llm_config=self.llm_config,
                 )
+            elif tool_name == "canvas_review":
+                # 画面审查走读图链路，需要 LLM 配置兜底（未配读图模型时用主 LLM）
+                self._instances[tool_name] = cls(
+                    cwd=str(self.cwd),
+                    llm_config=self.llm_config,
+                )
             elif tool_name == "lyric_mv":
                 # 编导/画面由 LLM 现场创作，复用主 LLM 配置（框架注入，不去读前端存储）
                 self._instances[tool_name] = cls(
@@ -944,6 +977,12 @@ class SkillManager:
                     llm_config=self.llm_config,
                     skill_manager=self,
                 )
+            elif tool_name == "webpage_video":
+                # 真实网页取景：标注层仍由 LLM 现场写，复用主 LLM 配置
+                self._instances[tool_name] = cls(
+                    cwd=str(self.cwd),
+                    llm_config=self.llm_config,
+                )
             elif tool_name == "manim_video":
                 self._instances[tool_name] = cls(
                     cwd=str(self.cwd),
@@ -991,6 +1030,12 @@ class SkillManager:
                     default_speaker=self.doubao_voice_speaker,
                     minimax_video_api_key=self.minimax_video_api_key,
                 )
+            elif tool_name == "product_director":
+                self._instances[tool_name] = cls(
+                    cwd=str(self.cwd),
+                    skill_manager=self,
+                    llm_config=self.llm_config,
+                )
             elif tool_name == "video_produce":
                 self._instances[tool_name] = cls(
                     cwd=str(self.cwd),
@@ -1005,6 +1050,15 @@ class SkillManager:
                     appsecret=self.wechat_appsecret,
                     relay_url=self.wechat_relay_url,
                     relay_key=self.wechat_relay_key,
+                )
+            elif tool_name == "javis_bridge":
+                self._instances[tool_name] = cls(
+                    cwd=str(self.cwd),
+                    bridge_url=self.javis_bridge_url,
+                    bridge_key=self.javis_bridge_key,
+                    agent_id=self.javis_agent_id,
+                    peer_id=self.javis_peer_id,
+                    llm_config=self.llm_config,
                 )
             elif tool_name == "mail_163":
                 self._instances[tool_name] = cls(

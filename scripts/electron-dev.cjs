@@ -50,11 +50,21 @@ async function waitForVite() {
 }
 
 function startElectron() {
+  // Electron 30 in this project's node_modules fails to boot on some machines
+  // (the browser process aborts before app code runs). A working distribution
+  // can be supplied through SIGMA_ELECTRON_DIST; Electron's own resolver then
+  // uses that directory instead of the project-pinned binary.
+  const override = process.env.SIGMA_ELECTRON_DIST
+  const env = { ...process.env, NODE_ENV: 'development' }
+  if (override) {
+    env.ELECTRON_OVERRIDE_DIST_PATH = override
+    console.log(`[Dev] Electron dist override: ${override}`)
+  }
   const electron = spawn('npx', ['electron', '.'], {
     cwd: ROOT,
     stdio: 'inherit',
     shell: true,
-    env: { ...process.env, NODE_ENV: 'development' },
+    env,
   })
 
   electron.on('close', (code) => {

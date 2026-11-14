@@ -45,6 +45,8 @@ from computer_use.manager import computer_use_manager
 from cancellation import (
     get_token, release_token, cancel_session, install_process_guard,
 )
+import paint_canvas
+import character_sheet
 
 # 安装子进程守卫：会话取消时自动终止该会话派生的全部子进程
 install_process_guard()
@@ -1174,6 +1176,7 @@ async def _execute_custom_agent_chat(
     config: dict,
     session_id: str,
     working_dir: str = "",
+    workspace_dirs: list | None = None,
     backup_enabled: bool = True,
     max_turns: int = 8,
     request: Request | None = None,
@@ -1260,6 +1263,10 @@ async def _execute_custom_agent_chat(
         wechat_appsecret=skill_keys.get("wechatAppSecret", ""),
         wechat_relay_url=skill_keys.get("wechatRelayUrl", ""),
         wechat_relay_key=skill_keys.get("wechatRelayKey", ""),
+        javis_bridge_url=skill_keys.get("javisBridgeUrl", ""),
+        javis_bridge_key=skill_keys.get("javisBridgeKey", ""),
+        javis_agent_id=skill_keys.get("javisAgentId", ""),
+        javis_peer_id=skill_keys.get("javisPeerId", ""),
         fengniao_api_key=skill_keys.get("fengniaoApiKey", ""),
         flyai_api_key=skill_keys.get("flyaiApiKey", ""),
         baidu_map_auth_token=skill_keys.get("baiduMapAuthToken", ""),
@@ -1316,6 +1323,9 @@ async def _execute_custom_agent_chat(
                 prompt = agent_system_prompt
                 if working_dir and os.path.isdir(working_dir):
                     prompt += f"\n\n[当前工作目录: {working_dir}]"
+                scope = _workspace_scope_text(working_dir, workspace_dirs)
+                if scope:
+                    prompt += f"\n{scope}"
                 messages.append({"role": "system", "content": prompt})
 
             # 添加历史对话（共享上下文）
@@ -1708,6 +1718,31 @@ def _convert_agent_messages_openai(messages: list) -> list:
     return result
 
 
+def _workspace_scope_text(working_dir: str, workspace_dirs: list | None) -> str:
+    """附加工作目录（文件树里额外添加的文件夹）说明，供 LLM 感知与定位。"""
+    extra: list[str] = []
+    seen: set[str] = set()
+    for raw in (workspace_dirs or []):
+        try:
+            if not raw or not isinstance(raw, str) or not os.path.isdir(raw):
+                continue
+            key = os.path.normcase(os.path.abspath(raw))
+            if working_dir and key == os.path.normcase(os.path.abspath(working_dir)):
+                continue
+        except (OSError, TypeError, ValueError):
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        extra.append(str(raw))
+    if not extra:
+        return ""
+    return (
+        "[附加工作目录（文件树里额外添加，与主工作目录同属用户工作区，同样可读写；"
+        "读写这些目录里的文件请用绝对路径）: " + ", ".join(extra) + "]"
+    )
+
+
 async def _execute_chat(
     user_message: str,
     config: dict,
@@ -1728,8 +1763,9 @@ async def _execute_chat(
     ctx_parts = []
     if working_dir:
         ctx_parts.append(f"[主工作目录: {working_dir}]")
-    if workspace_dirs and len(workspace_dirs) > 1:
-        ctx_parts.append(f"[附加工件区目录: {', '.join(d for d in workspace_dirs if d != working_dir)}]")
+    scope = _workspace_scope_text(working_dir, workspace_dirs)
+    if scope:
+        ctx_parts.append(scope)
     if extra_context:
         ctx_parts.extend(extra_context)
     if ctx_parts:
@@ -1857,6 +1893,10 @@ async def _execute_chat(
         wechat_appsecret=skill_keys.get("wechatAppSecret", ""),
         wechat_relay_url=skill_keys.get("wechatRelayUrl", ""),
         wechat_relay_key=skill_keys.get("wechatRelayKey", ""),
+        javis_bridge_url=skill_keys.get("javisBridgeUrl", ""),
+        javis_bridge_key=skill_keys.get("javisBridgeKey", ""),
+        javis_agent_id=skill_keys.get("javisAgentId", ""),
+        javis_peer_id=skill_keys.get("javisPeerId", ""),
         fengniao_api_key=skill_keys.get("fengniaoApiKey", ""),
         flyai_api_key=skill_keys.get("flyaiApiKey", ""),
         baidu_map_auth_token=skill_keys.get("baiduMapAuthToken", ""),
@@ -1906,6 +1946,7 @@ async def _execute_chat(
         protocol=config.get("protocol", "anthropic"),
         language=language,
         llm_params=llm_params,
+        workspace_dirs=workspace_dirs or [],
     )
 
     queue = asyncio.Queue()
@@ -2028,6 +2069,7 @@ async def chat(request: Request):
             config=body.get("config", {}),
             session_id=body.get("sessionId", "default"),
             working_dir=body.get("working_dir", ""),
+            workspace_dirs=body.get("workspace_dirs", []),
             backup_enabled=body.get("backupEnabled", True),
             max_turns=int(body.get("subAgentMaxTurns", 8)),
             request=request,
@@ -2140,6 +2182,66 @@ async def stop_task(request: Request):
     return {"success": False, "error": "No active task for this session"}
 
 
+# ─── 绘画画布：画面回传 ───
+
+
+@app.post("/api/paint/snapshot")
+async def paint_snapshot(request: Request):
+    """前端画完一轮后回传合成图，供 canvas_review 审查。"""
+    body = await request.json()
+    image = body.get("image") or ""
+    if not image:
+        return {"success": False, "error": "image 不能为空"}
+    generation = paint_canvas.set_snapshot(
+        image,
+        stroke_count=int(body.get("strokes") or 0),
+        layers=body.get("layers") or [],
+        stroke_audit=body.get("stroke_audit") or [],
+        width=int(body.get("width") or 1600),
+        height=int(body.get("height") or 1000),
+    )
+    return {"success": True, "generation": generation}
+
+
+# ─── 定妆：用户在画布上确认角色 ───
+
+
+@app.post("/api/character/confirm")
+async def character_confirm(request: Request):
+    """接收画布上对定妆的决定，解析阻塞中的 character_sheet 工具。"""
+    body = await request.json()
+    token = body.get("token", "")
+    verdict = body.get("verdict", "")
+    note = body.get("note", "")
+    if not token:
+        return {"success": False, "error": "Missing token"}
+    if verdict not in ("confirm", "revise"):
+        return {"success": False, "error": "verdict 必须是 confirm / revise"}
+    if character_sheet.resolve(token, verdict, note):
+        log.info(f"[Character] token={token} verdict={verdict} note={str(note)[:60]}")
+        return {"success": True}
+    return {"success": False, "error": "这次定妆已经结束或已被处理"}
+
+
+@app.post("/api/paint/reset")
+async def paint_reset():
+    """新一轮任务开始时重置审查配额。
+
+    刻意不清空画面快照：画布内容跨轮保留，用户追问"改一下那个轮子"时
+    模型需要能直接审查现有画面，而不是被迫先重画一遍。
+    """
+    paint_canvas.reset_reviews()
+    return {"success": True}
+
+
+@app.post("/api/paint/clear")
+async def paint_clear():
+    """用户清空画布时同步丢弃快照，避免审查到已经不存在的画面。"""
+    paint_canvas.reset_reviews()
+    paint_canvas.clear_snapshot()
+    return {"success": True}
+
+
 # ─── Network Bridge：浏览器扩展通信 ───
 
 
@@ -2182,6 +2284,105 @@ async def network_bridge_command(request: Request):
     except Exception as e:
         return {"success": False, "error": f"桥接异常: {str(e)}"}
 
+# MCP model registry populated by the Sigma frontend's configuration sync.
+# Credentials remain in-process and are never returned by the discovery endpoint.
+_MCP_LLM_CONFIGS: dict[str, dict] = {}
+
+
+async def _mcp_error_stream(message: str):
+    yield f"data: {json.dumps({'type': 'error', 'message': message}, ensure_ascii=False)}\n\n"
+    yield f"data: {json.dumps({'type': 'chat_complete'}, ensure_ascii=False)}\n\n"
+
+
+@app.get("/api/mcp/models")
+async def mcp_models():
+    """List registered model IDs and non-sensitive selection metadata for MCP clients."""
+    return {
+        "models": [
+            {
+                "id": llm_id,
+                "name": entry.get("name") or entry.get("model") or llm_id,
+                "model": entry.get("model", ""),
+                "provider": entry.get("provider", "generic"),
+                "protocol": entry.get("protocol", "anthropic"),
+                "thinking": entry.get("thinking", "default"),
+                "vision": bool(entry.get("vision", False)),
+                "toolCall": find_preset(entry.get("provider", "generic"), entry.get("model", "")).tool_call if find_preset(entry.get("provider", "generic"), entry.get("model", "")) else True,
+                "contextSize": entry.get("contextSize") or (find_preset(entry.get("provider", "generic"), entry.get("model", "")).context if find_preset(entry.get("provider", "generic"), entry.get("model", "")) else None),
+                "maxTokens": entry.get("maxTokens"),
+            }
+            for llm_id, entry in _MCP_LLM_CONFIGS.items()
+            if entry.get("apiKey") and entry.get("baseUrl") and entry.get("model")
+        ]
+    }
+
+
+@app.post("/api/mcp/tasks")
+async def mcp_task(request: Request):
+    """Run Sigma's normal ToolLoop with a frontend-registered model ID and exact workspace."""
+    client_host = request.client.host if request.client else ""
+    if client_host not in ("127.0.0.1", "::1", "localhost", "testclient"):
+        return StreamingResponse(_mcp_error_stream("MCP task endpoint is local-only"), media_type="text/event-stream")
+    body = await request.json()
+    llm_id = str(body.get("model_id") or "")
+    entry = _MCP_LLM_CONFIGS.get(llm_id)
+    if not entry or not entry.get("apiKey") or not entry.get("baseUrl"):
+        return StreamingResponse(_mcp_error_stream("Unknown or unavailable model_id; reopen Sigma to sync model configurations"), media_type="text/event-stream")
+
+    raw_workspace = body.get("workspace_path")
+    if not isinstance(raw_workspace, str) or not raw_workspace.strip():
+        return StreamingResponse(_mcp_error_stream("workspace_path must be an absolute directory path"), media_type="text/event-stream")
+    workspace = os.path.realpath(raw_workspace)
+    if not os.path.isabs(raw_workspace) or not os.path.isdir(workspace):
+        return StreamingResponse(_mcp_error_stream("workspace_path must identify an existing absolute directory"), media_type="text/event-stream")
+
+    message = body.get("task")
+    if not isinstance(message, str) or not message.strip():
+        return StreamingResponse(_mcp_error_stream("task cannot be empty"), media_type="text/event-stream")
+    session_id = str(body.get("session_id") or f"mcp-{llm_id}")
+    safe_llms = [
+        {key: value for key, value in registered.items() if key != "apiKey"}
+        for registered in _MCP_LLM_CONFIGS.values()
+    ]
+    config = {
+        "baseUrl": entry.get("baseUrl", ""),
+        "apiKey": entry.get("apiKey", ""),
+        "model": entry.get("model", ""),
+        "protocol": entry.get("protocol", "anthropic"),
+        "provider": entry.get("provider", "generic"),
+        "thinking": entry.get("thinking", "default"),
+        "contextSize": entry.get("contextSize"),
+        "maxTokens": entry.get("maxTokens"),
+        "temperature": entry.get("temperature"),
+        "topP": entry.get("topP"),
+        "topK": entry.get("topK"),
+        # Skill keys (baidu map / flyai / mail163 ...) live in the frontend
+        # configuration. The MCP path has no UI request to carry them, so reuse
+        # the copy the Sigma window already synced; an empty dict silently
+        # disables every key-based tool.
+        "skillKeys": bridge_manager.get_skill_keys(),
+        "llms": safe_llms,
+    }
+    task = (
+        "你是该工作区的执行子 Agent。开始前请根据任务需要调用 memory_read 查看项目概览和历史记录；"
+        "充分利用 Sigma 的 ToolLoop 和可用技能完成工作。所有文件操作必须限定在给定工作区及用户明确提供的路径内。"
+        "完成后总结结果、修改/新增文件及未完成事项，并按项目记忆机制记录实质性进展。\n\n"
+        f"任务：{message.strip()}"
+    )
+    return await _execute_chat(
+        user_message=task,
+        config=config,
+        session_id=session_id,
+        max_iterations=bridge_manager.get_max_iterations(),
+        sub_agent_max_turns=8,
+        working_dir=workspace,
+        workspace_dirs=[workspace],
+        backup_enabled=True,
+        language="zh",
+        request=request,
+    )
+
+
 @app.get("/api/network-bridge/llm-configs")
 async def network_bridge_llm_configs():
     """返回缓存的 LLM 配置列表（apiKey 已脱敏）。"""
@@ -2196,10 +2397,11 @@ async def network_bridge_sync_configs(request: Request):
     body = await request.json()
     _apply_vision_llm_config(body)
     llms = body.get("llms", [])
-    if not llms:
-        return {"success": False, "error": "llms 不能为空"}
+    if not isinstance(llms, list):
+        return {"success": False, "error": "llms 必须是数组"}
 
     count = 0
+    synced_mcp_configs: dict[str, dict] = {}
     for entry in llms:
         name = entry.get("name", entry.get("model", ""))
         base_url = entry.get("baseUrl", "")
@@ -2208,7 +2410,8 @@ async def network_bridge_sync_configs(request: Request):
         protocol = entry.get("protocol", "anthropic")
         provider = entry.get("provider", "generic")
         thinking = entry.get("thinking", "default")
-        if name and api_key and base_url:
+        if name and api_key and base_url and entry.get("id"):
+            synced_mcp_configs[str(entry["id"])] = dict(entry)
             bridge_manager.register_llm_config(
                 name=name,
                 base_url=base_url,
@@ -2219,6 +2422,9 @@ async def network_bridge_sync_configs(request: Request):
                 thinking=thinking,
             )
             count += 1
+
+    global _MCP_LLM_CONFIGS
+    _MCP_LLM_CONFIGS = synced_mcp_configs
 
     # 同步 skillKeys 配置
     skill_keys = body.get("skillKeys") or {}

@@ -53,6 +53,8 @@ _pending_tool_timeouts: dict[str, asyncio.Future] = {}
 # 长任务视频工具：不设超时，一直跑到完成（避免没做完就被判超时/跳过）。
 # 覆盖：影视级生成、HTML 动画、水彩逐帧渲染、合成（含规格归一化重编码）。
 _NO_TIMEOUT_TOOLS = {
+    # Javis 咨询技能会跑完整场跨机对话，靠自身 180 秒空等/12 轮上限退出
+    "javis_bridge",
     "director",
     "video_cinematic_generate",
     "opendesign_video",
@@ -60,6 +62,8 @@ _NO_TIMEOUT_TOOLS = {
     "blender_video",
     "compose_video",
     "lyric_mv",
+    "character_sheet",
+    "product_director",
 }
 
 
@@ -296,6 +300,7 @@ class ToolLoop:
         protocol: str = "anthropic",
         language: str = "zh",
         llm_params: dict | None = None,
+        workspace_dirs: list[str] | None = None,
     ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
@@ -326,6 +331,8 @@ class ToolLoop:
             if skill_manager and str(skill_manager.cwd) not in ("", ".")
             else None
         )
+        # 文件树里额外添加的工作目录：与主项目同属用户工作区，要进提示词，否则 LLM 不知道它们存在
+        self.workspace_dirs = [str(d) for d in (workspace_dirs or []) if d]
         if protocol == "openai":
             self.messages_url = (
                 f"{self.base_url}/chat/completions" if "/v1" in self.base_url
@@ -414,12 +421,24 @@ class ToolLoop:
             "- 无法判断目标属于哪一类时，先向用户澄清，或分别检查两个明确目录后说明结果。\n\n"
         )
 
+        prompt += self._workspace_dirs_prompt()
+
         prompt += self._build_memory_hint()
 
         prompt += (
             "## 视频制作（重要）\n\n"
             "- **凡是要「做视频 / 生成动画短片 / 出成片」的需求，统一调用 `director`（导演组）**，由它编排各部门；"
             "不要自己手写动画脚本，也不要尝试绕过导演直接控制画面引擎。\n"
+            "- **产品功能演示片 / 产品宣传片 / 发布会开场片（真 UI、快节奏、像录屏但不是录屏）→ 调用 `product_director`"
+            "（产品演示导演），不要用 director**：它自带音乐节奏对拍、真实 UI 还原与标题避让。\n"
+            "  · `ui_source` 传前端工程目录（多个用分号分隔）才能还原真实界面与设计 token；`ui_mode=code`。\n"
+            "  · 用户有现成音乐就传 `music_path`；不传则它默认调音乐生成出纯 BGM"
+            "（节奏清晰可卡点、无人声，不限定乐器）。\n"
+            "  · **它生成完分镜蓝图会先返回 need_confirm**：你必须用 `ask_user` 把分镜表交给用户确认；"
+            "确认后把蓝图 JSON 原样作为 `plan` 再调一次才开始制作（同一 project/output_path）；"
+            "用户要改就改蓝图对应字段后带 `plan` 调用，不要直接开工。\n"
+            "  · **中断/失败后用完全相同参数（或带已确认的 plan）再调一次即可断点续跑**"
+            "（已完成的 UI 提取/音乐/蓝图/画面段会复用）；只有确实要全部重做时才传 `force=true`。\n"
             "- 导演首轮返回「制作蓝图 + need_confirm」：你必须用 `ask_user` 把蓝图给用户确认；确认后带 `plan` 再调 `director` 执行。\n"
             "- 导演自带断点续做：若上次中断/程序关闭，用同一 `project` 再次调用 `director` 即从断点继续，不要重头重排。\n"
             "- **微调/改几处：必须用 `director(project=\"同名\", patch=\"<只写改动项>\")`，绝不要重发整份 plan**"
@@ -469,6 +488,45 @@ class ToolLoop:
         )
 
         return prompt
+
+    def _workspace_dirs_prompt(self, list_limit: int = 12) -> str:
+        """把文件树里额外添加的目录写进 system prompt。
+
+        LLM 只能看到提示词里出现过的路径：附加目录如果只存在于前端文件树、不进提示词，
+        它会当作这些文件不存在。这里同时给出顶层条目，省去无谓的试探性搜索。
+        """
+        entries: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for raw in self.workspace_dirs:
+            try:
+                root = Path(str(raw)).resolve()
+            except (OSError, TypeError, ValueError, RuntimeError):
+                continue
+            key = str(root).lower()
+            if key in seen or (self.project_root and root == self.project_root):
+                continue
+            seen.add(key)
+            if not root.is_dir():
+                continue
+            try:
+                children = sorted(root.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))
+            except OSError:
+                children = []
+            names = [c.name + ("/" if c.is_dir() else "") for c in children[:list_limit]]
+            text = "、".join(names) + (f" …（共 {len(children)} 项）" if len(children) > list_limit else "")
+            entries.append((str(root), text))
+        if not entries:
+            return ""
+        lines = ["## 附加工作目录（文件树里同时展示，与当前项目同属用户工作区，同样可读写）\n"]
+        for path, text in entries:
+            lines.append(f"- `{path}`\n  · 顶层内容：{text or '（空目录）'}\n")
+        lines.append(
+            "- 用户点名的文件/文件夹也可能在这些目录里，不要因为不在当前项目目录就判断不存在。\n"
+            "- 读写这些目录里的文件要传**绝对路径**（相对路径只按当前项目目录解析）。\n"
+            "- 找内容：`search_code` 传该目录绝对路径搜索；`batch_read` 直接传目录路径会自动展开；"
+            "`bash` 的工作目录仍是当前项目目录。\n\n"
+        )
+        return "".join(lines)
 
     def _build_memory_hint(self) -> str:
         """构建轻量的"记忆存在性提示"，只告知有历史记忆可查，不注入正文。
@@ -1186,80 +1244,45 @@ class ToolLoop:
     # ─── LLM 调用 ───
 
     @staticmethod
-    def _extract_canvas_elements(partial_json: str, already_pushed: int) -> int:
-        """从部分 JSON 中提取 elements 数组中完整对象的数量。"""
-        # 找到 "elements" 数组的起始位置
-        match = re.search(r'"elements"\s*:\s*\[', partial_json)
+    def _extract_json_array_objects(partial_json: str, key: str) -> list[dict]:
+        """从可能不完整的 JSON 文本里，提取 key 对应数组中已完整闭合的对象。
+
+        流式输出时 input_json 是一段段拼起来的，末尾通常还缺括号；
+        这里用括号配对扫描，只取已经完全闭合的顶层对象，
+        因此同一段文本反复解析，已经完整的对象总是稳定返回。
+        """
+        match = re.search(r'"%s"\s*:\s*\[' % re.escape(key), partial_json)
         if not match:
-            return 0
-        start = match.end()
+            return []
+        i = match.end()
         depth = 1
-        i = start
-        count = 0
         in_string = False
         escape = False
+        start = -1
+        objects: list[dict] = []
         while i < len(partial_json) and depth > 0:
             c = partial_json[i]
             if escape:
                 escape = False
-            elif c == '\\':
+            elif c == "\\":
                 escape = True
-            elif c == '"' and not escape:
+            elif c == '"':
                 in_string = not in_string
             elif not in_string:
-                if c == '{':
+                if c in "{[":
+                    if c == "{" and depth == 1:
+                        start = i
                     depth += 1
-                elif c == '}':
+                elif c in "}]":
                     depth -= 1
-                    if depth == 1:  # 回到数组层级，说明一个完整元素结束
-                        count += 1
-                elif c == '[':
-                    depth += 1
-                elif c == ']':
-                    depth -= 1
-            i += 1
-        return count
-
-    @staticmethod
-    def _parse_canvas_elements_json(partial_json: str, count: int) -> list[dict]:
-        """从部分 JSON 中解析 elements 数组的前 count 个完整对象。"""
-        match = re.search(r'"elements"\s*:\s*\[', partial_json)
-        if not match:
-            return []
-        start = match.end()
-        depth = 1
-        i = start
-        elements = []
-        in_string = False
-        escape = False
-        current_start = -1
-        while i < len(partial_json) and depth > 0 and len(elements) < count:
-            c = partial_json[i]
-            if escape:
-                escape = False
-            elif c == '\\':
-                escape = True
-            elif c == '"' and not escape:
-                in_string = not in_string
-            elif not in_string:
-                if c == '{':
-                    if depth == 1:
-                        current_start = i
-                    depth += 1
-                elif c == '}':
-                    depth -= 1
-                    if depth == 1 and current_start >= 0:
+                    if c == "}" and depth == 1 and start >= 0:
                         try:
-                            elements.append(json.loads(partial_json[current_start:i + 1]))
+                            objects.append(json.loads(partial_json[start:i + 1]))
                         except json.JSONDecodeError:
                             pass
-                        current_start = -1
-                elif c == '[':
-                    depth += 1
-                elif c == ']':
-                    depth -= 1
+                        start = -1
             i += 1
-        return elements
+        return objects
 
     async def _call_llm(
         self, messages: list, tools: list, queue: asyncio.Queue
@@ -1328,8 +1351,8 @@ class ToolLoop:
                     text_buf: list[str] = []      # 收集文本内容用于日志
                     thinking_buf: list[str] = []  # 收集思考内容用于日志
                     stop_reason: str = ""         # Anthropic stop_reason
-                    # 流式 canvas 元素追踪：tool_use block index -> 已推送的元素数量
-                    canvas_stream_state: dict[int, int] = {}
+                    # 流式绘图指令追踪：tool_use block index -> 已推送的指令数量
+                    paint_stream_state: dict[int, int] = {}
 
                     async for line in resp.aiter_lines():
                         # 流式读取中检查取消信号，及时中断
@@ -1362,9 +1385,9 @@ class ToolLoop:
                                     "thinking": block.get("thinking", ""),
                                     "signature": block.get("signature", ""),
                                 }
-                            # 初始化 canvas 流式追踪
-                            if block_type == "tool_use" and block.get("name") == "canvas_update":
-                                canvas_stream_state[index] = 0
+                            # 初始化绘图指令流式追踪
+                            if block_type == "tool_use" and block.get("name") == "canvas_draw":
+                                paint_stream_state[index] = 0
 
                         elif event_type == "content_block_delta":
                             if index not in blocks:
@@ -1393,21 +1416,15 @@ class ToolLoop:
                                     thinking_blocks[index]["signature"] += delta.get("signature", "")
                             elif delta_type == "input_json_delta":
                                 block["input_json"] += delta.get("partial_json", "")
-                                # canvas_update 流式解析：实时提取 elements 数组中的完整对象
-                                if index in canvas_stream_state and block["name"] == "canvas_update":
-                                    new_count = self._extract_canvas_elements(block["input_json"], canvas_stream_state[index])
-                                    if new_count > canvas_stream_state[index]:
-                                        canvas_stream_state[index] = new_count
-                                        # 提取 operation 和 canvas_name（可能还未完整，用默认值）
-                                        op_match = re.search(r'"operation"\s*:\s*"(\w+)"', block["input_json"])
-                                        name_match = re.search(r'"canvas_name"\s*:\s*"([^"]*)"', block["input_json"])
+                                # 绘图指令流式解析：每凑齐一条完整指令就立刻下发，模型边写边画
+                                if index in paint_stream_state and block["name"] == "canvas_draw":
+                                    commands = self._extract_json_array_objects(block["input_json"], "commands")
+                                    pushed = paint_stream_state[index]
+                                    if len(commands) > pushed:
+                                        paint_stream_state[index] = len(commands)
                                         await queue.put({
-                                            "type": "canvas_patch",
-                                            "canvas_name": name_match.group(1) if name_match else "default",
-                                            "operation": op_match.group(1) if op_match else "add",
-                                            "elements": self._parse_canvas_elements_json(block["input_json"], new_count),
-                                            "batch_index": new_count - 1,
-                                            "batch_total": None,
+                                            "type": "paint_patch",
+                                            "commands": commands[pushed:],
                                             "is_final": False,
                                         })
 
@@ -1425,16 +1442,12 @@ class ToolLoop:
                                     "name": block["name"],
                                     "input": tool_input,
                                 })
-                                # canvas_update 流式结束，发送最终标记
-                                if index in canvas_stream_state:
-                                    del canvas_stream_state[index]
+                                # 绘图指令流式结束，通知前端收尾
+                                if index in paint_stream_state:
+                                    del paint_stream_state[index]
                                     await queue.put({
-                                        "type": "canvas_patch",
-                                        "canvas_name": tool_input.get("canvas_name", "default"),
-                                        "operation": tool_input.get("operation", "add"),
-                                        "elements": [],
-                                        "batch_index": -1,
-                                        "batch_total": None,
+                                        "type": "paint_patch",
+                                        "commands": [],
                                         "is_final": True,
                                     })
 
@@ -1544,6 +1557,7 @@ class ToolLoop:
                     text_buf: list[str] = []
                     reasoning_buf: list[str] = []  # 收集推理内容，供需要保留推理上下文的模型回传历史
                     tool_call_buf: dict[int, dict] = {}  # index -> {id, name, arguments}
+                    paint_stream_state: dict[int, int] = {}  # tool_call index -> 已推送指令数
 
                     async for line in resp.aiter_lines():
                         if self._cancel_event and self._cancel_event.is_set():
@@ -1590,6 +1604,17 @@ class ToolLoop:
                                 entry["name"] = func["name"]
                             if "arguments" in func:
                                 entry["arguments"] += func["arguments"]
+                                # 绘图指令边写边下发，与 Anthropic 协议保持一致
+                                if entry["name"] == "canvas_draw":
+                                    pushed = paint_stream_state.get(idx, 0)
+                                    commands = self._extract_json_array_objects(entry["arguments"], "commands")
+                                    if len(commands) > pushed:
+                                        paint_stream_state[idx] = len(commands)
+                                        await queue.put({
+                                            "type": "paint_patch",
+                                            "commands": commands[pushed:],
+                                            "is_final": False,
+                                        })
 
                     # 收尾工具调用
                     for idx in sorted(tool_call_buf.keys()):
@@ -1605,6 +1630,12 @@ class ToolLoop:
                             "name": tc["name"],
                             "input": tool_input,
                         })
+                        if idx in paint_stream_state:
+                            await queue.put({
+                                "type": "paint_patch",
+                                "commands": [],
+                                "is_final": True,
+                            })
 
                     if text_buf:
                         full_text = "".join(text_buf)

@@ -16,6 +16,8 @@
 """
 import argparse
 import json
+import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -30,11 +32,11 @@ def _log(msg: str) -> None:
     print(f"[remotion] {msg}", flush=True)
 
 
-def _run(cmd: str, timeout: int = 3600) -> subprocess.CompletedProcess:
+def _run(cmd: str, timeout: int = 3600, env: dict | None = None) -> subprocess.CompletedProcess:
     _log(cmd)
     proc = subprocess.run(
         cmd, cwd=str(ROOT), shell=True, capture_output=True, text=True,
-        encoding="utf-8", errors="replace", timeout=timeout,
+        encoding="utf-8", errors="replace", timeout=timeout, env=env,
     )
     if proc.returncode != 0:
         tail = "\n".join((proc.stderr or proc.stdout or "").splitlines()[-25:])
@@ -142,6 +144,59 @@ def render_still(props: Path, seconds: float, dst: Path, fps: int) -> Path:
     return dst
 
 
+def _pixel_config(out_dir: Path) -> dict | None:
+    """读 look.json 里的像素化配置。
+
+    {"pixel": {"block": 4, "colors": 24}} → 整帧像素化；没有这个字段就原样输出。
+    像素化在渲染出口统一做，画面代码与角色组件都不用关心画风。
+    """
+    p = out_dir / "look.json"
+    if not p.exists():
+        return None
+    try:
+        look = json.loads(p.read_text(encoding="utf-8-sig"))
+    except Exception:
+        _log("look.json 解析失败，按原样输出")
+        return None
+    px = look.get("pixel") if isinstance(look, dict) else None
+    if px is True:
+        px = {}
+    if not isinstance(px, dict):
+        return None
+    try:
+        block = int(px.get("block") or 4)
+        colors = int(px.get("colors") or 24)
+    except (TypeError, ValueError):
+        _log("look.pixel 参数不合法，按原样输出")
+        return None
+    return {"block": max(1, min(16, block)), "colors": max(2, min(256, colors))}
+
+
+def _pixelate(src: Path, dst: Path, out_dir: Path, block: int, colors: int) -> Path:
+    """整帧像素化（含字幕）：降采样 → 调色板量化 → 最近邻放大。
+
+    降采样用 area 求块内均色，paletteuse 关抖动限制调色板，最后 neighbor 放大成硬边像素块。
+    """
+    pal = out_dir / "_palette.png"
+    _run(
+        f'ffmpeg -y -loglevel error -i "{src}" -vf '
+        f'"scale=iw/{block}:ih/{block}:flags=area,'
+        f'palettegen=max_colors={colors}:stats_mode=full" '
+        f'-frames:v 1 "{pal}"', timeout=900,
+    )
+    chain = (f"scale=iw/{block}:ih/{block}:flags=area[a];"
+             f"[a][1:v]paletteuse=dither=none[b];"
+             f"[b]scale=iw*{block}:ih*{block}:flags=neighbor")
+    _run(
+        f'ffmpeg -y -loglevel error -i "{src}" -i "{pal}" -filter_complex "{chain}" '
+        f'-c:v libx264 -crf 18 -preset medium -pix_fmt yuv420p -an "{dst}"',
+        timeout=1800,
+    )
+    pal.unlink(missing_ok=True)
+    _log(f"像素化完成 → {dst.name}")
+    return dst
+
+
 def render_video(props: Path, out_dir: Path, audio: Path | None) -> Path:
     """整片渲染。Remotion 的进度是 \\r 刷新的，逐行读不到，所以另起心跳线程
     每 30 秒吐一行——否则用户在漫长的渲染期里看不到任何输出，会以为卡死。"""
@@ -155,11 +210,36 @@ def render_video(props: Path, out_dir: Path, audio: Path | None) -> Path:
 
     th = threading.Thread(target=beat, daemon=True)
     th.start()
+    env = os.environ.copy()
+    # Remotion 子进程的 FFmpeg 临时文件也放本次工作目录：系统 Temp 偶发拒绝写入，
+    # 不能依赖临时目录的清理策略。工作目录会随项目续跑保留，最终只留下 mv.mp4。
+    render_tmp = out_dir / "_remotion_tmp"
+    render_tmp.mkdir(exist_ok=True)
+    env["TEMP"] = env["TMP"] = str(render_tmp)
+    binaries = ""
+    ffmpeg = shutil.which("ffmpeg")
+    if os.name == "nt" and ffmpeg:
+        binaries = f' --binaries-directory="{Path(ffmpeg).parent}"'
     try:
-        _run(f'npx remotion render src/index.ts LyricMV "{raw}" --props="{props}"')
+        # Windows 上并行编码会先写临时 pre-encode.mp4；直接编码到目标文件更稳。
+        _run(f'npx remotion render src/index.ts LyricMV "{raw}" --props="{props}" '
+             f'--disallow-parallel-encoding{binaries}', env=env)
     finally:
         stop.set()
     _log(f"画面渲染完成，用时 {int(time.time() - t0)}s")
+
+    px = _pixel_config(out_dir)
+    if px:
+        _log(f"像素化：1/{px['block']} 分辨率（{px['colors']} 色，含字幕）")
+        pxy = out_dir / "_video_pixel.mp4"
+        try:
+            _pixelate(raw, pxy, out_dir, px["block"], px["colors"])
+            raw.unlink(missing_ok=True)
+            raw = pxy
+        except RuntimeError as ex:
+            # 像素化失败不能让整条片子没了：保留原样输出，并在日志里说清楚
+            _log("像素化失败，按原样输出：" + " ".join(str(ex).split())[-200:])
+
     if not audio:
         final = out_dir / "mv.mp4"
         raw.replace(final)

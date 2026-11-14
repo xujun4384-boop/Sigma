@@ -79,6 +79,8 @@
 #   style_prompt (string, 可选) 视觉风格描述（配色/字体/动效）
 #   tone (string, 可选, 默认product) 语气: academic / product / editorial / technical
 #   assets_dir (string, 可选) 上游预生成的配图目录，会同步进项目 assets/ 供 LLM 引用
+#   embeds (array, 内部) director 传入的嵌入特效元数据：帧雪碧图/矩形/时间；
+#     composer 会被要求用 canvas + GSAP steps() 逐帧绘制，禁止 video/iframe
 #   with_images (boolean, 可选, 默认false) 是否允许引擎按需生图（导演组按面板 images 字段开启）
 #   max_images (integer, 可选, 默认4) 本片最多生成几张图
 #   fps (integer, 可选, 默认30) 帧率

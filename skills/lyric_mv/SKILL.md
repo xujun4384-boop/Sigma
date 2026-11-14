@@ -46,8 +46,9 @@ description: 把一首歌做成"卡点逐字歌词"的 MV 动画视频。支持�
 | 编导 | `plan.json` | 改了 `brief`，或强制重跑该段 |
 | 故事方向 / 蓝图 | `story.json` | status 不是 treatment/approved，或 `revise=true` |
 | 视觉圣经 | `visual-bible.json` | 故事变了，或强制重跑该段 |
+| 镜头表 | `shots.json` | 时间轴 / 编导方案 / 视觉圣经 / brief 变了（仅 performance） |
 | 画面 | `parts/artist-shot-N.tsx` + `art/shots/shot-N.json` | 该镜缺失 / 代码哈希变了 / 强制重跑画面 |
-| 渲染 | `mv.mp4` | `timeline` / `render-plan` / 音轨变了 |
+| 渲染 | `mv.mp4` | `timeline` / `render-plan` / 音轨 / `look.json` 变了 |
 
 ### 镜头级断点
 
@@ -92,7 +93,8 @@ description: 把一首歌做成"卡点逐字歌词"的 MV 动画视频。支持�
 | `type_style` | 否 | 文字类：强制字效风格（`brutalist` / `editorial` / `neon` / `handwritten` / `pixel` / `kinetic`）；不传由 LLM 选 |
 | `with_images` | 否 | 是否按段落生成 AI 氛围底图（只做背景层，主体仍由 canvas 画）。默认 false，需要已配置图片生成 Key |
 | `max_images` | 否 | 最多生成几张段落底图，默认 6 |
-| `force` | 否 | 强制重跑某几段（逗号分隔）：`plan` / `story` / `bible` / `scenes` / `render`。只影响点名的段，其余照常复用 |
+| `force` | 否 | 强制重跑某几段（逗号分隔）：`plan` / `story` / `bible` / `shotlist` / `scenes` / `render`。只影响点名的段，其余照常复用 |
+| `look` | 否 | 渲染外观（自由对象）：`{"pixel": {"block": 4, "colors": 24}}` = 引擎级像素化（低分辨率 + 调色板量化，整帧含字幕）；不传 = 原始高清。只影响渲染，不改画面代码 |
 
 ## 两种音源
 
@@ -324,11 +326,19 @@ MV.filler     = { bg: "#101828", draw(e){ /* 兜底：没有任何卡覆盖时�
 
 - 引擎实现：`skills/remotion_runtime`（共享 Remotion 4.0.536，依赖已离线安装）。
 - 画面作者：`scripts/remotion_artist.py`（开放模式，pipeline 在 `engine=remotion` 时直接调用）。
-  流程：**自动分镜 → 主角定妆（三视角，视觉闸门）→ 并行拍镜（每镜真渲一帧）→ 整片闸门**。
+  流程：**自动分镜 → 主角定妆（读确认过的角色参数）→ 并行拍镜（每镜真渲一帧）→ 整片闸门**。
   - 分镜：编导给了 `story.shots` 就用它（逐镜的 action / 景别会原样传给画面作者）；
     否则按「段落边界 + 目标时长」自动切（`LYRIC_MV_SHOT_SECONDS`，默认 12s）。
-  - 定妆：`char-hero.tsx` 一次画出**正面 / 侧面 / 背面**三个姿态，三图拼成对照图交给视觉模型判定；
-    通过后跨镜头复用；要重做设 `LYRIC_MV_CHAR_REDO=1`。
+  - 定妆：角色不再由画面作者现画。调用顺序是
+    **`character_sheet(spec=<主角>, cast=[{role, spec}...], project="<项目名>")` → 用户在画布上一次确认整组 →
+    `lyric_mv(..., character="video_work/<项目名>/characters.json")`**。
+    角色是参数化骨架（体型系数 / 配色 / 发型 / 服装），每个角色一个模块（`char-<role>.tsx`），
+    镜头统一从 `./char-cast` 导入：主角 `Hero`、配角 `FriendA` 等，正面/侧面/背面/坐姿/表情是同一个人的同一套几何。
+    不传 `character` 时读 `<out_dir>/art/characters.json`，再退回 `art/character.json`；都没有则停下提示先定妆。
+    参数改了会自动重出定妆图并让镜头重渲；参数没改则复用。
+  - 配角：视觉圣经的 `cast` 数组是建议（role / name / hair / outfit / colors / note）。
+    定妆时按它给每个配角填一份 spec，和主角一起传给 `character_sheet` 的 `cast`；
+    没有 `cast` 或不需要配角时只定主角。镜头表会给每一镜标注 `cast`（出场角色 role）。
   - 镜头：**画完一镜立刻真渲一帧（strict）**，崩了带着报错重画；通过后静帧存 `art/shots/shot-N.png`
     并记录代码哈希，续跑时直接复用通过的镜头。
   - 镜头文件落在 `<out_dir>/parts/artist-shot-N.tsx`，注册表 `shot-N`，导出 `ShotN` + `META`。
@@ -343,10 +353,12 @@ MV.filler     = { bg: "#101828", draw(e){ /* 兜底：没有任何卡覆盖时�
 引擎**不**替画面决定人在哪、谁挡住谁。人物、推镜、前景遮挡全部写在同一个 `<svg>` 的图层顺序里：
 
 ```tsx
-import {Character, CharacterSide, CharacterBack} from './char-hero'; // 正面 / 侧面 / 背面
+// 整组角色统一入口：主角 Hero，配角按定妆时的 role 命名（FriendA / FriendB …）
+import {Hero, FriendA} from './char-cast';
 import {Actor} from '../../ui/Actor';                                  // 可选：带歌词避让的放置器
 
-<Actor Character={Character} x={820} y={980} s={1.15} flip />
+<Actor Character={Hero} x={820} y={980} s={1.15} flip />
+<FriendA x={1240} y={980} />
 ```
 
 - 角度按这一镜的叙事选：要情绪和眼神给人脸，要空间和方向给侧身，人物真的离开才用背面。
@@ -354,7 +366,8 @@ import {Actor} from '../../ui/Actor';                                  // 可选
   按 `story.shots` 的 `action` / `cast` / 景别来定。标题、黑场、前景遮挡要不要盖住人，
   取决于它画在人之前还是之后。
 - `Actor` 只是工具：返回纯 `<g>`，跟随场景自己的相机变换；只在「头被歌词压住」时收缩/让位。
-- 背面视图（`CharacterBack`）在定妆阶段一并产出，背对镜头的镜头直接用它。
+- 背面视图（`HeroBack` / `FriendABack`）在定妆阶段一并产出，背对镜头的镜头直接用它。
+- **每个角色只能用对应的导出名**：不要把 `Hero` 复制成配角；没定妆的人不要画；这一镜不需要的角色不要出现。
 - 闸门只拦「一定会静默出事」的问题：HTML 标签嵌在 SVG 里、缺 `<svg>` 根、缺导出。
 - 闸门（比 canvas 多一层编译期）：
   1. 静态：禁用项（`Math.random`/`Date.now`/`window`/`document`/定时器/外链/CSS 动画）+ import 白名单；

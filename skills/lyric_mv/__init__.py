@@ -43,6 +43,9 @@ class LyricMvTool(BaseTool):
         "断点续跑：用同一个 out_dir 再调一次就是续跑，已完成阶段与已通过的镜头都会复用"
         "（状态在 mv_state.json，逐镜通过记录在 art/shots/），不需要预先检查或另起目录。"
         "要强制重画某一段传 force（如 force='scenes'），只影响点名的那一段。\n"
+        "定妆前置：涉及人物的 MV 必须先调 character_sheet 让用户在画布上确认角色"
+        "（主角 spec + 配角 cast，一次确认整组），"
+        "再带 character=video_work/<项目名>/characters.json 调用本工具；没定妆会直接停下并提示。\n"
         "个别镜头最终画不出来不会阻塞整片：会记入 missing-shots.json，该处留兜底黑场。\n"
         "产物：<out_dir>/mv.mp4，以及 timeline.json / plan.json / story.json / "
         "parts/*.tsx（镜头源码）/ render-plan.json / run.log。"
@@ -55,6 +58,10 @@ class LyricMvTool(BaseTool):
         ToolParameter("brief", "string",
                       "编排要求：风格、开场形式、标题位置、情绪、禁止项等。优先级高于模型自主选择", required=False),
         ToolParameter("out_dir", "string", "产物目录，默认 cwd/lyric_mv_out", required=False),
+        ToolParameter("character", "string",
+                      "已确认的定妆参数路径，通常是 video_work/<project>/characters.json。"
+                      "运行前必须先用 character_sheet 让用户在画布上确认整组角色；"
+                      "不传则读 out_dir/art/characters.json，再退回 art/character.json", required=False),
         ToolParameter("t0", "number",
                       "首句人声起始秒数（人工锚点）。ASR 定错首句时用它兜底", required=False),
         ToolParameter("synth_prompt", "string",
@@ -90,9 +97,14 @@ class LyricMvTool(BaseTool):
         ToolParameter("max_images", "integer",
                       "最多生成几张段落底图，默认 6", required=False, default=6),
         ToolParameter("force", "string",
-                      "强制重跑某几段（逗号分隔）：plan / story / bible / scenes / render。"
+                      "强制重跑某几段（逗号分隔）：plan / story / bible / shotlist / scenes / render。"
                       "只影响点名的那几段，其余产物照常复用；不传＝全部按签名续跑",
                       required=False, default=""),
+        ToolParameter("look", "object",
+                      "渲染外观（自由配置，可选）：{\"pixel\": {\"block\": 4, \"colors\": 24}} "
+                      "＝引擎级像素化（低分辨率 + 调色板量化，整帧含字幕）；"
+                      "不传＝原始高清输出。像素化只影响渲染，不改画面代码。",
+                      required=False),
     ]
 
     def __init__(self, cwd: str = ".", llm_config: dict = None,
@@ -105,14 +117,27 @@ class LyricMvTool(BaseTool):
         self.image_config = image_config or {}
 
     def execute(self, lyrics: str = "", audio: str = "", brief: str = "",
-                out_dir: str = "", t0: float = None,
+                out_dir: str = "", character: str = "", t0: float = None,
                 synth_prompt: str = "",
                 mode: str = "auto", stage: str = "auto", story_choice: str = "",
                 revise: bool = False, type_style: str = "",
                 with_images: bool = False,
-                max_images: int = 6, engine: str = "remotion", force: str = "", **kw) -> ToolResult:
+                max_images: int = 6, engine: str = "remotion", force: str = "",
+                look: dict = None, **kw) -> ToolResult:
         work = self._resolve_path(out_dir) if out_dir else (Path(self.cwd) / "lyric_mv_out")
         work.mkdir(parents=True, exist_ok=True)
+
+        # 渲染外观：写进 out_dir，渲染段读它决定是否像素化；续跑不传就沿用上一次的配置
+        if look:
+            if isinstance(look, str):
+                try:
+                    look = json.loads(look)
+                except Exception:
+                    return ToolResult.fail(f"look 不是合法 JSON：{look[:80]}")
+            if not isinstance(look, dict):
+                return ToolResult.fail("look 必须是对象，例如 {\"pixel\": {\"block\": 4, \"colors\": 24}}")
+            (work / "look.json").write_text(
+                json.dumps(look, ensure_ascii=False, indent=2), encoding="utf-8")
 
         lyrics_file = ""
         if lyrics and lyrics.strip():
@@ -145,9 +170,14 @@ class LyricMvTool(BaseTool):
             cmd += ["--with-images", "--max-images", str(max(0, int(max_images or 0)))]
         if force:
             cmd += ["--force", force]
+        if look:
+            # 走环境变量而不是 argv：JSON 里可能有空格/中文，且不必出现在进程列表
+            env_look = json.dumps(look, ensure_ascii=False)
 
         # LLM 配置走环境变量传子进程：不进 argv（进程列表可见）、不进日志。
         env = dict(os.environ)
+        if look:
+            env["LYRIC_MV_LOOK"] = env_look
         cfg = self.llm_config or {}
         if cfg.get("api_key") and cfg.get("base_url") and cfg.get("model"):
             env["LYRIC_MV_LLM"] = json.dumps({
@@ -159,6 +189,10 @@ class LyricMvTool(BaseTool):
             return ToolResult.fail(
                 "主 LLM 配置不完整（需要 base_url / api_key / model），"
                 "lyric_mv 的编导与画面需要调用 LLM 现场创作，无法继续。")
+
+        # 定妆参数走环境变量：路径可能带空格，且不该出现在进程列表里
+        if character:
+            env["LYRIC_MV_CHARACTER"] = str(self._resolve_path(character))
 
         # 图片生成配置同样走环境变量；没配 Key 时 pipeline 会自动退回纯 canvas
         if with_images:

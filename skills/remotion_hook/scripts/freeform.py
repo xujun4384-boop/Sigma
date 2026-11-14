@@ -65,7 +65,9 @@ _CODE_SYS = """你是 Remotion 动效导演。为视频第一段写一个开场�
 7. 四周留 6% 安全区，底部 12% 不放重要内容（导演组会叠字幕）；
 8. 在给定时长内完成「引入 → 强调 → 保持 → 收尾」，只传达一个信息点；
    主信息在前段完成，剩余时间用持续的镜头运动/光效/细节动效保持画面活性，不要提前静止或长时间定格；
-9. 画面要有主次：主文案大、辅助信息小，避免满屏同字号。
+9. 画面要有主次：主文案大、辅助信息小，避免满屏同字号；
+10. **只做 2D**：运行环境是 DOM / SVG / Canvas 2D，没有 three.js / WebGL；
+    不要尝试 3D 引擎或假装做 3D（需要真 3D 时导演组会改用 blender / opendesign）。
 
 允许的 import（只能这些）：
 - react
@@ -79,6 +81,13 @@ _CODE_SYS = """你是 Remotion 动效导演。为视频第一段写一个开场�
 - @remotion/shapes
 - @remotion/paths
 - ./types
+- ./Character（仅在上下文提供定妆角色时可用）
+
+若上下文提供「定妆角色」：
+- 必须 `import {Character, CharacterSide, CharacterBack} from './Character';`，不要另画人体；
+- 角色本地脚底为 (0,0)，高约 430，用 <g transform="translate(x y) scale(s)"> 放置；
+- 支持 view/pose/mood/headTurn/tilt/bob，armL/armR 用度数（0 下垂，正值向外），
+  或 [手x, 手y]；只有这段确实需要人物时才使用。
 
 禁止：fetch / XMLHttpRequest / require / 动态 import / eval / new Function / process / fs /
 child_process / Date.now / Math.random / setTimeout / setInterval / requestAnimationFrame /
@@ -126,7 +135,7 @@ _FORBIDDEN = [
     (r"https?://", "外部 URL"),
 ]
 _ALLOWED = {
-    "react", "remotion", "./types",
+    "react", "remotion", "./types", "./Character",
     "@remotion/motion-blur", "@remotion/shapes", "@remotion/paths",
 }
 
@@ -176,6 +185,13 @@ def _code_context(spec: dict, previous: str, error: str, issues: list) -> str:
         f"时长：{spec.get('duration')}s｜画布：{spec.get('width')}x{spec.get('height')}@{spec.get('fps')}fps",
         f"整体风格：{spec.get('style') or '简洁、电影感'}",
     ]
+    character = spec.get("character")
+    if isinstance(character, dict):
+        lines += [
+            "",
+            "定妆角色：以下是用户在画布上确认过的同一份参数，人物必须来自 './Character'。",
+            json.dumps(character, ensure_ascii=False),
+        ]
     if previous:
         lines += ["", "上一版代码（在此基础上修，不要推翻重来，除非结构有硬伤）：", "```tsx", previous, "```"]
     if error:
@@ -337,6 +353,9 @@ def run_freeform(spec: dict, cfg: dict, out: Path,
                 pass
 
     original = HOOK_IMPL.read_text(encoding="utf-8") if HOOK_IMPL.exists() else PLACEHOLDER
+    if isinstance(spec.get("character"), dict):
+        from skills.remotion_runtime.character_module import install_character
+        install_character(PROJECT / "src", spec["character"])
     previous, last_error, last_issues = "", "", []
     try:
         for attempt in range(1, max(1, attempts) + 1):

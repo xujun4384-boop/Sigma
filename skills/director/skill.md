@@ -8,15 +8,20 @@
 1. **设计**：`director(brief="用户需求", cinematic_count=1)` → 内部导演 LLM 产出蓝图 → 返回 `need_confirm`。
    主 LLM 用 `ask_user` 把蓝图给用户确认（不同意就改/重来），并顺便确认 cinematic 段数（默认 1，可 0/2/3）。
 2. **执行**：`director(plan="<确认后的蓝图JSON>", output_path="final.mp4", project="xxx", cinematic_count=1)` → 按蓝图制作成片。
+3. **定妆**（蓝图里有人物时才做，且必须在执行前）：`character_sheet(spec=..., project="<同名>")`
+   → 应用画布出五格定妆图，用户在画布上点确认 → 再把
+   `character="video_work/<project>/character.json"` 传给 `director`。
+   角色是跨段的共同资产：没定妆就开拍，等于每段各画一个人。
 
 > `cinematic_count` 是整片影视级段数：**默认 1 段**；用户明确要求 0（不用）/ 2 / 3 段时才改。
-> 设计阶段是硬约束（蓝图里 cinematic 数量必须相等）；执行阶段超出预算的段会自动降级为 HTML 动画。
+> 设计阶段是硬约束（蓝图里 cinematic 数量必须相等）；执行阶段超出预算的 cinematic 段会先改用 3D 渲染
+> （`blender` 作为 cinematic 的 backup），3D 也失败才退到 HTML 动画。
 >
 > 另一种开场/任意段模式 `footage`（用户自备视频）：**只有用户主动提供素材并点名用途时**才写进蓝图。
 > 素材由用户放在项目文件夹，`video` 写路径，可用 `overlay` 加标题；用户没提就绝不自动使用。
 >
 > 真实地图用 `amap`（高德）：真实中国/世界行政区、真实驾车/步行/骑行路线、地点标注、行程演示。
-> 它和 `styled` 的 `visualStyle="map"`（风格化纸地图/插画）不是一回事；真实地理与行程必须用 `amap`。
+> 它和 `styled` 里写的「风格化纸地图」不是一回事；真实地理与行程必须用 `amap`。
 
 ## 蓝图结构
 ```json
@@ -25,7 +30,7 @@
   "style": "整体视觉风格",
   "canvas": {"width": 1920, "height": 1080, "fps": 30},
   "panels": [
-    {"engine": "opendesign|manim|cinematic|styled|remotion|footage|amap",
+    {"engine": "opendesign|manim|cinematic|styled|footage|amap|webpage|blender",
      "hook": {"type": "result|question|wrongway|contrast|ui|object|countdown|map|sound|handwritten|footage",
               "text": "屏幕上出现的钩子文案（可空）", "why": "为什么能抓人（可选）"},
      "narration": "本段旁白(可空)",
@@ -41,13 +46,16 @@
              "region": {"soc": "CHN", "name": "北京市", "adcode": "110000", "depth": 1,
                         "bounds": [[73.5,3.8],[135.1,53.6]], "highlight": ["北京市", "上海市"]},
              "world": {"highlight": ["CHN", "USA"], "center": [0, 20]}},
-     "visualStyle": "仅styled必填：14种风格id之一", "shots": "仅styled linear可选：2~5",
-     "layout": "仅styled可选：linear（默认）| grid（大画布分格跳格）",
-     "grid": {"cols": 2, "rows": 2, "order": [0, 1, 2, 3], "weights": [1, 1, 1, 1],
-              "moves": {"1": {"zoom": 1.14}}},
+     "styleNote": "仅styled段可选：本段局部风格要求",
+     "intro": {"title": "从一条路线\n看懂一座城市", "accent": "一座城市", "sub": "副标（可空）",
+               "tag": "SIGMA 科普视频", "side": "right", "seconds": 4},
+     "embeds": [{"type": "blender|manim|amap", "brief": "特效画面描述",
+                 "rect": [760, 250, 900, 506], "start": 1.2, "duration": 4.0,
+                 "mask": "圆角 24px", "map": {"kind": "route", "…": "仅 amap"}}],
      "overlay": {"title": "标题", "subtitle": "副标题(可空)", "accent": "#e03131", "position": "upper"},
      "sfx": [{"at": 0.4, "recipe": "cartoon.pop", "level": 55}]}
   ],
+  "styleGuide": "有 styled 段时写：全片风格档案（配色/线条/质感/光/构图/运动/文字/禁止项），各 styled 段共用",
   "subtitles": true,
   "review": true,
   "sfx_density": "normal",
@@ -58,35 +66,61 @@
 ```
 > `overlay` / `transition` / `music` / `sfx` 是**可选**字段（不填即不启用）。`music` / `sfx` **默认不写**，见下文。
 
-## 开场钩子（第一段必填）
+## 开场钩子 + 标题入场（前 1~2 段）
 
-没有 cinematic 时，开场不能靠空镜/慢推。第一段是钩子，不是封面/logo/空镜。第一段必须写 `hook`，从下面选一个：
+没有 cinematic 时，开场不能靠空镜/慢推。第一段是钩子，不是封面/logo/空镜。第一段必须写 `hook`，从下面选一个；如果钩子需要两个节拍，第 2 段也可以继续写 `hook`（第 3 段起禁止）：
 
-| hook.type | 钩子 | 适合内容 | 优先引擎 |
+| hook.type | 钩子 | 适合内容 | 建议引擎（按需，非硬约束） |
 |---|---|---|---|
-| `result` | 结果前置/数字冲击：先给最终结果或反差数字，再倒回讲过程 | 效率、成长、测评、案例 | remotion / opendesign |
-| `question` | 反常识提问：一句话逐字打出，停半拍再给答案 | 观点、科普、职场 | remotion / opendesign |
-| `wrongway` | 错误示范/痛点现场：先演常见错误，再给解法 | 教程、工具、避坑 | remotion / opendesign |
-| `contrast` | 前后对比：左右/上下分屏「你以为 vs 实际」 | 产品、改造、对比测评 | remotion / opendesign |
-| `ui` | 熟悉 UI/POV：假手机屏、聊天、搜索框、后台仪表盘 | 互联网、AI、产品、生活痛点 | remotion / opendesign |
-| `object` | 物件特写：车票、账单、钥匙、信封等近景 + 慢推/音效 | 个人故事、情绪、回忆 | styled |
-| `countdown` | 倒计时/进度：天数、deadline、进度条 | 挑战、计划、复盘 | remotion / opendesign |
+| `result` | 结果前置/数字冲击：先给最终结果或反差数字，再倒回讲过程 | 效率、成长、测评、案例 | styled / opendesign |
+| `question` | 反常识提问：一句话逐字打出，停半拍再给答案 | 观点、科普、职场 | styled / opendesign |
+| `wrongway` | 错误示范/痛点现场：先演常见错误，再给解法 | 教程、工具、避坑 | styled / opendesign |
+| `contrast` | 前后对比：左右/上下分屏「你以为 vs 实际」 | 产品、改造、对比测评 | styled / opendesign |
+| `ui` | 熟悉 UI/POV：假手机屏、聊天、搜索框、后台仪表盘 | 互联网、AI、产品、生活痛点 | opendesign / styled |
+| `object` | 物件特写：车票、账单、钥匙、信封等近景 + 慢推/音效 | 个人故事、情绪、回忆 | styled / cinematic（有预算时） |
+| `object3d` | 3D 设备/物件开场：真 3D 设备或关键物件绕机、推近、翻转 | 硬件、数码、产品发布、设备展示 | blender（真 3D）/ opendesign（three.js） |
+| `countdown` | 倒计时/进度：天数、deadline、进度条 | 挑战、计划、复盘 | opendesign / styled |
 | `map` | 地图路线：真实路线/地点开场，配时间/距离数字 | 旅行、通勤、地理、迁徙 | amap（真实路线）/ styled（风格化纸图） |
-| `sound` | 声音先导：黑屏先响一声闹钟/提示音/盖章，再出画面 | 生活、职场、悬念 | remotion / opendesign + sfx |
+| `sound` | 声音先导：黑屏先响一声闹钟/提示音/盖章，再出画面 | 生活、职场、悬念 | styled / opendesign + sfx |
 | `handwritten` | 手写便签：便签/清单/日记逐字出现，划掉关键项 | 日常、亲情、成长 | styled / opendesign |
 | `footage` | 用户素材开场：用户自备视频直接作开场（**仅用户主动提供素材时**） | 已有成片、实拍素材、外部生成的开场 | footage |
 
+### 标题入场 intro（钩子之后、正片之前）
+
+在**最后一段钩子**上写 `intro`，把钩子的全屏画面连续缩小到一侧，另一侧出现本次视频的大标题、副标和 Sigma 标签：
+
+```json
+"intro": {"title": "从一条路线\n看懂一座城市", "accent": "一座城市",
+          "sub": "距离、时间与路径，都是理解城市的一手证据。",
+          "tag": "SIGMA 科普视频", "side": "right", "seconds": 4}
+```
+
+- 这是**固定品牌转场**，不是普通分镜；执行层用模板渲染，不交给 LLM 写 HTML。
+- `title` 必填，1~2 行，每行尽量 ≤8 字（最多 10 字）；字号会按最长一行自动定，最大 104px。
+- `accent` 可选：标题里要强调的词，会变成品牌绿。
+- `sub` 可选；`tag` 默认 `SIGMA 科普视频`。
+- `side` 是**钩子画面缩到哪一侧**（left/right）；标题放另一侧，默认 right。
+- `seconds` 2.5~5.5，默认 4；**没有旁白**，是静音转场。
+- **钩子结尾不要淡出到黑/白**：intro 会接住钩子的最后一帧来缩小，最后一帧必须是可读画面。
+- 全片最多一个 intro，必须写在最后一段钩子上；**写了 intro 的钩子段不要写 `overlay`**（两者都会上大标题）。
+- 不写 intro 也可以；但如果用了 2 段钩子，建议写，让观众知道正片开始。
+
 规则：
 - **第一段画面至少 10 秒**，只传达 1 个信息点；不要压成三五秒敷衍。
+  如果拆成 2 段钩子：两段合计 ≥10 秒、单段 ≥4 秒；拆段不是把钩子变短。
   例外：`cinematic`（固定 6/10 秒）、`footage`（素材原长）。
   **旁白可以短于 10 秒**；旁白结束后剩余画面留白（不加旁白、不加新内容），
   第二段从第一段画面结束后开始，**第二段的旁白与字幕时间轴不得被挤动**。
 - 非 cinematic/footage 的第一段，蓝图 `seconds` 写 ≥10（写小了执行层也会抬到 10 秒）。
 - 第一句旁白直接给结果/问题/冲突；禁止“大家好 / 今天我们来聊聊 / 本期视频”。
-- 优先 `remotion`（title / kinetic / ui 模板）或 opendesign / styled；只有 `cinematic_count > 0` 且确实需要实拍感时，才用 cinematic。
+- **钩子引擎按内容选，不要默认 remotion——它已停用**（只会做标题/动态字，撑不起开场钩子）：
+  实拍感/人物/真实场景 → cinematic（预算允许时）；3D 设备/物件/结构 → blender + `hook.type=object3d`（轻量 3D 可用 opendesign 的 three.js）；
+  版式/数字/对比/假 UI/动态字 → styled 或 opendesign；公式/推导/原理 → manim；
+  真实地点/行程/路线 → amap；真实网页/数据 → webpage；用户自备素材 → footage。
+  以上都是**按内容按需选择，不是硬约束**；唯一硬规则：**任何分镜都不能写 `remotion`**。
 - **真实地点/行程/路线开场（如“从 A 到 B”“某城市/国家地图”）→ `amap`。**
 - **只有用户主动提供素材、并说明用它开场/做某一段时，才用 `footage`；用户没提就不要用。**
-- **`remotion` 只用于第一段**；其他段不要用。
+- **hook 只允许前 1~2 段**：第 1 段必填，第 2 段可选，第 3 段起禁止；intro 只能有一个且只能写在最后一段钩子上。
 - **`cinematic_count=0` 时，第一段禁止 cinematic，也禁止空镜/慢推/纯氛围画面。**
 - 钩子必须和正片内容真实相关，不要标题党。
 
@@ -95,37 +129,60 @@
 - **`manim`（Manim 讲解）**——**科普讲解首选**。数学/几何图形、公式推导、坐标与函数、原理分步演示。
   - 用 manim 时，`visual` 要写清"**讲什么、分几步、出现哪些图形/公式、节奏**"；工具内部会写好动画并精确对齐时长。
   - 边界：擅长精确的数学几何表达；**不擅长写实实体建模**（无遮挡剔除）→ 产品/人物/场景写实画面请用 cinematic。
+- **`blender`（原理解释型 3D / 3D+文字）**——**"看不见的结构"讲不清时用它**。
+  - 什么时候用：原理的关键在于**空间关系**——谁在谁里面、谁绕着谁转、力/场怎么走、剖开是什么、
+    零件怎么装配。这些用平面图解怎么画都别扭，3D 一眼就懂。
+  - 什么时候不用：纯公式推导 → `manim`；纯概念对比/流程/数据 → `opendesign`；
+    真实场景氛围 → `cinematic`。
+  - **方案是「3D 机理 + 画面内短标注」**：3D 负责让人看懂结构，文字只标部件名/关键量（≤6 字）。
+    **3D 里绝不照抄旁白原句**——字幕由导演组统一加在底部，重复会打架。
+  - 节奏：单段 5~10 秒、2~3 个镜头；**开头 0.5 秒先给全貌**建立空间感，再推进到关键部位。
+  - 次要用途：产品外观、设备屏幕内容展示（这时面板写 `screen_html`，工具会用无头 Chromium
+    把真实界面截成贴图贴到屏幕上——**不要在 3D 里手画界面**）。
+  - **真 3D 开场钩子**：设备/物件/产品外观本身是卖点时，第一段可以直接用 blender，
+    配 `hook.type=object3d`（首段仍会抬到 ≥10 秒）。
+  - 代价：比 HTML 慢（GPU 约 0.7~1 秒/帧，10 秒 3D 约几分钟起）；全片通常只用 1 段。
+  - 失败自动降级 `opendesign`。
 - **`opendesign`（HTML 动画）**——**信息/排版主力**。文字标题、要点罗列、图表数据、流程/对比、UI 演示。
+  - 可选写 `embeds`，把 **blender / manim / amap** 作为**版面里的一个图层**嵌进来：
+    外部片段会先被渲染成帧雪碧图，再由 opendesign 的 canvas + GSAP 逐帧绘制，
+    因此可以和文字、卡片、遮罩、阴影共用同一张版，而不是整屏硬切。
+  - **有协同价值就优先用**：Manim 需要步骤标签/进度/结论，3D 需要参数/部件清单，地图需要地点/行程说明时，
+    优先 `opendesign + embeds`，不要惯性使用裸特效段。
+  - **内嵌不等于小窗**：特效可占 60%~80% 主视觉区，opendesign 负责标题、侧栏、进度与批注，统一全片风格。
+  - 多个连续理论/公式演示，可合并为一个 opendesign 段 + 一个覆盖全程的 Manim embed，避免连续裸 Manim 段。
+  - **不是替代**：特效是唯一叙事主体、完全不需要持续文字协同时，仍可用单独的 `engine=blender/manim/amap` 段。
+  - **不强制**每段都嵌：纯标题、纯文字、纯静态图表保持干净。建议全片 1~3 段带 embeds，每段最多 2 个。
+  - `rect` 用画布像素 `[x,y,w,h]`；`start` 相对本段开始；`duration ≥1.5s` 且不超出本段时长。
+  - 蓝图里这段会显示成「HTML动画 + 3D渲染 / Manim讲解 / 高德地图」，用户能直接看懂。
+- **`webpage`（真实网页取景）**——在**模拟浏览器窗口**里滚动真实网页，高亮原文并在旁边浮现批注（原文摘录 + 解释）。
+  - **什么时候用**：核心论据是真实统计/榜单/表格数值、官方定义与原文、报告结论、政策条款；
+    或讲人群/规模/分布/排名变化；或用户直接给了网址。
+    它给的是"凭什么这么说"——观众能亲眼看到原始数字与原句。
+  - **什么时候不用**：纯抽象概念与公式推演（manim）、纯排版总结（opendesign）、需要虚构画面（styled/cinematic）、
+    登录墙/付费墙页面、关键信息隔着好几屏。
+  - **怎么用**：有网址写 `web.url`，没有写 `web.query`（知识点原话，**禁止编造 URL**）；必须写 `web.focus`
+    （要让观众看到哪类证据）；`web.max_marks` 默认 3（最多 4），尽量落在同一屏/同一张表。
+  - 设计阶段系统会抓取真实来源、选出可逐字标注的原文并算出坐标，回填 `web.source` / `web.marks`；
+    蓝图确认时就能看到来源、高亮原文与坐标。
+  - **密度**：一支片子 1~2 段最合适；全片都用会单调，opendesign 负责它前后的总结与对比。
+  - 和 opendesign 的区别：画面是真实网页（1:1 滚动，不是缩略图），不是重绘。
 - **`cinematic`（影视级）**——**实拍感/氛围**。真实场景空镜、情绪镜头、开场钩子；单段 6/10s；
   **整片段数由 `cinematic_count` 决定，默认 1 段**（0=不用；用户可在确认时明确要求 2/3 段，最多 3 段）。
   ⚠️ 画面是**固定长度**，该段旁白**必须 ≤ 画面时长（宁短勿长）**；旁白长于画面会让成片结尾**卡在最后一帧**（像视频卡住）。
   opendesign/manim 由旁白定时长、定格一帧无妨；cinematic 不行，所以这类段的旁白要写得短。
 - **`styled`（风格动画）**——**叙事/插画主力**。讲故事、情绪、隐喻、人物关系、需要一个完整统一画风的段落。
-  - 选了 `styled` **必须**写 `visualStyle`（14 种之一），其他引擎不要写。
-  - 它用代码逐帧画（无歌词），时长跟随旁白；可选 `shots`（2~5）控制 linear 镜头数。
-  - **可选版式**：不写 `layout` = 现有 `linear`（2~5 切镜，行为完全不变）。
-    只有这一段是 **2~6 个互不相关的画面/信息点**（像分镜故事板）时，才写 `"layout": "grid"`：
-    一张大画布分格，camera 到点瞬间跳格，每格独立播放；格内可推拉。
-    - `grid` 可选：`cols`/`rows`（默认 2×2）、`order`（播放顺序）、`weights`（每格时长权重）、
-      `moves`（格内推拉，如 `{"1":{"zoom":1.14}}`）。不写 = 2×2 等权重、无推拉。
-    - `shots` 只对 linear 生效；grid 是一段一个 scene，格数由 `grid` 决定。
-    - 连续动作/情绪推进仍用 linear；grid 是“多个独立画面”的工具，不要滥用。
-  - 可以画短标题、关键词、标签、数字、单字（≤12 字，按风格的「文字」规则）；
-    **不能画旁白/字幕原文**，底部 12% 留给导演组字幕。
-  - 风格库（14 选 1）：`crayon` 绘本 / `shadow` 皮影 / `flat` 扁平 MG / `ink` 水墨 /
-    `pixel` 像素 / `comic` 漫画 / `whiteboard` 白板 / `hanzi` 汉字 / `timeline` 时间线 /
-    `isometric` 等距 / `scale` 比例尺 / `infographic` 信息图 / `map` 风格化地图 / `exploded` 3D 拆解。
-  - **`map` 是“风格化纸地图”**（米色纸/等高线/图钉/虚线），适合虚构、隐喻、绘本式地图，不保证真实地理；
-    真实地点/行程/中国或世界地图必须用 `amap`，不要用 styled 的 map 代替真实路线。
-  - **风格由导演组决定，不要向用户询问风格，也不要把风格选择推给用户。**
-    按每一段的内容、时代与叙事来选：现代都市→flat/comic，古装/宿命→shadow/ink，讲解→whiteboard/isometric，
-    数据→infographic/scale，旅程→map，游戏怀旧→pixel，温柔日常→crayon。
-- **`remotion`（开场钩子）**——**只用于第一段**，画面至少 10 秒（时长由导演给定，动画铺满整段）。
-  默认让 LLM 自由写 TSX，渲染后做视觉闸门；不过回灌重写，最多 3 次，再回退模板。
-  - 导演只写 `hook` 与 `visual`，不直接写 TSX。
-  - `hook.type` 用于提示词与模板兜底：`result`/`countdown` → kinetic；`question`/`sound`/`object`/`handwritten` → title；
-    `ui`/`wrongway`/`contrast`/`map` → ui。
-  - 首次运行可能需要 `npm install`；自由发挥和模板都失败时自动降级 opendesign。
+  - 它没有固定风格可选：用 **Remotion 现场作画**（无歌词，**仅 2D**），画风来自蓝图顶层的 `styleGuide`。
+  - 蓝图里只要有 styled 段，就必须在**顶层**写一份 `styleGuide`（配色/线条/质感/光/构图/运动/文字/禁止项），
+    全片所有 styled 段共用；各段可再用 `styleNote` 做局部微调。
+  - 用户点名了画风就照原话写进 `styleGuide`；没提就按内容与时代自己定，**不要向用户询问风格**。
+  - 可以画短标题、关键词、标签、数字、单字（≤12 字）；**不能画旁白/字幕原文**，底部 12% 留给导演组字幕。
+  - 片中有固定人物且需要跨段一致时，先 `character_sheet` 定妆并让用户确认，再执行；
+    需要给关键物品也定妆时同样走这一轮。其余情况不必每次都定妆。
+  - 风格化的"地图插画"写进 `styleGuide` 即可；真实地点/行程必须用 `amap`，不要用 styled 冒充。
+- **`remotion`（已停用）**——旧版开场钩子引擎，只会做标题/动态字，撑不起钩子，**新蓝图任何分镜都不要写**。
+  执行层仍保留它的代码（历史蓝图复跑时可用），但设计校验会直接打回。开场钩子请按内容改用
+  `cinematic` / `blender` / `styled` / `manim` / `amap` / `opendesign` / `webpage`（按需，不是硬约束）。
 - **`footage`（用户自备素材）**——把用户自己放在项目文件夹里的视频（如 10 秒 mp4）**直接**用作一段。
   - **只能由用户主动提出**：用户说明"我自己提供了一段视频 / 素材放在项目里 / 用我这段视频开场或做第几段"时才用；
     用户没提就不要选它（目录里有视频也不代表要用——可能是历史成片）。
@@ -152,21 +209,28 @@
   - 地图需要联网和高德 Key；未配置时设计阶段会明确提示不要用 amap。
   - 境外只有国界/洲名级别，没有境外街道细节；境外城市街区请换别的方案。
 
-判断准则：**有公式/几何/原理/函数 → manim**；纯信息与文字排版 → opendesign；要实拍感/氛围 → cinematic；
-**讲故事/要画风 → styled**；**真实地点/行程/路线/中国或世界地图 → amap**；**用户主动提供了视频素材 → footage**。
+判断准则：**有公式/几何/原理/函数 → manim**；纯信息与文字排版 → opendesign；
+**"看不见的结构"讲不清（遮挡/装配/机构运动/场/剖切）→ blender**；要实拍感/氛围 → cinematic；
+**讲故事/要画风 → styled**；**3D 设备/物件/产品外观开场 → blender（hook.type=object3d）**；
+**真实地点/行程/路线/中国或世界地图 → amap**；**用户主动提供了视频素材 → footage**；
+**要出示真实证据（数据、榜单、官方原文、报告结论）→ webpage**。
+**别用 opendesign 把有说服力的真实数字重画一遍**——那种地方优先端出真实页面，opendesign 负责它前后的总结与对比。
 一段若"既讲原理又给信息"，按该段**主要意图**择一。
 **不要每段都用 manim——只在真正"讲道理"的段落用**，其余交给 opendesign / styled 承担节奏。
 
 ## 执行顺序（依赖驱动，非写死阶段）
+0. **定妆**（仅当蓝图里有人物）：先 `character_sheet` 出角色、用户在画布确认，再带着 `character` 执行。
+   角色参数落到 `video_work/<project>/character.json`，续跑/微调会自动复用。
 1. **旁白先行**（若任一面板有旁白）→ 实测时长 = 骨架；各面板时长随之确定。
 2. **画面派工**：逐面板按 `engine` 派给对应部门，**可多引擎混排**。
    - `opendesign` → `opendesign_video`；`manim` → `manim_video`；`cinematic` → `video_cinematic_generate`；
-     `styled` → `styled_video`（内部引擎，14 选 1）；`remotion` → `remotion_hook_generate`（只用于第一段）；
-     `footage` → `footage_video`（用户自备素材，仅在用户点名时）；`amap` → `map_video`（高德真实地图）。
-   - **影视级预算**：不再查询 API 额度。默认每支片只用 **1 段** cinematic；用户可在 ask_user 明确要求 **0（不用）/ 2 / 3 段**，通过 `cinematic_count` 传入。设计蓝图时该段数是硬约束（panels 里 cinematic 数量必须相等）；执行时超出预算的段自动降级为 HTML 动画。
-   - **降级链**：`styled → opendesign`、`manim → opendesign`、`cinematic → opendesign`、`remotion → opendesign`、`amap → opendesign`；`footage` **不降级**（素材缺失/损坏如实报错，不拿别的画面冒充），任一段失败不整片崩。
-   - 画面引擎只有这七个；蓝图里的 `engine` 必须取其中之一，其余取值一律按 `opendesign` 处理。
-     `remotion` 仅限第一段；其他段出现会被校验打回。`footage` 可用在任意一段（含开场）；`amap` 也可用在任意段。
+     `styled` → `styled_video`（内部引擎，Remotion 现场作画）；
+     `footage` → `footage_video`（用户自备素材，仅在用户点名时）；`amap` → `map_video`（高德真实地图）；
+     `webpage` → `webpage_video`（真实网页截图 + 高亮标注）；`blender` → `blender_video`（真 3D 渲染）。
+   - **影视级预算**：不再查询 API 额度。默认每支片只用 **1 段** cinematic；用户可在 ask_user 明确要求 **0（不用）/ 2 / 3 段**，通过 `cinematic_count` 传入。设计蓝图时该段数是硬约束（panels 里 cinematic 数量必须相等）；执行时超出预算的 cinematic 段先改用 **3D 渲染**（`blender` 作为 cinematic 的 backup），3D 也失败才降级为 HTML 动画。
+   - **降级链**：`styled → opendesign`、`manim → opendesign`、`cinematic → blender → opendesign`、`remotion → opendesign`、`amap → opendesign`、`blender → opendesign`；`footage` 与 `webpage` **不降级**（用户指定的素材/真实网页不能被别的画面冒充），任一段失败不整片崩。
+   - 画面引擎只有这八个；蓝图里的 `engine` 必须取其中之一，其余取值一律按 `opendesign` 处理。
+     `remotion` 已停用：新蓝图写出它会被校验打回（历史蓝图仍可复跑）。`footage` / `amap` / `webpage` 可用在任意段。
    - `footage` 段在**旁白之前**先做素材存在性检查，缺文件直接报错，不会白花旁白/合成时间。
 3. **字幕**（蓝图 `subtitles=true`）：`subtitle` 依旁白字级时间戳出单行/底部 `.ass`。
 4. **配乐**（仅当蓝图写了 `music`）：`music_generate`（音乐组）按描述生成纯音乐 BGM，铺满全片
@@ -182,11 +246,11 @@
 - **为什么默认关**：音乐生成单次要 2~3.5 分钟，是整条流程里最慢的一步；且多数需求先看画面。
 - **成片后追加（只重做配乐与合成）**：
   ```
-  director(project="<同名>", patch='{"music": {"prompt": "轻快科技感电子配乐，无人声", "level": 22}}')
+  director(project="<同名>", patch='{"music": {"prompt": "轻快科技感电子配乐，无人声", "level": 30}}')
   ```
   画面/旁白/字幕全部按签名复用，**不会重做**；只有配乐是新生成的，合成因 BGM 变化而重烧一次。
 - **移除配乐**：`patch='{"music": null}'` → 只重烧合成。
-- **音量**：`level` 是百分比(0~100，默认 22)；旁白优先，配乐只做铺底。
+- **音量**：`level` 是百分比(0~100，默认 30)；旁白优先，配乐只做铺底。
 - **时长对齐**：音乐固定裁到成片时长并首尾淡入淡出，**视频结束处音乐同时结束**；
   音乐比片长短时用 **acrossfade 交叉淡化无缝循环**铺满（不是硬循环，长片也不会有"咔"的接缝）。
 - 缺 Key 或生成失败时**自动跳过配乐**，不阻断成片。
@@ -300,12 +364,12 @@
   - ⚠️ **微调必须用 `patch`，不要重发整份 plan**：重发整份 plan 时，模型常把措辞/`seconds` 改得略有不同，会引发不必要的大面积重渲（形同重做）。
   - ⚠️ **不要用 `force=true`**：force 会抛弃所有签名、整片重来。`patch` 模式内部会**忽略** force=true，只重做受影响段；即使误传也不会整片重渲。
   - 逐段签名只看"引擎/画面/提示词/标题包装/旁白/实测时长/画布"；**全局 `style` 与兜底 `seconds` 不参与**，所以风格措辞微调不会触发重渲。
-    `styled` 段额外看 `visualStyle`、风格规格指纹、`shots`，以及显式选择时的 `layout/grid`。
+    `styled` 段额外看 `styleGuide`（全片档案）与 `styleNote`——换画风只重做受影响的段。
   - 每次执行结束会汇报"画面 重做 N / 复用 M 段；旁白 重配 X / 复用 Y 句"，便于判断是不是真·微调。
 - `force=true` → 无视签名，整片重来。
 
 ## 边界
 - 导演**不改流程、不重写渲染**，一切交给部门。
-- `styled_video` 是导演组内部引擎，**不直接暴露给用户，也不让用户选风格**。
+- `styled_video` 是导演组内部引擎，**不直接暴露给用户，也不让用户选风格**（画风由 `styleGuide` 决定）。
 - 能力缺口（如实拍）应在设计阶段就告知用户。
 - 产物目录：`video_work/<project>/{voice,panels,music,sfx,subtitles,review}/` + 成片 + `director_state.json`。

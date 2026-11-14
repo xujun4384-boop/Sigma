@@ -3,228 +3,262 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
+  position: relative;
   background: var(--bg-primary);
 }
 
+.preview-canvas-slot {
+  flex: 1;
+  min-height: 0;
+  flex-direction: column;
+}
+
+/* ── 状态与指令提示 ── */
+
+.canvas-status {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.canvas-status.painting {
+  color: var(--accent);
+}
+
+.canvas-status.done {
+  color: var(--text-secondary);
+}
+
+.canvas-issues {
+  max-height: 88px;
+  overflow-y: auto;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-primary);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--danger);
+  flex-shrink: 0;
+}
+
+/* ── 工具栏 ── */
+
 .canvas-panel-toolbar {
-  min-height: 32px;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: flex-end;
   gap: 10px;
-  padding: 4px 10px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--border-color);
   background: var(--bg-secondary);
   flex-shrink: 0;
 }
 
-.canvas-save-status {
-  margin-right: auto;
-  font-size: 11px;
-  color: var(--text-muted);
+.paint-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
-.canvas-save-status.saving {
-  color: var(--accent);
-}
-
-.canvas-save-status.error {
-  color: var(--danger);
-}
-
-.canvas-save-button,
-.canvas-export-preview-button,
-.canvas-new-button,
-.canvas-selector {
-  padding: 4px 10px;
+.paint-brush-btn,
+.paint-actions button,
+.paint-layers button {
+  padding: 4px 9px;
   border: 1px solid var(--border-color);
   border-radius: 5px;
   background: var(--overlay-hover);
   color: var(--text-secondary);
   cursor: pointer;
   font-size: 11px;
+  line-height: 1.4;
 }
 
-.canvas-selector {
-  max-width: 180px;
-  outline: none;
-}
-
-.canvas-save-button:hover:not(:disabled),
-.canvas-export-preview-button:hover,
-.canvas-new-button:hover,
-.canvas-selector:hover {
+.paint-brush-btn:hover,
+.paint-actions button:hover:not(:disabled),
+.paint-layers button:hover:not(:disabled) {
   border-color: var(--accent);
   color: var(--text-primary);
 }
 
-.canvas-save-button:disabled {
-  opacity: 0.5;
+.paint-brush-btn.active {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+  color: var(--accent);
+}
+
+.paint-actions button:disabled,
+.paint-layers button:disabled {
+  opacity: 0.4;
   cursor: not-allowed;
 }
+
+.paint-swatch {
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.paint-swatch.active {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.paint-color-input {
+  width: 24px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.paint-label {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.paint-width-range {
+  width: 92px;
+  accent-color: var(--accent);
+}
+
+.paint-width-value {
+  min-width: 28px;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.paint-actions {
+  margin-left: auto;
+}
+
+/* ── 画布区 ── */
 
 .canvas-panel-body {
   flex: 1;
   min-height: 0;
-  position: relative;
+  display: flex;
+}
+
+.paint-stage {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 14px;
+  overflow: hidden;
   background: var(--bg-primary);
 }
 
-[data-theme="dark"] .canvas-panel-body {
-  --color-canvas-background: #1a1b1e;
-  --color-grid: #3a3d42;
+.paint-canvas {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 100%;
+  aspect-ratio: 1600 / 1000;
+  border-radius: 4px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.22);
+  background: #fbfaf6;
+  cursor: crosshair;
+  touch-action: none;
 }
 
-[data-theme="light"] .canvas-panel-body {
-  --color-canvas-background: #f7f7f8;
-  --color-grid: #d7d9de;
-}
+/* ── 图层面板 ── */
 
-.canvas-panel-body .excalidraw {
-  width: 100%;
-  height: 100%;
-}
-
-.canvas-panel-loading {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--text-muted);
-  font-size: 13px;
-}
-
-.canvas-modal-backdrop {
-  position: absolute;
-  inset: 0;
-  z-index: 110;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--backdrop);
-}
-
-.canvas-modal {
-  width: min(360px, calc(100% - 32px));
-  padding: 20px;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--bg-secondary);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
-}
-
-.canvas-modal h3 {
-  margin-bottom: 8px;
-  color: var(--text-primary);
-  font-size: 15px;
-}
-
-.canvas-modal p {
-  color: var(--text-secondary);
-  font-size: 13px;
-}
-
-.canvas-modal-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 20px;
-}
-
-.canvas-modal-actions button {
-  padding: 6px 10px;
-  border: 1px solid var(--border-color);
-  border-radius: 5px;
-  background: var(--overlay-hover);
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: 12px;
-}
-
-.canvas-modal-actions button.primary {
-  border-color: var(--accent);
-  background: var(--accent);
-  color: var(--accent-fg);
-}
-
-.canvas-export-preview {
-  position: absolute;
-  inset: 0;
-  z-index: 100;
+.paint-layers {
+  width: 176px;
+  flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  background: var(--bg-primary);
+  border-left: 1px solid var(--border-color);
+  background: var(--bg-secondary);
 }
 
-.canvas-export-preview-header {
-  min-height: 48px;
+.paint-layers-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 14px;
+  padding: 8px 10px;
   border-bottom: 1px solid var(--border-color);
-  background: var(--bg-secondary);
-}
-
-.canvas-export-preview-header div {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-}
-
-.canvas-export-preview-header strong {
-  color: var(--text-primary);
-  font-size: 13px;
-}
-
-.canvas-export-preview-header span {
+  font-size: 11px;
   color: var(--text-muted);
+}
+
+.paint-layers-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.paint-layer-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 6px;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+.paint-layer-item:hover {
+  background: var(--overlay-hover);
+}
+
+.paint-layer-item.active {
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.paint-layer-eye {
+  padding: 0 2px;
+  border: none;
+  background: none;
+  color: var(--text-muted);
+  cursor: pointer;
   font-size: 11px;
 }
 
-.canvas-export-preview-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.canvas-export-preview-header button {
-  padding: 5px 10px;
-  border: 1px solid var(--accent);
-  border-radius: 5px;
-  background: var(--accent-dim);
+.paint-layer-eye.on {
   color: var(--accent);
-  cursor: pointer;
-  font-size: 12px;
 }
 
-.canvas-export-preview-actions button:not(:last-child) {
-  border-color: var(--border-color);
-  background: var(--overlay-hover);
+.paint-layer-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
   color: var(--text-secondary);
 }
 
-.canvas-export-preview-actions button:hover {
-  color: var(--text-primary);
+.paint-layer-opacity {
+  width: 42px;
+  accent-color: var(--accent);
 }
 
-.canvas-export-preview-body {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
+.paint-layers-footer {
   display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  padding: 32px;
-  background: #d7d9de;
+  gap: 4px;
+  padding: 8px;
+  border-top: 1px solid var(--border-color);
 }
 
-.canvas-export-preview-body img {
-  display: block;
-  max-width: 100%;
-  max-height: 100%;
-  width: auto;
-  height: auto;
-  background: #ffffff;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.24);
+.paint-layers-footer button {
+  flex: 1;
+  padding: 4px 0;
+}
+
+.paint-layers button.danger {
+  color: var(--danger);
 }

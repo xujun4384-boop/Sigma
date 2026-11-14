@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   saveCanvas: (name, data) => ipcRenderer.invoke('canvas-save', name, data),
   getFileUrl: (filePath) => ipcRenderer.invoke('get-file-url', filePath),
   getWorkingDirectory: () => ipcRenderer.invoke('get-working-directory'),
+  setMcpWorkspace: (workspacePath) => ipcRenderer.invoke('mcp-set-workspace', workspacePath),
   getWorkspaceDirectories: () => ipcRenderer.invoke('get-workspace-directories'),
   selectFolder: () => ipcRenderer.invoke('select-folder'),
   changeDirectory: (newDir) => ipcRenderer.invoke('change-directory', newDir),

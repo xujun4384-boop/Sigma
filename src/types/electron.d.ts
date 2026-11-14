@@ -121,6 +121,10 @@ export interface SkillKeysConfig {
   wechatAppSecret: string
   wechatRelayUrl: string
   wechatRelayKey: string
+  javisBridgeUrl?: string
+  javisBridgeKey?: string
+  javisAgentId?: string
+  javisPeerId?: string
   fengniaoApiKey: string
   flyaiApiKey: string
   baiduMapAuthToken: string
@@ -208,6 +212,7 @@ export interface ElectronAPI {
   saveCanvas: (name: string, data: unknown) => Promise<{ success: boolean; error?: string }>
   getFileUrl: (filePath: string) => Promise<{ success: boolean; url?: string; error?: string }>
   getWorkingDirectory: () => Promise<{ success: boolean; data?: string; error?: string }>
+  setMcpWorkspace: (workspacePath: string) => Promise<{ success: boolean; data?: string; error?: string }>
   getWorkspaceDirectories: () => Promise<{ success: boolean; data?: string[]; error?: string }>
   selectFolder: () => Promise<{ success: boolean; data?: string; error?: string }>
   changeDirectory: (newDir: string) => Promise<{ success: boolean; data?: string; error?: string }>

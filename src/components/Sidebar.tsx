@@ -911,6 +911,18 @@ const SKILL_DEFS: SkillDef[] = [
     ],
   },
   {
+    id: 'javis_bridge',
+    titleKey: 'skill_keys.javis_bridge',
+    descKey: 'skill_keys.javis_bridge_desc',
+    requiredKeys: ['javisBridgeUrl', 'javisBridgeKey'],
+    fields: [
+      { key: 'javisBridgeUrl', type: 'text', labelKey: 'skill_keys.javis_bridge_url', placeholder: 'http://8.159.156.138:8890' },
+      { key: 'javisBridgeKey', type: 'password', labelKey: 'skill_keys.javis_bridge_key', placeholder: 'Pre-shared key' },
+      { key: 'javisAgentId', type: 'text', labelKey: 'skill_keys.javis_agent_id', placeholder: 'Sigma' },
+      { key: 'javisPeerId', type: 'text', labelKey: 'skill_keys.javis_peer_id', placeholder: 'javis' },
+    ],
+  },
+  {
     id: 'fengniao',
     titleKey: 'skill_keys.fengniao',
     descKey: 'skill_keys.fengniao_desc',

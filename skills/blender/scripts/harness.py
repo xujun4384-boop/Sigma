@@ -37,7 +37,10 @@ _scene.frame_start = 1
 _scene.frame_end = max(2, frames)
 _scene.render.fps = fps
 
-# 2) 载入并执行用户场景脚本
+# 2) 载入并执行用户场景脚本（场景可直接 import devices 等本目录模块）
+_here = os.path.dirname(os.path.abspath(__file__))
+if _here not in sys.path:
+    sys.path.insert(0, _here)
 _spec = importlib.util.spec_from_file_location("sigma_user_scene", scene_path)
 _mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_mod)
@@ -46,8 +49,44 @@ if not hasattr(_mod, "build"):
 _mod.build()
 
 # 3) 统一渲染设置（脚本不要自己设这些）
+def _setup_device(scene):
+    """按 SIGMA_BLENDER_DEVICE 选择渲染设备。
+
+    optix / cuda / cpu，缺省 optix；找不到对应 GPU 时自动回退 cpu，不会静默出错。
+    注意：--factory-startup 下 cycles 设备默认全部禁用，必须显式 use=True。
+    """
+    want = (os.environ.get("SIGMA_BLENDER_DEVICE") or "optix").strip().lower()
+    if want == "cpu":
+        scene.cycles.device = 'CPU'
+        print("[harness] device=CPU (forced)")
+        return "CPU"
+    backend = 'OPTIX' if want == 'optix' else 'CUDA'
+    try:
+        prefs = bpy.context.preferences.addons["cycles"].preferences
+        prefs.compute_device_type = backend
+        prefs.get_devices()
+        picked = [d for d in prefs.devices if d.type == backend]
+        if not picked:
+            raise RuntimeError("no %s device" % backend)
+        for d in prefs.devices:
+            d.use = (d.type == backend)
+        scene.cycles.device = 'GPU'
+        if backend == 'OPTIX':
+            try:
+                scene.cycles.denoiser = 'OPTIX'
+            except Exception:
+                pass
+        print("[harness] device=GPU backend=%s gpus=%s"
+              % (backend, ", ".join(d.name for d in picked)))
+        return "GPU"
+    except Exception as exc:
+        scene.cycles.device = 'CPU'
+        print("[harness] GPU 不可用(%s)，回退 CPU" % type(exc).__name__)
+        return "CPU"
+
+
 _scene.render.engine = 'CYCLES'
-_scene.cycles.device = 'CPU'
+_setup_device(_scene)
 _scene.cycles.samples = samples
 try:
     _scene.cycles.use_denoising = True
@@ -57,6 +96,10 @@ _scene.render.resolution_x = W
 _scene.render.resolution_y = H
 _scene.render.resolution_percentage = 100
 _scene.render.image_settings.file_format = 'PNG'
+# SIGMA_BLENDER_ALPHA=1：输出带 alpha 的画面（设备单独一层，供后期叠到任意底色/标题之上）
+if (os.environ.get("SIGMA_BLENDER_ALPHA") or "").strip().lower() in ("1", "true", "yes"):
+    _scene.render.film_transparent = True
+    _scene.render.image_settings.color_mode = 'RGBA'
 os.makedirs(outdir, exist_ok=True)
 _scene.render.filepath = os.path.join(outdir, "f_")
 

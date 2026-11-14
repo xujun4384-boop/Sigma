@@ -19,6 +19,7 @@ VOICES: list[dict] = [
     {"id": "zh_female_mizai_uranus_bigtts", "label": "黑猫侦探社咪仔 2.0", "resource_id": RESOURCE_TTS_2_0},
     {"id": "zh_male_dayi_uranus_bigtts", "label": "大壹 2.0", "resource_id": RESOURCE_TTS_2_0},
     {"id": "zh_male_guozhoudege_moon_bigtts", "label": "广州德哥", "resource_id": RESOURCE_TTS_1_0},
+    {"id": "zh_male_jingqiangkanye_moon_bigtts", "label": "京腔侃爷", "resource_id": RESOURCE_TTS_1_0},
 ]
 
 # 内置默认音色（广告解说 2.0）与默认资源代次

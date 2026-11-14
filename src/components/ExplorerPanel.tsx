@@ -642,13 +642,13 @@ function TreeItem({ item, level, onSelect, onContextMenu, expandedPaths, onToggl
         style={{ paddingLeft: 12 + level * 14 }}
         draggable={!isWorkspace}
         onDragStart={e => {
-          // 按住 Ctrl：触发 OS 级拖拽，外部应用（Windows资源管理器、Word、VS Code等）可接收
+          // 普通拖动保持 HTML5 内部拖拽：聊天区附件、灵动岛暂存都能识别。
+          // 按住 Ctrl 才发起 OS 级原生拖拽，用于拖到资源管理器等外部程序。
           if (e.ctrlKey) {
-            e.preventDefault() // 必须阻止默认，否则 HTML5 拖拽和 OS 拖拽冲突导致崩溃
+            e.preventDefault()
             window.electronAPI?.onDragStart(item.path)
             return
           }
-          // 默认：HTML5 内部拖拽（文件夹移动、拖到聊天区附件）
           e.dataTransfer.effectAllowed = 'copyMove'
           e.dataTransfer.setData('application/x-sigma-path', item.path)
           e.dataTransfer.setData('application/x-sigma-paths', JSON.stringify([{ path: item.path, name: item.name }]))

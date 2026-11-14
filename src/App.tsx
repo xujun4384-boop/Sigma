@@ -62,6 +62,10 @@ const DEFAULT_KIMI_CONFIG: KimiConfig = {
       wechatAppSecret: '',
       wechatRelayUrl: '',
       wechatRelayKey: '',
+      javisBridgeUrl: '',
+      javisBridgeKey: '',
+      javisAgentId: '',
+      javisPeerId: '',
       fengniaoApiKey: '',
       flyaiApiKey: '',
       baiduMapAuthToken: '',
@@ -297,8 +301,6 @@ export default function App() {
 
   // 同步 LLM 配置和 settings 到服务端（供浏览器扩展面板使用）
   useEffect(() => {
-    if (config.llms.length === 0) return
-
     let cancelled = false
     let retryCount = 0
     const MAX_RETRIES = 5
@@ -323,8 +325,11 @@ export default function App() {
           }),
         })
         if (resp.ok) {
-          console.log('[SyncConfigs] LLM 配置已同步到后端')
-          return // 成功，不再重试
+          const result = await resp.json()
+          if (result?.success === true) {
+            console.log('[SyncConfigs] LLM 配置已同步到后端')
+            return // 成功，不再重试
+          }
         }
       } catch {
         // 后端可能尚未启动，重试

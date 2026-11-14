@@ -99,7 +99,7 @@ sfx(recipe="cartoon.boing", params={"pitch": -2, "brightness": 0.2, "seed": 7})
   "panels": [
     {
       "engine": "styled",
-      "visualStyle": "crayon",
+      "styleNote": "这一段更冷、更暗",
       "sfx": [
         {"at": 0.4, "recipe": "cartoon.pop", "level": 55},
         {"at": 2.1, "recipe": "cartoon.duang", "level": 65, "params": {"pitch": -2}}

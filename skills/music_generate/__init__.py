@@ -35,7 +35,8 @@ class MusicGenerateTool(BaseTool):
         "自定义歌词演唱、按主题自动写词演唱。返回音频路径与时长。"
     )
     parameters = [
-        ToolParameter("prompt", "string", "音乐描述：风格 / 情绪 / 场景 / 乐器 / BPM（如“轻快的电子配乐，适合科技讲解，无鼓点干扰人声”）"),
+        ToolParameter("prompt", "string", "音乐描述：风格 / 情绪 / 场景 / 乐器 / BPM"
+                                          "（如“克制的电子配乐，适合科技讲解，律动清晰，100 BPM”；不必限定鼓）"),
         ToolParameter("output_path", "string", "输出 mp3 文件路径（相对路径自动放在 video_work/<project>/music/ 下）"),
         ToolParameter("project", "string", "项目名，与视频工具保持一致", required=False),
         ToolParameter("instrumental", "boolean", "是否纯音乐（无人声），默认 true；做视频配乐一般用 true", required=False, default=True),
@@ -93,6 +94,8 @@ class MusicGenerateTool(BaseTool):
             f"provider: {provider_label(resolve_provider(self.provider))}｜模型: {result['model']}\n"
             f"文件路径: {result['output_path']}"
         )
+        if instrumental:
+            content += f"\n实际提示词: {result.get('prompt', '')}"
         return ToolResult.ok(
             content,
             output_path=result["output_path"],
@@ -101,6 +104,8 @@ class MusicGenerateTool(BaseTool):
             model=result["model"],
             provider=result["provider"],
             instrumental=bool(instrumental),
+            prompt=result.get("prompt", ""),
+            extra_info=result.get("extra_info") or {},
         )
 
 

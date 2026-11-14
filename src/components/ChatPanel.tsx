@@ -7,6 +7,8 @@ import type { KimiConfig, LLMEntry } from '../types/electron'
 import { getBackendUrl } from '../utils/config'
 import { loadAgents, type CustomAgent } from '../utils/agentStore'
 import TodoListDisplay from './TodoListDisplay'
+import { paintBus } from '../paint/bus'
+import { characterBus, previewFromEvent } from '../characters/bus'
 import ContextUsageIndicator, { type ContextUsageData } from './ContextUsageIndicator'
 import ThinkingAnimation from './ThinkingAnimation'
 import QuestionnaireDisplay, { type QuestionnaireData } from './QuestionnaireDisplay'
@@ -320,6 +322,14 @@ export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKe
                 })
               } else if (type === 'file_modification_complete') {
                 onFileModificationComplete?.({ filePath: data.file_path as string })
+              } else if (type === 'paint_patch') {
+                paintBus.emit({
+                  commands: Array.isArray(data.commands) ? data.commands : [],
+                  final: Boolean(data.is_final),
+                })
+              } else if (type === 'character_preview') {
+                const preview = previewFromEvent(data as Record<string, unknown>)
+                if (preview) characterBus.publish(preview)
               } else if (type === 'canvas_patch') {
                 onCanvasPatch?.({
                   canvasName: (data.canvas_name || 'default') as string,
@@ -377,6 +387,14 @@ export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKe
     setAttachedFiles([])
     setIsLoading(true)
 
+    // 新一轮任务：清掉上一轮的画面快照与审查配额，避免旧状态干扰本轮自查
+    void (async () => {
+      try {
+        const base = await getBackendUrl()
+        await fetch(`${base}/api/paint/reset`, { method: 'POST' })
+      } catch { /* 后端未就绪时忽略 */ }
+    })()
+
     const assistantId = (Date.now() + 1).toString()
     const assistantMsg: AssistantMessage = {
       id: assistantId, role: 'assistant', blocks: [], content: '', isStreaming: true,
@@ -392,6 +410,15 @@ export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKe
         if (dirResult.success) workingDir = dirResult.data || ''
       }
 
+      // 文件树里额外添加的文件夹也要告诉后端，否则 LLM 感知不到这些目录
+      let workspaceDirs: string[] = []
+      if (window.electronAPI?.getWorkspaceDirectories) {
+        try {
+          const wsResult = await window.electronAPI.getWorkspaceDirectories()
+          if (wsResult?.success && Array.isArray(wsResult.data)) workspaceDirs = wsResult.data
+        } catch {}
+      }
+
       const baseUrl = await getBackendUrl()
       const requestBody: Record<string, unknown> = {
         message: fullMessage,
@@ -400,6 +427,7 @@ export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKe
         subAgentMaxTurns: systemSettings.subAgentMaxTurns || 8,
         backupEnabled: systemSettings.backupEnabled ?? true,
         working_dir: workingDir,
+        workspace_dirs: workspaceDirs,
         language: lang,
         config: { ...resolveActiveLLM(config), skillKeys: config.skillKeys, llms: config.llms, customAgents: loadAgents().map(a => {
           const llm = config.llms.find(entry => entry.id === a.llmConfigId)
@@ -502,7 +530,10 @@ export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKe
     } finally {
       setIsLoading(false)
     }
-  }, [input, isLoading, config])
+    // attachedFiles 必须在这里：拖入附件只会改它，不会改 input/isLoading，
+    // 漏了它 handleSend 就会用旧闭包（空数组）发送——消息里没有附件、LLM 也读不到。
+  }, [input, isLoading, config, attachedFiles, selectedAgent, systemSettings, lang,
+     onFileDiffUpdate, onFileModificationStart, onFileModificationComplete, onCanvasPatch])
 
   const handleResetChat = useCallback(() => {
     abortRef.current?.abort()
@@ -639,6 +670,13 @@ export default function ChatPanel({ config, systemSettings, onSelectLLM, resetKe
     }
     if (files.length === 0 && rawPath) {
       files = [{ path: rawPath, name: rawPath.split(/[\\/]/).pop() || rawPath }]
+    }
+    if (files.length === 0) {
+      // 自定义 MIME 在个别环境可能读不到；文件树拖拽时同步写入了 text/plain=路径，可作兜底
+      const plain = (e.dataTransfer.getData('text/plain') || '').trim()
+      if (plain && !plain.includes('\n') && /[\\/]/.test(plain)) {
+        files = [{ path: plain, name: plain.split(/[\\/]/).pop() || plain }]
+      }
     }
     if (files.length > 0) {
       setAttachedFiles(prev => {
@@ -1278,6 +1316,20 @@ function handleSSEEvent(
 
   if (type === 'file_modification_complete') {
     onFileModificationComplete?.({ filePath: data.file_path as string })
+    return
+  }
+
+  if (type === 'paint_patch') {
+    paintBus.emit({
+      commands: Array.isArray(data.commands) ? data.commands : [],
+      final: Boolean(data.is_final),
+    })
+    return
+  }
+
+  if (type === 'character_preview') {
+    const preview = previewFromEvent(data as Record<string, unknown>)
+    if (preview) characterBus.publish(preview)
     return
   }
 

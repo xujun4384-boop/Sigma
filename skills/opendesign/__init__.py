@@ -64,6 +64,7 @@ def _build_composer_context(
     height: int,
     assets: list[str] | None = None,
     image_brief: str = "",
+    embed_brief: str = "",
 ) -> str:
     """构建给 LLM 的内容简报（composer_context）。"""
     tone_hint = _TONE_HINTS.get(tone, _TONE_HINTS["product"])
@@ -91,6 +92,8 @@ def _build_composer_context(
         ]
     if image_brief:
         parts += ["\n## 图片素材与动效\n", image_brief]
+    if embed_brief:
+        parts += ["\n", embed_brief]
     return "".join(parts)
 
 
@@ -149,6 +152,67 @@ def _image_brief(max_images: int) -> str:
         "- 需要纵深时把图拆成 2~3 层（远景/中景/前景），分别用不同速度位移。\n"
         "- 图和文字/数据要抢空间时，让图片承担氛围与空间感，信息和文案仍由排版完成。\n"
     )
+
+
+def _embed_brief(embeds: list | None) -> str:
+    """把 director 预渲染好的 embed 元数据写成 composer 能照做的说明。"""
+    items = [e for e in (embeds or []) if isinstance(e, dict) and e.get("file")]
+    if not items:
+        return ""
+    lines = [
+        "## 嵌入特效（必须做成版面里的图层）",
+        "下面这些外部特效已转成帧雪碧图，和普通配图一起放在 assets/ 里。",
+        "每个嵌入必须用 <canvas> 逐帧绘制：**禁止 <video> / <iframe>，禁止 CSS 动画**。",
+        "",
+    ]
+    for n, e in enumerate(items, 1):
+        rect = e.get("rect") or [0, 0, 0, 0]
+        try:
+            x, y, w, h = (int(round(float(v))) for v in rect)
+        except (TypeError, ValueError):
+            x = y = 0
+            w = h = 100
+        try:
+            start = float(e.get("start") or 0)
+            edur = float(e.get("duration") or 0)
+        except (TypeError, ValueError):
+            start, edur = 0.0, 0.0
+        lines.append(
+            f"{n}. assets/{e['file']}｜类型 {e.get('type')}｜"
+            f"位置 left:{x}px; top:{y}px; width:{w}px; height:{h}px｜"
+            f"本段 {start:.2f}s 开始，持续 {edur:.2f}s｜"
+            f"雪碧图 {int(e.get('cols') or 1)}×{int(e.get('rows') or 1)}，"
+            f"共 {int(e.get('frames') or 1)} 帧，{e.get('fps')}fps，"
+            f"单帧 {int(e.get('tile_w') or 0)}×{int(e.get('tile_h') or 0)}"
+        )
+        if e.get("mask"):
+            lines.append(f"   裁切/遮罩要求：{e['mask']}")
+    lines += [
+        "",
+        "实现模板（每个嵌入一份；把 START/DUR/FRAMES/COLS/ROWS/TW/TH 换成上面的值）：",
+        "```js",
+        "const img1 = new Image(); img1.src = 'assets/<文件>';",
+        "const c1 = document.querySelector('#embed1'); const ctx1 = c1.getContext('2d');",
+        "const clock1 = {f: 0};",
+        "tl.fromTo(clock1, {f: 0}, {f: FRAMES - 1, duration: DUR,",
+        "  ease: 'steps(' + (FRAMES - 1) + ')',",
+        "  onUpdate() {",
+        "    const i = Math.round(clock1.f);",
+        "    const sx = (i % COLS) * TW, sy = Math.floor(i / COLS) * TH;",
+        "    ctx1.clearRect(0, 0, W, H);",
+        "    ctx1.drawImage(img1, sx, sy, TW, TH, 0, 0, W, H);",
+        "  }}, START);",
+        "```",
+        "硬约束：",
+        "- canvas 的 width/height 属性 = 上面的 W/H；CSS 的 left/top/width/height 必须等于上面的位置；",
+        "- 图片要在注册 timeline 前 decode 完（img.decode().then(build)），否则开头几帧会空；",
+        "- 承载它的场景 `data-start`/`data-duration` 必须覆盖上面的开始/结束时间，不要提前 display:none；",
+        "- 不要给 canvas 设 CSS transform 初始态；动画只走 GSAP；",
+        "- 可以加 border-radius / clip-path / box-shadow / mix-blend-mode，但不要用 CSS 动画；",
+        "- 其他 DOM 文字/卡片可以压在 canvas 上面（z-index 更高），这正是嵌入的意义；",
+        "- 这些 canvas 只是版面图层，不要把它们做成整屏背景。",
+    ]
+    return "\n".join(lines)
 
 
 def _ensure_images(html: str, proj_dir: Path, skill_manager, style_prefix: str,
@@ -229,6 +293,8 @@ class OpendesignVideoTool(BaseTool):
         ToolParameter("style_prompt", "string", "视觉风格描述（配色/字体/动效），不填则用现代简洁风格", required=False),
         ToolParameter("tone", "string", "语气: academic / product / editorial / technical", required=False, default="product"),
         ToolParameter("assets_dir", "string", "上游预生成的配图目录，图片会同步进项目 assets/ 供 LLM 引用（可选）", required=False),
+        ToolParameter("embeds", "array", "内部：director 传入的嵌入特效元数据（帧雪碧图/矩形/时间），"
+                                          "不对外暴露，由导演组填写", required=False),
         ToolParameter("with_images", "boolean", "是否允许引擎按需生图（默认关；导演组按面板的 images 字段显式开启）", required=False, default=False),
         ToolParameter("max_images", "integer", "本片最多生成几张图（默认 4）", required=False, default=4),
         ToolParameter("fps", "integer", "帧率", required=False, default=30),
@@ -252,6 +318,7 @@ class OpendesignVideoTool(BaseTool):
         style_prompt: str = None,
         tone: str = "product",
         assets_dir: str = None,
+        embeds: list = None,
         with_images: bool = False,
         max_images: int = 4,
         fps: int = 30,
@@ -310,6 +377,7 @@ class OpendesignVideoTool(BaseTool):
         context = _build_composer_context(
             brief, duration_s, n_scenes, style_prompt, tone, width, height, assets,
             _image_brief(max_images) if can_generate else "",
+            _embed_brief(embeds),
         )
 
         # 3. 生成 HTML → 渲染前闸门 → 渲染：最多 MAX_TRIES 次。
@@ -323,6 +391,9 @@ class OpendesignVideoTool(BaseTool):
         force_full = False
         passed = False
         generated_images = 0
+        visual_repeat = None
+        embed_missing: list[str] = []
+        embeds = [e for e in (embeds or []) if isinstance(e, dict) and e.get("file")]
 
         for k in range(1, MAX_TRIES + 1):
             if time.monotonic() > deadline:
@@ -387,6 +458,26 @@ class OpendesignVideoTool(BaseTool):
             # 避免渲染机连不上 jsDelivr 等 CDN 时整段渲染失败。
             html = localize_scripts(html, proj_dir)
 
+            # 嵌入特效：composer 必须真的引用雪碧图并用 canvas 逐帧绘制；
+            # 只写个静态 <img> 等于没嵌，回灌重写一次。
+            if embeds:
+                missing = [str(e["file"]) for e in embeds
+                           if f"assets/{e['file']}" not in html]
+                if missing:
+                    embed_missing = missing
+                    msg = ("嵌入特效素材未被使用：" + "、".join(missing)
+                           + "。必须按上面的模板用 <canvas> + GSAP steps() 逐帧绘制，"
+                             "不要用 <video> 或静态 <img> 代替。")
+                    if k < MAX_TRIES:
+                        errs = [msg]
+                        last_kind = "embed"
+                        force_full = True   # 插入 canvas 属于结构改动，直接整篇重写更稳
+                        self._emit_progress("  ✗ " + msg)
+                        continue
+                    self._emit_progress("  ⚠ " + msg + "（已达重试上限，继续渲染缺图版本）")
+                else:
+                    embed_missing = []
+
             # 图片：LLM 在 HTML 里用 data-gen 声明的素材，这里就地生成、落盘并回填 src。
             # 必须在写 index.html 之前完成 —— 闸门和渲染都要读到真实存在的本地文件。
             if can_generate:
@@ -420,6 +511,7 @@ class OpendesignVideoTool(BaseTool):
             if not ok:
                 errs = gate_errs[:3] or ["渲染前闸门未通过"]
                 last_kind = kind
+                visual_repeat = None
                 self._emit_progress("  ✗ " + "；".join(errs))
                 continue
 
@@ -429,12 +521,19 @@ class OpendesignVideoTool(BaseTool):
                 self._emit_progress("  · 视觉复审跳过（视觉接口不可用）")
             elif issues:
                 msg = "视觉复审未通过：" + "；".join(issues[:2])
-                if k < MAX_TRIES:
+                key = sorted(i.split("：", 1)[0] for i in issues)
+                if key == visual_repeat:
+                    # 同一批抽帧再次被判不通过：动画时序已定，重写改变不了这些帧，
+                    # 再让模型重做只会空转 —— 按误报放行。
+                    self._emit_progress("  ⚠ " + msg + "（与上一版判定相同，重写无效，继续渲染）")
+                elif k < MAX_TRIES:
                     errs = [msg + "。请提高文字与背景对比，并把底部 8~12% 区域留白（不放文字/按钮/logo）。"]
                     last_kind = "visual"
+                    visual_repeat = key
                     self._emit_progress("  ✗ " + msg)
                     continue
-                self._emit_progress("  ⚠ " + msg + "（已达重试上限，保留本版继续渲染）")
+                else:
+                    self._emit_progress("  ⚠ " + msg + "（已达重试上限，保留本版继续渲染）")
             else:
                 self._emit_progress("  ✓ 闸门与视觉复审通过")
 
@@ -466,6 +565,7 @@ class OpendesignVideoTool(BaseTool):
             size_mb=round(size_mb, 1),
             assets_count=len(assets),
             generated_images=generated_images,
+            embed_failed=len(embed_missing),
             project_dir=str(proj_dir),
         )
 

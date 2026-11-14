@@ -1,14 +1,13 @@
 # -*- coding: utf-8 -*-
-"""styled_video —— 导演组内部引擎：单段「14 选 1」风格动画。
+"""styled_video —— 导演组内部引擎：单段风格动画（Remotion 版）。
 
-不是给用户直接选的入口：导演组在蓝图里给某个 panel 指定 engine="styled"
-和 visualStyle（crayon/shadow/ink/...），再由本工具渲成一段无声 mp4。
+不是给用户直接选的入口：导演组在蓝图里给某个 panel 指定 engine="styled"，
+并写一份按用户需求生成的 styleGuide，再由本工具渲成一段无声 mp4。
 旁白、字幕、合成仍由导演组后续处理。
 """
 from pathlib import Path
 
 from skills.base import BaseTool, ToolParameter, ToolResult
-from skills import style_lib
 
 from .scripts.pipeline import run
 
@@ -16,17 +15,17 @@ from .scripts.pipeline import run
 class StyledVideoTool(BaseTool):
     name = "styled_video"
     description = (
-        "风格动画单段渲染（内部工具，由 director 调度）：从 14 种视觉风格里选一种，"
-        "确定性渲染成无声 mp4。默认 linear（2~5 个镜头硬切）；"
-        "可选 grid（一张大画布分格，camera 到点跳格，每格独立播放，格内可推拉）。"
-        "不负责旁白/字幕/合成；不要直接暴露给用户选风格。"
+        "风格动画单段渲染（内部工具，由 director 调度）：按导演写的 styleGuide 现场作画，"
+        "确定性渲染成无声 mp4。风格不来自固定枚举，由这一段的内容与用户要求决定。"
+        "不负责旁白/字幕/合成；不要让用户直接选风格。"
     )
     parameters = [
         ToolParameter("brief", "string", "这一段要讲什么/画面需求"),
-        ToolParameter("visual_style", "string",
-                      "14 种风格 id：crayon / shadow / flat / ink / pixel / comic / "
-                      "whiteboard / hanzi / timeline / isometric / scale / infographic / map / exploded",
-                      enum=style_lib.ids()),
+        ToolParameter("style_guide", "string",
+                      "风格档案：配色/线条/质感/光/构图/运动/禁止项，以及人物怎么用。"
+                      "由导演按用户需求写，同片各 styled 段共用同一份。", required=False, default=""),
+        ToolParameter("style_note", "string",
+                      "本段局部风格要求（例如「这一段更冷、更暗」），可空", required=False, default=""),
         ToolParameter("duration", "number", "时长（秒）"),
         ToolParameter("output_path", "string", "输出 mp4 路径"),
         ToolParameter("project", "string", "项目名（中间产物放 video_work/<project>/styled/）",
@@ -34,21 +33,9 @@ class StyledVideoTool(BaseTool):
         ToolParameter("width", "integer", "画布宽", required=False, default=1920),
         ToolParameter("height", "integer", "画布高", required=False, default=1080),
         ToolParameter("fps", "integer", "帧率", required=False, default=30),
-        ToolParameter("shots", "integer", "linear 模式的镜头数 2~5（grid 模式忽略）",
-                      required=False, default=3),
-        ToolParameter("layout", "string",
-                      "linear（默认，现有 2~5 切镜）| grid（大画布分格：camera 跳格，每格独立播放）",
-                      required=False, default="linear", enum=["linear", "grid"]),
-        ToolParameter("grid", "object",
-                      "仅 layout=grid：{cols,rows,order,weights,moves}；"
-                      "cols/rows 默认 2×2，order 是播放顺序，weights 是每格时长权重，"
-                      "moves 是格内推拉（键为格号，如 {\"1\":{\"zoom\":1.14}}）",
-                      required=False),
-        ToolParameter("with_images", "boolean",
-                      "是否允许引擎按需生图（默认关；导演组按面板的 images 字段显式开启）",
-                      required=False, default=False),
-        ToolParameter("max_images", "integer", "本段最多生成几张图（默认 3）",
-                      required=False, default=3),
+        ToolParameter("character", "string",
+                      "已确认的定妆参数路径（video_work/<project>/character.json）；"
+                      "这一段有人物时传入，画面里的人物必须来自它。", required=False, default=""),
     ]
 
     def __init__(self, cwd: str = ".", llm_config: dict = None,
@@ -57,39 +44,31 @@ class StyledVideoTool(BaseTool):
         self.llm_config = llm_config or {}
         self.skill_manager = skill_manager
 
-    def execute(self, brief: str, visual_style: str, duration: float, output_path: str,
+    def execute(self, brief: str, duration: float, output_path: str,
+                style_guide: str = "", style_note: str = "", character: str = "",
                 project: str = "", width: int = 1920, height: int = 1080,
-                fps: int = 30, shots: int = 3, layout: str = "linear",
-                grid: dict = None, with_images: bool = False, max_images: int = 3,
-                **kw) -> ToolResult:
+                fps: int = 30, **kw) -> ToolResult:
         if not self.llm_config:
             return ToolResult.fail("styled_video 需要主 LLM 配置（由导演组注入）")
         out = self._resolve_path(output_path)
         proj = project or "styled_panel"
         work = Path(self.cwd) / "video_work" / proj / "styled"
+        char = ""
+        if str(character or "").strip():
+            p = self._resolve_path(character)
+            char = str(p) if p.exists() else ""
         ok, note, path = run(
-            brief=brief, style_id=visual_style, duration=duration,
-            output_path=str(out), work_dir=str(work),
-            width=width, height=height, fps=fps, shots=shots,
-            layout=layout, grid=grid,
-            with_images=with_images, max_images=max_images,
+            brief=brief, duration=duration, output_path=str(out), work_dir=str(work),
+            width=width, height=height, fps=fps,
+            style_guide=style_guide, style_note=style_note, character=char,
             skill_manager=self.skill_manager,
             llm_cfg=self.llm_config, progress=self._emit_progress)
         if not ok:
             return ToolResult.fail(f"styled_video 失败：{note}")
-        mode = "grid" if str(layout or "").lower() == "grid" else "linear"
-        if mode == "grid":
-            g = grid if isinstance(grid, dict) else {}
-            cols = int(g.get("cols") or 2)
-            rows = int(g.get("rows") or 2)
-            cells = len(g.get("order") or []) or cols * rows
-            label = f"{cols}×{rows} 分格（{cells} 格）"
-        else:
-            label = f"{shots} 镜头"
         return ToolResult.ok(
-            f"风格动画完成：{path}\n风格 {visual_style}｜{label}｜{float(duration):.1f}s",
-            output_path=path, style=visual_style, duration=duration,
-            layout=mode, grid=grid)
+            f"风格动画完成：{path}｜{float(duration):.1f}s"
+            + (f"｜人物来自定妆" if char else ""),
+            output_path=path, duration=duration)
 
 
 __all__ = ["StyledVideoTool"]

@@ -56,7 +56,7 @@ EXTERNAL_URL = re.compile(r"https?://")
 
 ALLOWED_IMPORTS = (
     "react", "remotion",
-    "./char-hero",
+    "./char-hero", "./char-cast",
     "../../types", "../../ui", "../../ui/Actor", "../../ui/Chibi",
     "../../engine/context", "../../engine/math", "../../engine/measure", "../../engine/theme",
     "@remotion/effects", "@remotion/paths", "@remotion/shapes", "@remotion/motion-blur",
@@ -157,14 +157,52 @@ def clean_code(txt: str) -> str:
     return t
 
 
+def _code_only(code: str) -> str:
+    """只保留真正会执行的代码。
+
+    静态闸门拦的是「代码做了什么」，不是「画面上写了什么」：注释、字符串字面量、
+    JSX 文本节点里的同一串字（例如构图板上的标签 window）都不该被判违规。
+    """
+    out, i, n = [], 0, len(code)
+    while i < n:
+        c = code[i]
+        if c == "/" and i + 1 < n and code[i + 1] == "/":
+            j = code.find("\n", i)
+            i = n if j == -1 else j
+        elif c == "/" and i + 1 < n and code[i + 1] == "*":
+            j = code.find("*/", i + 2)
+            out.append("\n" * code.count("\n", i, j + 2 if j != -1 else n))
+            i = n if j == -1 else j + 2
+        elif c in ("'", '"', "`"):
+            q, j = c, i + 1
+            while j < n:
+                if code[j] == "\\":
+                    j += 2
+                    continue
+                if code[j] == q:
+                    break
+                j += 1
+            out.append(q + q)
+            i = j + 1
+        else:
+            out.append(c)
+            i += 1
+    text = "".join(out)
+    # JSX 文本节点：>标签文字<（同一行、不含花括号，避免误伤普通运算符表达式）
+    return re.sub(r">([^<>{};\n]*)<", "><", text)
+
+
 def static_check(code: str) -> list[str]:
     errs = []
+    body = _code_only(code)
     for pat, why in BANNED:
-        if re.search(pat, code):
+        if re.search(pat, body):
             errs.append(f"用了 {why}")
-    if EXTERNAL_URL.search(NS_URL.sub("", code)):
+    if EXTERNAL_URL.search(NS_URL.sub("", body)):
         errs.append("用了 外部 URL（渲染机无外网）")
-    for m in re.finditer(r"""from\s+['"]([^'"]+)['"]""", code):
+    # 只认行首的 import 语句：代码字符串里的 "from '...'" 不是真的导入
+    for m in re.finditer(r"""^[ \t]*import\s+(?:[^'"]*\s+from\s+)?['"]([^'"]+)['"]""",
+                         code, re.M):
         mod = m.group(1)
         if not any(mod == a or mod.startswith(a + "/") for a in ALLOWED_IMPORTS):
             errs.append(f"import 了不允许的模块 {mod}")
@@ -199,7 +237,7 @@ def _ask_tsx(label: str, system: str, ctx: str, llm, cfg: dict, dump_fn, w: Path
     return None
 
 
-def sync_registry(w: Path) -> None:
+def sync_registry(w: Path, namespace: str = "") -> None:
     manifest_p = w / "parts" / "registry.json"
     # 外部工具（编辑器 / PowerShell Out-File）可能写成带 BOM 的 UTF-8，utf-8-sig 都能读
     manifest = json.loads(manifest_p.read_text(encoding="utf-8-sig")) if manifest_p.exists() else {}
@@ -208,8 +246,13 @@ def sync_registry(w: Path) -> None:
     # 定妆角色（char-*.tsx）不属于任何镜头文件，必须保留
     keep |= {p.name for p in GENERATED.glob("char-*.tsx")}
     for old in GENERATED.glob("*.tsx"):
-        if old.name not in keep:
-            old.unlink()
+        if old.name in keep:
+            continue
+        # namespace 隔离：只清理自己前缀的产物。lyric_mv 与 styled 共用同一运行时，
+        # 不加隔离会互相删掉对方已经渲好的镜头文件。
+        if namespace and not old.name.startswith(namespace + "-"):
+            continue
+        old.unlink()
     # 源文件统一拷进 runtime，保证 import 路径是相对的、可编译的
     for src in sorted((w / "parts").glob("*.tsx")):
         if src.name not in keep:
@@ -249,12 +292,13 @@ def _plan_for_gate(w: Path, plan: dict, manifest: dict) -> None:
     (w / "render-plan.json").write_text(json.dumps(rp, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def gate(w: Path, tl: dict, plan: dict, times: list[float], manifest: dict) -> tuple[bool, str, str]:
+def gate(w: Path, tl: dict, plan: dict, times: list[float], manifest: dict,
+         namespace: str = "") -> tuple[bool, str, str]:
     """静态 → 编译 → 运行时（strict） → 确定性。
     返回 (ok, 致命错误, 类型告警)。
     语法错/运行时错/不确定 → 致命；类型错（TS2xxx/TS7xxx）只作为告警：
     模型仍在学 API，一次类型告警值得回灌修一次，但不该把整片拦死。"""
-    sync_registry(w)
+    sync_registry(w, namespace=namespace)
     out_lines: list[str] = []
     warnings: list[str] = []
 

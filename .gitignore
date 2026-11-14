@@ -66,6 +66,11 @@ test_output/
 video_work/
 _tmp_tracks_test.py
 skill_routing_e2e.py
+.build-temp/
+.screenshots/
+.trae-html-share-packages/
+research/
+*.zip
 
 # Large reference media
 *.pdf

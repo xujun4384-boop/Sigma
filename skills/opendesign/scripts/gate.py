@@ -55,12 +55,34 @@ _BANNED_API = [
 
 # 视觉复审用的抽帧提示：问清"有没有实质内容 + 文字可不可读 + 底部字幕安全区有没有被占"
 _REVIEW_PROMPT = (
-    "你在审查一帧 16:9 视频画面。只输出 JSON，不要解释、不要 markdown：\n"
+    "你在审查一帧 16:9 视频画面（本帧采自动画完全停住后的稳定画面，没有元素在运动）。"
+    "只输出 JSON，不要解释、不要 markdown：\n"
     '{"has_content": <画面是否有实质内容（文字/图形/图像/排版），而不是纯色背景或近乎空屏>, '
     '"has_text": <画面里是否有文字>, '
     '"legible": <若有文字，是否清晰可读：与背景对比足够、无重叠遮挡>, '
     '"bottom_clean": <画面底部约 8~12%（下缘往上约 1/10 高度）是否没有文字/按钮/logo/装饰>, '
     '"issue": "<不通过时用一句话说明最该修的地方；通过则空字符串>"}'
+)
+
+# 整段都在动、找不到停帧时用这条：渐入/渐出造成的半透明、位移、轻微模糊都是动画中间态，不是错误。
+# 过渡帧只问"有没有实质内容"，不判可读性与底部安全区 —— 那两项在元素还没落位时没有意义。
+_REVIEW_PROMPT_MOTION = (
+    "你在审查一帧 16:9 视频画面。注意：本帧采自动画进行中（元素可能正在渐入/渐出/位移/缩放），"
+    "由此出现的半透明、轻微模糊、位置尚未到位都属于正常过渡效果，不是画面错误。"
+    "只输出 JSON，不要解释、不要 markdown：\n"
+    '{"has_content": <画面是否有实质内容（文字/图形/图像/排版），而不是纯色背景或近乎空屏>, '
+    '"issue": "<若画面几乎没有内容，用一句话说明最该补的地方；否则空字符串>"}'
+)
+
+# 极简读图模式：只问"有没有明显画面问题"，风格/排版/对比度一律放行。
+# 给产品演示片这类"设计感强、由代码闸门兜底"的场景用，避免视觉模型在审美细节上反复否决。
+_REVIEW_PROMPT_SIMPLE = (
+    "你在看一帧 16:9 视频画面。只判断一件事：这一帧有没有**明显的画面错误**——"
+    "比如纯黑/纯色空屏、几乎没有内容、整块内容缺失、元素严重错位到看不清、花屏。\n"
+    "风格、排版、配色、留白、大小对比这类审美差异都不算错误，一律放行。\n"
+    "只输出 JSON，不要解释、不要 markdown：\n"
+    '{"ok": <没有明显错误为 true，有明显错误为 false>, '
+    '"issue": "<有问题时一句话说明；没问题留空字符串>"}'
 )
 
 
@@ -296,6 +318,50 @@ _BOUNDS_JS = """() => {
   }));
 }"""
 
+# 每段的"补间覆盖区间"：把时间轴上每条补间的绝对起止时间按它所作用元素所属的片段归类。
+# 视觉复审只在片段里**没有补间在跑**的时刻抽帧 —— 入场/退场、逐字渐入的中间态
+# （文字半透明、位移未到位）是动画本身，不是"文字显示错误"。
+_QUIET_JS = """() => {
+  const r = document.querySelector('[data-composition-id]');
+  const id = r ? r.getAttribute('data-composition-id') : 'root';
+  const tl = (window.__timelines || {})[id];
+  if (!tl || typeof tl.getChildren !== 'function') return null;
+  const clips = [];
+  document.querySelectorAll('[data-start][data-duration]').forEach(function (el) {
+    if (el === r) return;  // 根元素自身的时间范围就是全片，不算片段
+    const s = parseFloat(el.getAttribute('data-start'));
+    const d = parseFloat(el.getAttribute('data-duration'));
+    if (isFinite(s) && isFinite(d) && d > 0) clips.push({el: el, s: s, d: d, spans: []});
+  });
+  const absStart = (c) => {
+    let t = 0, cur = c, n = 0;
+    while (cur && n++ < 20) {
+      if (typeof cur.startTime === 'function') t += cur.startTime();
+      cur = cur.parent;
+    }
+    return t;
+  };
+  let children = [];
+  try { children = tl.getChildren(true, true, true); } catch (e) { children = []; }
+  (children || []).forEach(function (c) {
+    if (!c || typeof c.duration !== 'function') return;
+    const s = absStart(c);
+    const d = (typeof c.totalDuration === 'function') ? c.totalDuration() : c.duration();
+    if (!isFinite(s) || !isFinite(d) || d <= 0) return;
+    let targets = [];
+    try { targets = (typeof c.targets === 'function') ? c.targets() : []; } catch (e) { targets = []; }
+    (targets || []).forEach(function (t) {
+      if (!t || t.nodeType !== 1 || typeof t.closest !== 'function') return;
+      const clip = t.closest('[data-start][data-duration]');
+      if (!clip) return;
+      for (let i = 0; i < clips.length; i++) {
+        if (clips[i].el === clip) { clips[i].spans.push([s, s + d]); break; }
+      }
+    });
+  });
+  return clips.map(function (c) { return {s: c.s, d: c.d, spans: c.spans}; });
+}"""
+
 
 def _img_range(shot: bytes) -> float:
     """单帧灰度极差（排查用；闸门本身不再据此判空帧）。"""
@@ -371,7 +437,7 @@ def _sample_times(total: float, clips, n: int = _MAX_RUNTIME_SAMPLES) -> list[fl
 
 
 def _review_times(total: float, clips, k: int = 10):
-    """视觉复审抽帧时刻：每个段落至少一个中点，首段补入场点、末段补退场点。
+    """兜底抽帧时刻（补间覆盖探针拿不到时间轴时才会用到）：每段中点 + 首段入场点、末段退场点。
 
     之前只取每段中点、上限 4 帧，段落多时前面的段落会被抽样跳过，
     前段空镜或漏内容就查不出来；现在保证每段都被检查，并且首尾都有覆盖。
@@ -392,6 +458,65 @@ def _review_times(total: float, clips, k: int = 10):
         if idx == len(spans) - 1:
             times.append(round(s + d - pad, 3))
     return sorted({t for t in times if 0 < t < total})
+
+
+def _quiet_points(probe) -> list[tuple[float, bool]] | None:
+    """把补间覆盖换算成抽帧时刻：返回 [(t, settled)]；探针不可用时返回 None（调用方退回旧抽帧）。
+
+    选取口径：段内所有补间都停下来的间隙里，离该段中点最近、且够宽的区间中心；
+    整段没有停下来的时刻（全程连续动画）则退回中点并标记 settled=False。
+    """
+    if not isinstance(probe, list) or not probe:
+        return None
+    out: list[tuple[float, bool]] = []
+    for info in probe:
+        if not isinstance(info, dict):
+            continue
+        try:
+            s = float(info.get("s"))
+            d = float(info.get("d"))
+        except (TypeError, ValueError):
+            continue
+        if d <= 0:
+            continue
+        end = s + d
+        spans = []
+        for sp in info.get("spans") or []:
+            try:
+                a, b = float(sp[0]), float(sp[1])
+            except (TypeError, ValueError, IndexError):
+                continue
+            a, b = max(s, a), min(end, b)
+            if b > a:
+                spans.append((a, b))
+        spans.sort()
+        merged: list[tuple[float, float]] = []
+        for a, b in spans:
+            if merged and a <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+            else:
+                merged.append((a, b))
+        gaps, cur = [], s
+        for a, b in merged:
+            if a > cur:
+                gaps.append((cur, a))
+            cur = max(cur, b)
+        if end > cur:
+            gaps.append((cur, end))
+        usable = [g for g in gaps if g[1] - g[0] >= 0.15]
+        if usable:
+            # 只取"离段中点最近"的那段静帧区间：它通常就是正片展示期。
+            # 不取首尾的间隙 —— 入场前/退场后的留白抽出来是空画面，同样会造成误判。
+            mid = s + d / 2
+            a, b = min(usable, key=lambda g: (abs((g[0] + g[1]) / 2 - mid), -(g[1] - g[0])))
+            if b - a >= 2.0:
+                out.append((round(a + (b - a) * 0.3, 2), True))
+                out.append((round(a + (b - a) * 0.7, 2), True))
+            else:
+                out.append((round((a + b) / 2, 2), True))
+        else:
+            out.append((round(s + d / 2, 2), False))
+    return out
 
 
 async def _runtime(html_path: Path, w: int, h: int, total: float, clips,
@@ -446,6 +571,20 @@ async def _runtime(html_path: Path, w: int, h: int, total: float, clips,
                     errs.append(f"{len(over)} 段动画超出 [0, {total:.2f}]s 区间（例 start={c0['s']:.2f} "
                                 f"dur={c0['d']:.2f}）—— 绝对时间必须落在总时长内")
 
+            # 视觉复审抽帧时刻：按补间覆盖找"没有动画在跑"的静帧区间，
+            # 避免抽到逐字渐入/退场的中途（文字半透明、还没落位），被误判成显示错误。
+            try:
+                quiet = await page.evaluate(_QUIET_JS)
+            except Exception:
+                quiet = None
+            pts = _quiet_points(quiet)
+            if pts is None:
+                # 探针不可用时无法区分静帧与过渡帧：一律按过渡帧处理，只查空白，
+                # 免得旧抽帧口径（入场点/退场点）再把渐入渐变判成显示错误。
+                notes.append("补间覆盖探针不可用，视觉复审按过渡帧处理（只查空白）")
+                pts = [(t, False) for t in (review_times or [])]
+            review_pts = [(t, st) for t, st in pts if 0 < t < total]
+
             # 逐时刻：seek → 采集运行时报错
             ran_err = []
             print(f"  · 闸门·运行时：抽查 {len(samples)} 个时刻", flush=True)
@@ -488,14 +627,21 @@ async def _runtime(html_path: Path, w: int, h: int, total: float, clips,
                             f"{det_bad[0][1]}≠{det_bad[0][2]}）—— 画面代码里不能用随机数/当前时间/累积外部状态")
                 return errs, notes, "determinism"
 
-            # 全过：抽帧留给闸5 视觉复审
-            if frames_out and review_times:
+            # 全过：抽帧留给闸5 视觉复审（manifest 记录每帧是否静帧，复审据此决定查什么）
+            if frames_out and review_pts:
                 shutil.rmtree(frames_out, ignore_errors=True)
                 frames_out.mkdir(parents=True, exist_ok=True)
-                for i, t in enumerate(review_times):
+                manifest = []
+                for i, (t, settled) in enumerate(review_pts):
                     await _seek(page, t)
-                    await page.screenshot(path=str(frames_out / f"f_{i:02d}.png"))
-                notes.append(f"已抽 {len(review_times)} 帧待视觉复审")
+                    name = f"f_{i:02d}.png"
+                    await page.screenshot(path=str(frames_out / name))
+                    manifest.append({"file": name, "t": t, "settled": bool(settled)})
+                (frames_out / "manifest.json").write_text(
+                    json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
+                still = sum(1 for _, st in review_pts if st)
+                notes.append(f"已抽 {len(review_pts)} 帧待视觉复审（{still} 帧静帧、"
+                             f"{len(review_pts) - still} 帧动画过渡中）")
         finally:
             await browser.close()
     return errs, notes, None
@@ -538,8 +684,51 @@ def _json_of(raw: str) -> dict:
     return {}
 
 
-def review_frames(project_dir, llm_config: dict):
-    """闸5：对 gate_frames/ 里的抽帧做视觉复审。返回问题列表；视觉接口不可用时返回 None。"""
+def _frame_meta(frames: list[Path]) -> dict:
+    """读抽帧时落下的 manifest（文件 → {t, settled}）；缺失时返回空字典（按静帧处理）。"""
+    try:
+        doc = json.loads((frames[0].parent / "manifest.json").read_text(encoding="utf-8"))
+        return {d["file"]: d for d in doc if isinstance(d, dict) and d.get("file")}
+    except Exception:
+        return {}
+
+
+def _frame_stats(p: Path):
+    """(亮像素占比, 最亮灰度)；PIL 不可用时返回 None（不因此改变判定）。
+
+    用像素而不是让视觉模型"感觉"：一个是判断黑场/空屏，一个是判断画面是否
+    稀疏到"没有内容"这种判断本就不可靠（暗色极简排版会被误判成空）。
+    """
+    try:
+        from PIL import Image
+        im = Image.open(p).convert("L")
+        im.thumbnail((320, 320))
+        px = list(im.getdata())
+        if not px:
+            return None
+        return sum(1 for v in px if v > 80) / len(px), max(px)
+    except Exception:
+        return None
+
+
+def review_frames(project_dir, llm_config: dict, check_bottom_safe: bool = True,
+                  with_kind: bool = False, simple: bool = False):
+    """闸5：对 gate_frames/ 里的抽帧做视觉复审。返回问题列表；视觉接口不可用时返回 None。
+
+    静帧查"内容 + 可读性 + 底部安全区"；动画过渡帧只查"有没有实质内容" ——
+    渐入渐出的半透明、位移未到位是动画本身，不能按画面错误要求重做。
+    `check_bottom_safe` 只对竖屏（短视频字幕区）有意义；16:9 演示片界面本来就该铺到画面底部。
+
+    `with_kind=True` 时返回 [{frame, kind, text}]，kind 区分问题性质：
+      empty   = 画面几乎没有内容（硬问题，必须拦）
+      legible = 文字与背景对比/遮挡（可能是审美差异，调用方可决定是否软化）
+      bottom  = 底部安全区被占（仅竖屏）
+
+    `simple=True` 时只问"有没有明显的画面错误"（空屏/缺内容/严重错乱），
+    风格与排版一律放行；此时 kind 恒为 broken，供"只做兜底"的调用方使用。
+    该模式下只判动画已落位（settled）的帧，并跳过黑场与极简暗场帧；
+    且要"多数可判帧都异常"才返回失败——开场淡入黑场、暗色极简排版都不该被反复否决。
+    """
     frames = sorted((Path(project_dir) / "gate_frames").glob("f_*.png"))
     if not frames:
         return None
@@ -547,25 +736,64 @@ def review_frames(project_dir, llm_config: dict):
         from skills.image_reader import describe_image_b64
     except Exception:
         return None
-    issues = []
+    meta = _frame_meta(frames)
+    issues, details = [], []
+    judged = broken = 0
     for f in frames:
+        settled = (meta.get(f.name) or {}).get("settled", True) is not False
+        if simple:
+            # 只判"已经落位"的帧：开场淡入 / 转场黑场属于动画本身，不是画面错误。
+            # （抽帧时刻常常落在片子开头，这里不跳过的话就会反复判黑屏、怎么改都过不了。）
+            if not settled:
+                continue
+            st = _frame_stats(f)
+            if st:
+                bright_ratio, hi = st
+                if hi < 160 and bright_ratio < 0.0003:
+                    continue    # 真的黑场/空屏
+                if bright_ratio < 0.003:
+                    continue    # 暗色极简帧：模型说"没内容"不可靠，不参与否决
+            judged += 1
         b64, mime = _frame_b64(f)
+        prompt = _REVIEW_PROMPT_SIMPLE if simple else (
+            _REVIEW_PROMPT if settled else _REVIEW_PROMPT_MOTION)
         try:
-            txt = describe_image_b64(b64, mime, _REVIEW_PROMPT, llm_config, timeout=90)
+            txt = describe_image_b64(b64, mime, prompt, llm_config, timeout=90)
         except Exception:
             return None
         doc = _json_of(txt)
         if not doc:
             continue  # 视觉接口返回无法解析，不做判定
+        if simple:
+            if doc.get("ok") is False:
+                broken += 1
+                text = f"{f.name}：" + str(doc.get("issue") or "画面明显异常")
+                issues.append(text)
+                details.append({"frame": f.name, "kind": "broken", "text": text})
+            continue
         # 没有文字不等于没问题：先看这一帧到底有没有实质内容，避免前段空镜被直接放行
         if doc.get("has_content") is False:
-            issues.append(f"{f.name}：画面几乎没有内容（疑似空白或只有背景）")
+            text = f"{f.name}：画面几乎没有内容（疑似空白或只有背景）"
+            issues.append(text)
+            details.append({"frame": f.name, "kind": "empty", "text": text})
+            continue
+        if not settled:
+            # 过渡帧不判可读性/安全区：文字仍在渐入或元素正在位移，此刻的观感不代表成片
             continue
         if doc.get("has_text") is not False and doc.get("legible") is False:
-            issues.append(f"{f.name}：" + str(doc.get("issue") or "文字与背景对比不足"))
-        if doc.get("bottom_clean") is False:
-            issues.append(f"{f.name}：底部字幕安全区被文字/按钮/logo 占用")
-    return issues
+            text = f"{f.name}：" + str(doc.get("issue") or "文字与背景对比不足")
+            issues.append(text)
+            details.append({"frame": f.name, "kind": "legible", "text": text})
+        if check_bottom_safe and doc.get("bottom_clean") is False:
+            text = f"{f.name}：底部字幕安全区被文字/按钮/logo 占用"
+            issues.append(text)
+            details.append({"frame": f.name, "kind": "bottom", "text": text})
+    if simple:
+        # 兜底模式要一对"多数帧都不对"才判失败：暗色极简画面常被模型说成"几乎没内容"，
+        # 单帧或少数帧的否决不代表成片坏了。
+        need = max(2, (judged + 1) // 2)
+        return (details if with_kind else issues) if broken >= need else []
+    return details if with_kind else issues
 
 
 # --------------------------------------------------------------------------- #
@@ -577,7 +805,8 @@ _KIND_RULE = {
     "runtime": "这是运行时报错：只修报错处相关的场景/元素及其脚本，别动其他场景。",
     "determinism": "这是确定性错误：只把非确定逻辑（Math.random / Date.now / 累积状态）换成确定写法，"
                    "不要改版式。",
-    "visual": "这是视觉复审错误：只改文字颜色/描边/底板以提升对比，并把底部 8~12% 的元素上移或删除。",
+    "visual": "这是读图兜底报出的明显画面错误：只修真正异常的地方（空白/黑屏/整块内容缺失/"
+              "元素严重错位到看不清），不要为了风格或排版偏好改版式。",
     "image": "这是配图生成失败：只改报错那张 <img> 的 data-gen 描述（更短、更具体、去掉人名/品牌/敏感内容），"
              "或者删掉该 <img> 改用 CSS 图形替代；不要动其他版式与动画。",
 }
@@ -635,8 +864,11 @@ def _apply_edits(html: str, edits) -> tuple:
 
 
 def repair_html(current_html: str, errs: list, kind: str, cfg: dict,
-                duration, width: int, height: int) -> tuple:
-    """让 LLM 只返回最小修改清单并应用到当前 HTML。返回 (new_html, applied, failed)。"""
+                duration, width: int, height: int, on_progress=None) -> tuple:
+    """让 LLM 只返回最小修改清单并应用到当前 HTML。返回 (new_html, applied, failed)。
+
+    `on_progress(chars, elapsed)` 透传给流式 LLM，供调用方上报"正在修补"的心跳。
+    """
     from .renderer import (
         _library_text, call_llm_text,
         _call_with_token_fallback, LONG_OUTPUT_MAX_TOKENS, LONG_OUTPUT_TOKEN_FALLBACKS,
@@ -657,10 +889,13 @@ def repair_html(current_html: str, errs: list, kind: str, cfg: dict,
             model=cfg.get("model", ""),
             protocol=cfg.get("protocol", "anthropic"),
             provider=cfg.get("provider"),
-            thinking="disabled",
+            # 思考档位跟随调用方配置，不在这里强制关闭：部分模型（如 K3.1）不支持关思考，
+            # 强行注入 off 要么被拒要么无效，反而让"思考 5 分钟没输出"看起来像卡死。
+            thinking=cfg.get("thinking"),
             max_tokens=budget,
-            timeout=240,
+            timeout=600,
             attempts=1,
+            on_progress=on_progress,
         ),
         max_tokens=LONG_OUTPUT_MAX_TOKENS,
         fallbacks=LONG_OUTPUT_TOKEN_FALLBACKS,

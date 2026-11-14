@@ -1,6 +1,7 @@
 const path = require('path')
 const fs = require('fs')
 const { spawn } = require('child_process')
+const { Readable } = require('stream')
 
 let chokidar = null
 try { chokidar = require('chokidar') } catch (e) { console.error('[Electron] chokidar not available:', e.message) }
@@ -27,6 +28,29 @@ try {
 
 app.setPath('userData', path.join(process.cwd(), '.electron-user-data'))
 app.commandLine.appendSwitch('no-sandbox')
+
+// sigma-file:// 必须在 app ready 之前声明特权：stream 让 <video>/<audio> 能按
+// Range 流式读取，supportFetchAPI 允许 fetch。这里刻意不声明 standard ——
+// 它会让 Chromium 规范化 URL，把 Windows 路径里的反斜杠改写掉，导致找不到文件。
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'sigma-file',
+    privileges: {
+      supportFetchAPI: true,
+      stream: true,
+      bypassCSP: true,
+      corsEnabled: true,
+    },
+  },
+])
+
+const hasSingleInstanceLock = app.requestSingleInstanceLock()
+if (!hasSingleInstanceLock) {
+  app.quit()
+}
+app.on('second-instance', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) showMainWindow()
+})
 
 let pythonProcess = null
 let mainWindow = null
@@ -214,6 +238,9 @@ function getFileType(ext) {
 }
 
 // ── sigma-file:// 协议辅助 ──
+
+// 单次 Range 响应的最大字节数；播放器会按需继续请求后续分块。
+const MAX_MEDIA_CHUNK = 4 * 1024 * 1024
 
 const SIGMA_FILE_MIME_TYPES = {
   '.mp4': 'video/mp4',
@@ -420,10 +447,102 @@ function createMainWindow() {
     }
   })
 
+  // SIGMA_DIAGNOSTICS=1 时把渲染进程的 console 转发到主进程输出，
+  // 用于排查 Electron/Chromium 升级后的运行时兼容告警。
+  if (process.env.SIGMA_DIAGNOSTICS === '1') {
+    // Electron 44 起旧的 (...args) 形式已弃用，统一用事件对象形式
+    mainWindow.webContents.on('console-message', (details) => {
+      console.log(`[renderer:${details.level}] ${details.message} (${details.sourceId}:${details.lineNumber})`)
+    })
+    mainWindow.webContents.on('preload-error', (_e, preloadPath, error) => {
+      console.log(`[preload-error] ${preloadPath}: ${error && error.message}`)
+    })
+  }
+
   mainWindow.on('closed', () => { mainWindow = null; stopFileWatcher() })
 }
 
 // ── System Tray & Computer Use Mode ──
+
+let mcpControlServer = null
+let mcpDesktopReady = false
+
+async function startMcpControlServer() {
+  const http = require('http')
+  if (mcpControlServer) return
+  mcpControlServer = http.createServer(async (req, res) => {
+    const remote = req.socket.remoteAddress
+    if (remote !== '127.0.0.1' && remote !== '::1' && remote !== '::ffff:127.0.0.1') {
+      res.writeHead(403); res.end(JSON.stringify({ success: false, error: 'local-only' })); return
+    }
+    if (req.method === 'GET' && req.url === '/mcp/status') {
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ success: true, ready: mcpDesktopReady, backendUrl: BACKEND_URL }))
+      return
+    }
+    if (req.method !== 'POST' || req.url !== '/mcp/activate') {
+      res.writeHead(404); res.end(); return
+    }
+    if (!String(req.headers['content-type'] || '').includes('application/json')) {
+      res.writeHead(415, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ success: false, error: 'application/json required' }))
+      return
+    }
+    let raw = ''
+    for await (const chunk of req) {
+      raw += chunk
+      if (raw.length > 8192) {
+        res.writeHead(413); res.end(JSON.stringify({ success: false, error: 'request too large' })); return
+      }
+    }
+    let body
+    try { body = JSON.parse(raw || '{}') } catch {
+      res.writeHead(400); res.end(JSON.stringify({ success: false, error: 'invalid json' })); return
+    }
+    const workspace = typeof body.workspace_path === 'string' ? path.resolve(body.workspace_path) : ''
+    if (!workspace || !fs.existsSync(workspace) || !fs.statSync(workspace).isDirectory()) {
+      res.writeHead(400); res.end(JSON.stringify({ success: false, error: 'workspace_path must be an existing directory' })); return
+    }
+    if (!app.isReady()) {
+      res.writeHead(503, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ success: false, error: 'Sigma Electron is still starting' }))
+      return
+    }
+    const workspaceResult = await setMcpWorkspace(workspace)
+    if (!workspaceResult.success) {
+      res.writeHead(400, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(workspaceResult))
+      return
+    }
+    showMainWindow()
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ success: true, workspace_path: workspaceResult.data }))
+  })
+  mcpControlServer.on('error', err => {
+    console.error('[MCP Control] Server error:', err.message)
+    if (err.code === 'EADDRINUSE') {
+      console.error('[MCP Control] Port 8766 is already in use; MCP activation is unavailable for this instance.')
+    }
+    mcpControlServer = null
+  })
+  mcpControlServer.listen(8766, '127.0.0.1')
+}
+
+async function setMcpWorkspace(requestedPath) {
+  try {
+    if (typeof requestedPath !== 'string' || !path.isAbsolute(requestedPath)) return { success: false, error: 'Workspace path must be absolute' }
+    const workspace = path.resolve(requestedPath)
+    if (!fs.existsSync(workspace) || !fs.statSync(workspace).isDirectory()) return { success: false, error: 'Workspace directory not found' }
+    const changed = path.resolve(currentWorkingDir).toLowerCase() !== workspace.toLowerCase()
+    currentWorkingDir = workspace
+    workspaceDirs = [workspace]
+    if (changed) saveWorkingDirectory(workspace)
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('directory-changed', { path: workspace, changed })
+    }
+    return { success: true, data: workspace }
+  } catch (err) { return { success: false, error: err.message } }
+}
 
 function showMainWindow() {
   if (!mainWindow || mainWindow.isDestroyed()) createMainWindow()
@@ -507,9 +626,25 @@ function exitComputerUseMode(showMain = true) {
 
 // ── IPC Handlers ──
 
+// 视频/音频优先交给 Chromium 原生 file:// loader：它支持随机访问，moov 位于
+// 文件末尾的 mp4 也能正常 seek 播放。自定义协议在较新的 Chromium 上会被判定
+// 为不可 seek，这类视频会以 MEDIA_ERR_SRC_NOT_SUPPORTED 失败，而 faststart
+// （moov 在前）的文件因为顺序读就能解析，表面看起来“有的能播有的不能”。
+const MEDIA_EXTENSIONS = new Set([
+  '.mp4', '.webm', '.mov', '.m4v', '.ogv', '.mkv', '.avi', '.wmv', '.flv',
+  '.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg', '.oga', '.opus', '.wma', '.aif', '.aiff',
+])
+
 ipcMain.handle('get-file-url', async (event, filePath) => {
-  // 将本地路径转换为 sigma-file:// 协议 URL
   const fp = path.isAbsolute(filePath) ? filePath : path.join(currentWorkingDir, filePath)
+  // 打包模式页面本身就是 file:// 来源，同 scheme 加载本地媒体是被允许的。
+  if (MEDIA_EXTENSIONS.has(path.extname(fp).toLowerCase())) {
+    let pageUrl = ''
+    try { pageUrl = event.sender.getURL() } catch {}
+    if (pageUrl.startsWith('file://')) {
+      return { success: true, data: `file:///${encodeURI(fp.replace(/\\/g, '/'))}` }
+    }
+  }
   return { success: true, data: `sigma-file:///${encodeURI(fp)}` }
 })
 
@@ -733,6 +868,8 @@ ipcMain.handle('file-write', async (event, filePath, content) => {
 })
 
 ipcMain.handle('get-working-directory', async () => ({ success: true, data: currentWorkingDir }))
+
+ipcMain.handle('mcp-set-workspace', async (_event, requestedPath) => setMcpWorkspace(requestedPath))
 
 ipcMain.handle('select-folder', async () => {
   const result = await dialog.showOpenDialog({
@@ -1135,6 +1272,7 @@ ipcMain.handle('convert-pptx', async (event, filePath) => {
 // ── App Lifecycle ──
 
 app.whenReady().then(async () => {
+  if (!hasSingleInstanceLock) return
   // 注册 sigma-file:// 自定义协议，用于视频/PDF 等大型二进制文件流式加载
   // 手动处理 MIME 类型 + Range 请求，保证 <video> 能正常播放/拖动进度，以及 PDF 大文件能被 iframe 加载
   protocol.handle('sigma-file', (request) => {
@@ -1157,12 +1295,11 @@ app.whenReady().then(async () => {
           if (start > end || start >= stat.size) {
             return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${stat.size}` } })
           }
+          // 开放式区间（bytes=N-）必须有块上限：播放器并发请求多个区间时，
+          // 若每个响应都灌整段剩余数据，FFmpegDemuxer 会读错并中断播放。
+          if (end - start + 1 > MAX_MEDIA_CHUNK) end = Math.min(start + MAX_MEDIA_CHUNK - 1, stat.size - 1)
           const chunkSize = end - start + 1
-          const fd = fs.openSync(filePath, 'r')
-          const buf = Buffer.alloc(chunkSize)
-          fs.readSync(fd, buf, 0, chunkSize, start)
-          fs.closeSync(fd)
-          return new Response(new Uint8Array(buf), {
+          return new Response(Readable.toWeb(fs.createReadStream(filePath, { start, end })), {
             status: 206,
             headers: {
               'Content-Type': mime,
@@ -1174,8 +1311,7 @@ app.whenReady().then(async () => {
         }
       }
 
-      const data = fs.readFileSync(filePath)
-      return new Response(new Uint8Array(data), {
+      return new Response(Readable.toWeb(fs.createReadStream(filePath)), {
         headers: {
           'Content-Type': mime,
           'Content-Length': String(stat.size),
@@ -1194,6 +1330,7 @@ app.whenReady().then(async () => {
 
   // Show splash screen
   createSplashWindow()
+  startMcpControlServer()
 
   // Start backend BEFORE creating main window, so frontend doesn't fail on first fetch
   updateSplash('backend', 'Starting Python backend...', false)
@@ -1206,6 +1343,7 @@ app.whenReady().then(async () => {
 
   // Create main window (hidden) — backend is already ready
   createMainWindow()
+  mcpDesktopReady = true
   let splashDone = false
   const splashMinTime = new Promise(r => setTimeout(r, 5000))
   mainWindow.once('ready-to-show', async () => {
